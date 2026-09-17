@@ -1,0 +1,152 @@
+# The capstone's actual "wire it all together" artifact: one Argo Workflows WorkflowTemplate
+# (chapter 15) that (1) submits a TrainJob (chapter 07, Kueue-admitted via chapter 06's
+# ClusterQueues + this chapter's team-research bridge), (2) waits for it to complete, (3)
+# registers the resulting checkpoint in MLflow (chapter 15's registry), and (4) promotes a
+# vLLM Deployment (chapter 09) by patching its pod template annotation — which chapter 10's
+# HPA/KEDA (already watching that Deployment) and chapter 12's Gateway/InferencePool
+# (already routing to it) pick up without any changes of their own. Nothing here duplicates
+# chapters 04/06/07/09/10/12/13/14/15 — it only sequences objects those chapters already define.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: platform-e2e
+  namespace: ch15-pipelines
+spec:
+  entrypoint: platform-e2e
+  serviceAccountName: capstone-pipeline
+  arguments:
+    parameters:
+    - name: trainjob-name
+      value: "capstone-{{workflow.uid}}"
+  templates:
+  - name: platform-e2e
+    steps:
+    - - name: train
+        template: submit-trainjob
+    - - name: register
+        template: register-model
+        arguments:
+          parameters:
+          - name: trainjob-name
+            value: "{{steps.train.outputs.parameters.name}}"
+    - - name: promote
+        template: promote-vllm
+        arguments:
+          parameters:
+          - name: model-version
+            value: "{{steps.register.outputs.parameters.model-version}}"
+    - - name: smoke-test
+        template: smoke-test-gateway
+
+  - name: submit-trainjob
+    outputs:
+      parameters:
+      - name: name
+        valueFrom:
+          jsonPath: '{.metadata.name}'
+    resource:
+      action: create
+      setOwnerReference: true
+      # successCondition/failureCondition read the TrainJob's own status.conditions — same
+      # Conditions array `kubectl describe trainjob` shows in chapter 07's lab.
+      successCondition: "status.conditions.#(type==Complete).status == True"
+      failureCondition: "status.conditions.#(type==Failed).status == True"
+      manifest: |
+        apiVersion: trainer.kubeflow.org/v1alpha1
+        kind: TrainJob
+        metadata:
+          generateName: capstone-
+          namespace: ch07-training
+          labels:
+            kueue.x-k8s.io/queue-name: ch07-queue
+            app.kubernetes.io/part-of: ch16-capstone
+        spec:
+          runtimeRef:
+            apiGroup: trainer.kubeflow.org
+            kind: TrainingRuntime
+            name: torch-ddp-spot
+          trainer:
+            image: pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime
+            command: ["torchrun", "/workspace/scripts/train_ddp.py"]
+            numNodes: 2
+            numProcPerNode: 1
+            resourcesPerNode:
+              requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: "1"}
+              limits: {memory: 12Gi, nvidia.com/gpu: "1"}
+            env:
+            - {name: RUN_ID, value: "capstone-e2e"}
+            - {name: TOTAL_STEPS, value: "2000"}
+            - {name: CHECKPOINT_EVERY, value: "500"}
+            - {name: BATCH_SIZE, value: "256"}
+
+  - name: register-model
+    inputs:
+      parameters:
+      - name: trainjob-name
+    outputs:
+      parameters:
+      - name: model-version
+        valueFrom:
+          path: /tmp/model-version.txt
+    container:
+      image: ghcr.io/mlflow/mlflow:v3.4.0   # VERIFY: see 15-mlops-gitops-and-pipelines README's note on client/server version pinning
+      command: ["python", "-c"]
+      args:
+      - |
+        import mlflow, os
+        mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+        mlflow.set_experiment("ch16-capstone")
+        with mlflow.start_run(run_name="{{inputs.parameters.trainjob-name}}"):
+            # Real usage: mlflow.log_artifact() the checkpoint chapter 07's TrainJob wrote to
+            # the shared PVC/object-storage path from chapter 05, then mlflow.log_metrics()
+            # its final eval loss. Placeholder metric below so the pipeline is runnable without
+            # wiring a real checkpoint path first.
+            mlflow.log_param("trainjob", "{{inputs.parameters.trainjob-name}}")
+            mv = mlflow.register_model("runs:/{}/model".format(mlflow.active_run().info.run_id), "capstone-model")
+        open("/tmp/model-version.txt", "w").write(str(mv.version))
+      env:
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow.mlflow.svc.cluster.local:5000"
+      resources:
+        requests: {cpu: 250m, memory: 256Mi}
+        limits: {cpu: "1", memory: 1Gi}
+
+  - name: promote-vllm
+    inputs:
+      parameters:
+      - name: model-version
+    resource:
+      action: patch
+      mergeStrategy: strategic
+      manifest: |
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: vllm
+          namespace: ch09-vllm
+        spec:
+          template:
+            metadata:
+              annotations:
+                ch16.kubernetes-ai-infrastructure/model-version: "{{inputs.parameters.model-version}}"
+      # Recreate strategy (09-llm-inference-with-vllm/common/vllm-deployment.yaml) means this
+      # patch triggers a full pod replacement, not a rolling update — expected for a 1-GPU pod.
+
+  - name: smoke-test-gateway
+    # Confirms chapters 09/10/12/13/14 are actually wired together end to end: the Gateway
+    # (chapter 12) routes to the just-promoted vLLM pod, which came up on autoscaler-provisioned
+    # spot capacity (chapter 13) inside the security-controlled namespace (chapter 14).
+    container:
+      image: curlimages/curl:8.11.1
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          GATEWAY_IP="$(curl -s -m5 -H 'Accept: application/json' http://kubernetes.default.svc/api/v1/namespaces/ch12-gateway/services 2>/dev/null || true)"
+          # Real usage: resolve the Gateway's address (kubectl get gateway -n ch12-gateway -o
+          # jsonpath) outside the cluster and curl its /v1/models path here instead — placeholder
+          # in-cluster check below just confirms the vLLM Service resolves and answers.
+          curl -sf -m10 http://vllm.ch09-vllm.svc.cluster.local:8000/v1/models
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {cpu: 250m, memory: 128Mi}

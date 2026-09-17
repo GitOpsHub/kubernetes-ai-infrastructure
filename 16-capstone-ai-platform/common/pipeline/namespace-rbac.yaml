@@ -1,0 +1,58 @@
+# The capstone pipeline runs as a ServiceAccount in ch15-pipelines (chapter 15's Argo Workflows
+# namespace) but its `resource` steps create/read objects in ch07-training and patch ch09-vllm —
+# genuinely cross-namespace, unlike chapter 15's own train-and-register example. Grant exactly
+# the verbs each step needs, nothing wider (same "no self-escalation" posture as chapter 14's
+# tenant Roles).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capstone-pipeline
+  namespace: ch15-pipelines
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: capstone-trainjob-submitter
+  namespace: ch07-training
+rules:
+- apiGroups: ["trainer.kubeflow.org"]
+  resources: ["trainjobs"]
+  verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: capstone-trainjob-submitter
+  namespace: ch07-training
+subjects:
+- kind: ServiceAccount
+  name: capstone-pipeline
+  namespace: ch15-pipelines
+roleRef:
+  kind: Role
+  name: capstone-trainjob-submitter
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: capstone-vllm-promoter
+  namespace: ch09-vllm
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: capstone-vllm-promoter
+  namespace: ch09-vllm
+subjects:
+- kind: ServiceAccount
+  name: capstone-pipeline
+  namespace: ch15-pipelines
+roleRef:
+  kind: Role
+  name: capstone-vllm-promoter
+  apiGroup: rbac.authorization.k8s.io
