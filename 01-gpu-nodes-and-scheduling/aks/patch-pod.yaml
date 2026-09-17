@@ -1,0 +1,15 @@
+- op: add
+  path: /spec/nodeSelector
+  value:
+    kubernetes.azure.com/scalesetpriority: spot
+    nvidia.com/gpu.present: "true"      # label we put on the gpuspot pool with --labels
+- op: add
+  path: /spec/tolerations
+  value:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  - key: kubernetes.azure.com/scalesetpriority   # added automatically by AKS on spot pools
+    operator: Equal
+    value: spot
+    effect: NoSchedule

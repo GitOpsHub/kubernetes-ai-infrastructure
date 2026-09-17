@@ -1,0 +1,15 @@
+# Shared by the GPU lab (../) and the CPU lab (../../cpu-lab/base):
+# namespace, service account, training script and the spot-aware TrainingRuntime.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch07-training
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - trainingruntime-torch-ddp-spot.yaml
+configMapGenerator:
+  - name: ddp-train-script
+    files:
+      - train_ddp.py
+    options:
+      disableNameSuffixHash: true   # TrainJob references it by a fixed name

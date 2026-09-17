@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-bucket-blob
+  annotations:
+    pv.kubernetes.io/provisioned-by: blob.csi.azure.com
+spec:
+  accessModes: ["ReadWriteMany"]
+  capacity:
+    storage: 64Gi
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: ch05-models
+    name: model-bucket
+  mountOptions:
+    - -o allow_other
+    - --file-cache-timeout-in-seconds=120
+    - --use-attr-cache=true
+    - --cancel-list-on-mount-seconds=10
+    - -o attr_timeout=120
+    - -o entry_timeout=120
+    - -o negative_timeout=10       # short: readers must notice the _COMPLETE marker appearing
+    - --log-level=LOG_WARNING
+  csi:
+    driver: blob.csi.azure.com
+    # {resource-group}#{account}#{container} – must be unique per container in the cluster
+    volumeHandle: "RG#ACCOUNT#CONTAINER"
+    volumeAttributes:
+      protocol: fuse2                     # blobfuse2
+      resourceGroup: REPLACED_BY_KUSTOMIZE
+      storageAccount: REPLACED_BY_KUSTOMIZE
+      containerName: REPLACED_BY_KUSTOMIZE
+      # Workload identity: the driver exchanges the *pod's* ServiceAccount token for this identity.
+      clientID: REPLACED_BY_KUSTOMIZE
+      # Least-privilege alternative (preview): mount with the WI token itself instead of fetching
+      # the account key. Needs "Storage Blob Data Contributor/Reader" instead of "Storage Account Contributor".
+      # Token expires after 24h – long-running pods must be remounted.
+      # mountWithWorkloadIdentityToken: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-bucket
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: ""
+  volumeName: model-bucket-blob
+  resources:
+    requests:
+      storage: 64Gi

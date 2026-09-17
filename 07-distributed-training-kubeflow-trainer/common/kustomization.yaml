@@ -1,0 +1,8 @@
+# Cloud-agnostic base for the GPU lab. Do not apply directly: use ../gke, ../eks or ../aks,
+# which add the bucket-backed checkpoint PVC and spot GPU placement.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch07-training
+resources:
+  - base
+  - trainjob-ddp-gpu.yaml

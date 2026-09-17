@@ -1,0 +1,20 @@
+- op: add
+  path: /spec/runtimePatches
+  value:
+    - manager: ch07.lab/cloud-overlay
+      trainingRuntimeSpec:
+        template:
+          spec:
+            replicatedJobs:
+              - name: node
+                template:
+                  spec:
+                    template:
+                      spec:
+                        nodeSelector:
+                          eks.amazonaws.com/capacityType: SPOT   # set automatically on managed node groups
+                          ch07.lab/gpu: l4                       # set by create-gpu-nodegroup.sh (spot + on-demand)
+                        tolerations:
+                          - key: nvidia.com/gpu                  # taint added by create-gpu-nodegroup.sh
+                            operator: Exists
+                            effect: NoSchedule

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-from-pvc
+  labels:
+    app: qwen-from-pvc
+spec:
+  replicas: 2            # both replicas read the same RWX volume
+  selector:
+    matchLabels:
+      app: qwen-from-pvc
+  template:
+    metadata:
+      labels:
+        app: qwen-from-pvc
+    spec:
+      serviceAccountName: model-reader
+      initContainers:
+        - name: wait-for-model
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            - until [ -f "/models/${MODEL_SUBDIR}/_COMPLETE" ]; do echo waiting; sleep 10; done
+          envFrom:
+            - configMapRef: {name: model-coordinates}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+          volumeMounts:
+            - {name: cache, mountPath: /models, readOnly: true}
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.29.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec vllm serve "/models/${MODEL_SUBDIR}" --served-model-name "${MODEL_NAME}" --host 0.0.0.0 --port 8000 --max-model-len 4096 --dtype bfloat16
+          envFrom:
+            - configMapRef: {name: model-coordinates}
+          env:
+            - {name: VLLM_CPU_KVCACHE_SPACE, value: "2"}
+            - {name: HF_HUB_OFFLINE, value: "1"}
+          ports:
+            - {name: http, containerPort: 8000}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {memory: 10Gi}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          volumeMounts:
+            - {name: cache, mountPath: /models, readOnly: true}
+            - {name: dshm, mountPath: /dev/shm}
+      volumes:
+        - name: cache
+          persistentVolumeClaim: {claimName: model-cache, readOnly: true}
+        - name: dshm
+          emptyDir: {medium: Memory, sizeLimit: 1Gi}

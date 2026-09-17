@@ -1,0 +1,56 @@
+# Populate the shared cache. On a POSIX file system hf download can write in place
+# (temp file + rename is fine), so no scratch copy is needed – unlike object-storage mounts.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate-model-cache
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 3600
+  podFailurePolicy:
+    rules:
+      - action: Ignore                 # spot reclaim → retry without consuming backoffLimit
+        onPodConditions:
+          - type: DisruptionTarget
+  template:
+    metadata:
+      labels:
+        app: populate-model-cache
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: download
+          image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              DEST="/cache/${MODEL_SUBDIR}"
+              [ -f "${DEST}/_COMPLETE" ] && { echo "already cached"; exit 0; }
+              # hf download is resumable: a retried pod after a spot reclaim continues where it stopped
+              time uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
+                --revision "${MODEL_REVISION}" --local-dir "${DEST}" \
+                --exclude "*.md" --exclude ".gitattributes"
+              date -u +%Y-%m-%dT%H:%M:%SZ > "${DEST}/_COMPLETE"
+              du -sh "${DEST}"
+          envFrom:
+            - configMapRef:
+                name: model-coordinates
+          env:
+            - name: UV_CACHE_DIR
+              value: /tmp/uv-cache
+            - name: HF_HOME
+              value: /tmp/hf-home
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+          resources:
+            requests: {cpu: "1", memory: 1Gi}
+            limits: {memory: 2Gi}
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: model-cache

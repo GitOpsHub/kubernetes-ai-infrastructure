@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-from-bucket
+spec:
+  selector:
+    app: qwen-from-bucket
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

@@ -1,0 +1,51 @@
+# eksctl ClusterConfig: spot-first lab cluster.
+# Render-time substitution: create-cluster.sh runs envsubst on ${EKS_CLUSTER} / ${AWS_REGION}.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${EKS_CLUSTER}
+  region: ${AWS_REGION}
+  version: "1.35"
+  tags:
+    project: k8s-ai-lab
+
+iam:
+  withOIDC: true              # needed later for IRSA; Pod Identity agent added below too
+
+addons:
+- name: vpc-cni
+- name: coredns
+- name: kube-proxy
+- name: eks-pod-identity-agent
+
+managedNodeGroups:
+# Small spot CPU pool for system + course controllers. Diversify instance types:
+# spot capacity is per type per AZ, more types = fewer "InsufficientInstanceCapacity" failures.
+- name: spot-cpu
+  amiFamily: AmazonLinux2023
+  instanceTypes: ["m6i.large", "m5.large", "m5a.large", "m7i.large", "t3.large", "t3a.large"]
+  spot: true
+  minSize: 1
+  desiredCapacity: 2
+  maxSize: 4
+  volumeSize: 50
+  labels:
+    workload: general
+
+# Spot GPU pool, created at 0 nodes. eksctl picks the EKS-optimized AL2023 NVIDIA AMI
+# automatically for GPU instance types (driver + container toolkit preinstalled).
+- name: spot-gpu
+  amiFamily: AmazonLinux2023
+  instanceTypes: ["g6.xlarge", "g4dn.xlarge"]   # L4 / T4, 4 vCPU each
+  spot: true
+  minSize: 0
+  desiredCapacity: 0
+  maxSize: 1
+  volumeSize: 100
+  labels:
+    workload: gpu
+  taints:
+  - key: nvidia.com/gpu
+    value: "present"
+    effect: NoSchedule
+  propagateASGTags: true      # copies labels/taints to ASG tags so Cluster Autoscaler can scale from 0

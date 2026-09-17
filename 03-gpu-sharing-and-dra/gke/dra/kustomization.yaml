@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# DRA picks the node through the claim; the nodeSelector only documents intent (spot pool).
+resources:
+  - ../../common/dra
+patches:
+  - target:
+      kind: (Job|Deployment)
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          cloud.google.com/gke-spot: "true"
+  - target:
+      kind: Pod
+    patch: |-
+      - op: add
+        path: /spec/nodeSelector
+        value:
+          cloud.google.com/gke-spot: "true"

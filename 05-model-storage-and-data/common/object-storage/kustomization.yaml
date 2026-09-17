@@ -1,0 +1,10 @@
+# Pattern (c): model weights live in an object-storage bucket, mounted into pods by a CSI driver.
+# This base expects a PVC named "model-bucket" – each cloud overlay provides the PV/PVC.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch05-models
+resources:
+  - ../base
+  - upload-job.yaml
+  - serve-deployment.yaml
+  - service.yaml

@@ -1,0 +1,39 @@
+# Static PV: volumeHandle = bucket name (injected from bucket.env by kustomize replacements).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-bucket-gcs
+spec:
+  accessModes: ["ReadWriteMany"]
+  capacity:
+    storage: 64Gi                  # ignored by the driver, required by Kubernetes
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: ch05-models
+    name: model-bucket
+  mountOptions:
+    - implicit-dirs
+    # metadata cache: keep a finite TTL so readers notice the _COMPLETE marker the uploader writes
+    - metadata-cache:ttl-secs:60
+    # file cache + parallel downloads: big win for multi-GB safetensors read once at startup
+    - file-cache:max-size-mb:-1
+    - file-cache:cache-file-for-range-read:true
+    - file-cache:enable-parallel-downloads:true
+  csi:
+    driver: gcsfuse.csi.storage.gke.io
+    volumeHandle: REPLACED_BY_KUSTOMIZE
+    volumeAttributes:
+      gcsfuseLoggingSeverity: warning
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-bucket
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: ""
+  volumeName: model-bucket-gcs
+  resources:
+    requests:
+      storage: 64Gi

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-init-download
+spec:
+  selector:
+    app: qwen-init-download
+  ports:
+    - {name: http, port: 8000, targetPort: http}

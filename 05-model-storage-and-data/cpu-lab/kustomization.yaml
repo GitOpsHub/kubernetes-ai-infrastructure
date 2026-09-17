@@ -1,0 +1,6 @@
+# CPU lab – runs on any cluster (kind, minikube, or a spot CPU pool on GKE/EKS/AKS) with no cloud IAM.
+# Default: pattern (a) init-container download. For pattern (b) with an RWO PVC: kubectl apply -k cpu-lab/pvc-cache
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - init-container

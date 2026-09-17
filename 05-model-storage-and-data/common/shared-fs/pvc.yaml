@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: set-by-overlay
+  resources:
+    requests:
+      storage: 100Gi

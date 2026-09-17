@@ -1,0 +1,38 @@
+# Each Pod created from this template gets its OWN ResourceClaim -> its own exclusive GPU.
+# This is the DRA equivalent of `resources.limits: nvidia.com/gpu: 1`.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: single-gpu
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.nvidia.com   # created by the NVIDIA DRA driver chart
+            count: 1
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dra-single-gpu
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: single-gpu
+      containers:
+        - name: cuda
+          image: nvidia/cuda:12.9.1-base-ubuntu24.04
+          command: ["bash", "-c", "nvidia-smi -L && sleep 60"]
+          resources:
+            claims:
+              - name: gpu   # no nvidia.com/gpu limit: the claim is the request

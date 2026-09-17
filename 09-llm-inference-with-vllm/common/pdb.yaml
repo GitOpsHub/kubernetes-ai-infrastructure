@@ -1,0 +1,14 @@
+# PDBs only guard VOLUNTARY disruptions (node drain, cluster-autoscaler scale-down,
+# node upgrades). A spot preemption is involuntary: the PDB cannot stop it.
+# With replicas: 1 this PDB blocks voluntary drains of the node running the only replica,
+# so plan upgrades (scale to 2 first). AlwaysAllow lets a crash-looping pod be evicted anyway.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm
+spec:
+  minAvailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm

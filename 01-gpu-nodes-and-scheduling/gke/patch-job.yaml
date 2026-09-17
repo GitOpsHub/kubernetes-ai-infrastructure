@@ -1,0 +1,13 @@
+- op: add
+  path: /spec/template/spec/nodeSelector
+  value:
+    cloud.google.com/gke-accelerator: nvidia-l4   # change to nvidia-tesla-t4 if you created a T4 pool
+    cloud.google.com/gke-spot: "true"
+# GKE taints GPU nodes nvidia.com/gpu=present:NoSchedule and its ExtendedResourceToleration admission
+# adds this toleration to GPU-requesting pods automatically; explicit is clearer and portable.
+- op: add
+  path: /spec/template/spec/tolerations
+  value:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule

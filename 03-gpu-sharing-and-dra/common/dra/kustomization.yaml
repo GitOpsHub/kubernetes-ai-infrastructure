@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# DRA (resource.k8s.io/v1, GA in Kubernetes 1.34+) workloads for the NVIDIA DRA driver.
+# Requires: DRA driver installed (see <cloud>/install-dra-driver.sh) and NO NVIDIA device
+# plugin running on the same nodes.
+namespace: ch03-gpu-sharing
+resources:
+  - ../namespace
+  - 01-single-gpu.yaml
+  - 02-shared-claim.yaml
+  - 03-cel-selector.yaml
+  - 04-timeslicing-config.yaml

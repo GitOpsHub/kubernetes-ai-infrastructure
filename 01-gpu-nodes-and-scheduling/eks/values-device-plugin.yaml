@@ -1,0 +1,11 @@
+# nvdp/nvidia-device-plugin chart values for EKS AL2023 NVIDIA AMI nodes.
+# The chart's default affinity already matches nvidia.com/gpu.present=true (set by nodeadm),
+# and its default tolerations include nvidia.com/gpu:NoSchedule. We restate tolerations explicitly.
+tolerations:
+- key: CriticalAddonsOnly
+  operator: Exists
+- key: nvidia.com/gpu
+  operator: Exists
+  effect: NoSchedule
+gfd:
+  enabled: false        # GPU Feature Discovery labels come in 02-nvidia-gpu-operator / 03-gpu-sharing-and-dra

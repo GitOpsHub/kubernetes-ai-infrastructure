@@ -1,0 +1,28 @@
+# Runs a real CUDA kernel (vector addition) on the GPU. A Job, so a spot preemption mid-run is retried.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cuda-vectoradd
+  labels:
+    app: gpu-smoke
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  # podFailurePolicy could ignore DisruptionTarget (spot preemption) so it doesn't count toward
+  # backoffLimit. Covered in 06-batch-jobs-and-kueue.
+  template:
+    metadata:
+      labels:
+        app: gpu-smoke
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: vectoradd
+        image: nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 512Mi

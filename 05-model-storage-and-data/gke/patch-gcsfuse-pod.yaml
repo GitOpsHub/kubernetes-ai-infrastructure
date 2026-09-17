@@ -1,0 +1,13 @@
+- op: add
+  path: /spec/template/metadata/annotations
+  value:
+    gke-gcsfuse/volumes: "true"
+    # "0" = no limit on the injected sidecar (Standard clusters only; Autopilot needs explicit values).
+    gke-gcsfuse/cpu-limit: "0"
+    gke-gcsfuse/memory-limit: "0"
+    # file cache lives in an emptyDir on node ephemeral storage by default – must exceed file-cache size
+    gke-gcsfuse/ephemeral-storage-limit: "0"
+- op: add
+  path: /spec/template/spec/nodeSelector
+  value:
+    cloud.google.com/gke-spot: "true"

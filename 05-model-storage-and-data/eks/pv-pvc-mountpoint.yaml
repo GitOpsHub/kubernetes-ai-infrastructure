@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-bucket-s3
+spec:
+  accessModes: ["ReadWriteMany"]
+  capacity:
+    storage: 64Gi                  # ignored, required
+  storageClassName: ""
+  claimRef:
+    namespace: ch05-models
+    name: model-bucket
+  mountOptions:
+    # Mountpoint defaults: new files may be written, existing files can't be overwritten or deleted.
+    # That is exactly what an immutable models/<name>/<revision>/ layout wants.
+    - allow-other            # let non-root containers read the mount
+    # region is discovered from the bucket; add "region <region>" to skip the lookup
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: ch05-model-bucket          # must be unique per PV in the cluster
+    volumeAttributes:
+      bucketName: REPLACED_BY_KUSTOMIZE
+      # Use the *pod's* ServiceAccount (model-writer / model-reader) via EKS Pod Identity,
+      # instead of one driver-wide role for every pod in the cluster.
+      authenticationSource: pod
+      # Optional local cache (helps repeated reads; model load is a one-time sequential read):
+      # cache: emptyDir
+      # cacheEmptyDirSizeLimit: 4Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-bucket
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: ""
+  volumeName: model-bucket-s3
+  resources:
+    requests:
+      storage: 64Gi

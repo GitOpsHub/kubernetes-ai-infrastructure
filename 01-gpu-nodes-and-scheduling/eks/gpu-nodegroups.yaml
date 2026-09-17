@@ -1,0 +1,42 @@
+# GPU managed node groups for an existing eksctl cluster (metadata must match the cluster).
+# create-gpu-nodegroup.sh envsubsts ${EKS_CLUSTER} and ${AWS_REGION}.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${EKS_CLUSTER}
+  region: ${AWS_REGION}
+
+managedNodeGroups:
+# Spot first. amiFamily AmazonLinux2023 + GPU instance types => EKS-optimized AL2023 *NVIDIA* AMI
+# (driver, CUDA user-mode driver, nvidia-container-toolkit preinstalled; NO device plugin).
+- name: spot-gpu
+  amiFamily: AmazonLinux2023
+  instanceTypes: ["g6.xlarge", "g4dn.xlarge"]
+  spot: true
+  minSize: 0
+  desiredCapacity: 0
+  maxSize: 1
+  volumeSize: 100
+  labels:
+    workload: gpu
+  taints:
+  - key: nvidia.com/gpu
+    value: "present"
+    effect: NoSchedule
+  propagateASGTags: true
+
+# On-demand fallback: same shape, created only with INCLUDE=ondemand-gpu.
+- name: ondemand-gpu
+  amiFamily: AmazonLinux2023
+  instanceTypes: ["g6.xlarge"]
+  minSize: 0
+  desiredCapacity: 0
+  maxSize: 1
+  volumeSize: 100
+  labels:
+    workload: gpu
+  taints:
+  - key: nvidia.com/gpu
+    value: "present"
+    effect: NoSchedule
+  propagateASGTags: true

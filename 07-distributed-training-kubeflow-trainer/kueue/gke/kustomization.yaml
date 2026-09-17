@@ -1,0 +1,16 @@
+# GKE + Kueue:  kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/gke
+# Removes the hard spot nodeSelector so Kueue's ResourceFlavor (spot or on-demand
+# fallback) decides the capacity type; keeps the GPU type selector and tolerations.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../gke
+components:
+  - ../../common/kueue
+patches:
+  - target:
+      group: trainer.kubeflow.org
+      kind: TrainJob
+    patch: |-
+      - op: remove
+        path: /spec/runtimePatches/0/trainingRuntimeSpec/template/spec/replicatedJobs/0/template/spec/template/spec/nodeSelector/cloud.google.com~1gke-spot

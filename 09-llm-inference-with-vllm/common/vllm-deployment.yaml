@@ -1,0 +1,118 @@
+# vLLM OpenAI-compatible server for one small, ungated model on ONE GPU.
+#
+# Image: vllm/vllm-openai:v0.29.0-cu129
+#   The plain v0.29.0 tag is built on CUDA 13.0 and needs an NVIDIA driver >= 580.
+#   The -cu129 variant (CUDA 12.9) runs on older 5xx drivers via CUDA minor-version
+#   compatibility, which is what cloud-managed GPU drivers often ship. If your nodes run
+#   a 580+ driver you can switch to the plain tag.
+# Entrypoint of the image is ["vllm", "serve"], so args start with the model id.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  labels:
+    app.kubernetes.io/name: vllm
+spec:
+  replicas: 1
+  # Never run two copies of a 1-GPU pod during a rollout on a 1-GPU node pool:
+  # Recreate frees the GPU first. (Use RollingUpdate with maxSurge when you have spare GPUs.)
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+    spec:
+      # Spot notice: GKE gives regular pods 15s by default, AKS ~30s, EC2 2 minutes.
+      # Keep grace <= the smallest budget you run on. preStop (5s) + drain (--shutdown-timeout 10s).
+      terminationGracePeriodSeconds: 25
+      tolerations:
+      # All three course clusters taint GPU pools with nvidia.com/gpu=present:NoSchedule
+      # (GKE adds it automatically). Overlays add the spot selector/tolerations.
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:v0.29.0-cu129
+        args:
+        - Qwen/Qwen3-0.6B
+        - --host=0.0.0.0
+        - --port=8000
+        # Cap context: KV cache must fit at least one max-length sequence.
+        - --max-model-len=8192
+        # Fraction of GPU memory vLLM may take for weights + activations + KV cache.
+        - --gpu-memory-utilization=0.90
+        # Upper bound on sequences batched together in one decode step.
+        - --max-num-seqs=64
+        - --enable-prefix-caching
+        # On SIGTERM wait up to 10s for in-flight requests instead of aborting them (0 = abort).
+        - --shutdown-timeout=10
+        env:
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+        - name: HF_TOKEN            # Qwen3-0.6B is ungated; token only avoids anonymous rate limits
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+            nvidia.com/gpu: "1"
+          limits:
+            memory: 12Gi
+            nvidia.com/gpu: "1"
+        # The HTTP server only starts answering once weights are loaded and the KV cache
+        # is allocated. startupProbe gives it up to 60 x 10s = 10 min (image pull is NOT
+        # counted: probes start after the container starts).
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 4
+        lifecycle:
+          preStop:
+            # Give kube-proxy / gateways time to remove the endpoint before vLLM stops accepting.
+            sleep:
+              seconds: 5
+        volumeMounts:
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      # Download cache. emptyDir = re-download on every new node (spot!). See
+      # 05-model-storage-and-data for PVC / object-storage / image-preload alternatives.
+      - name: hf-cache
+        emptyDir:
+          sizeLimit: 20Gi
+      # PyTorch/NCCL use shared memory between processes (tensor parallel workers, tokenizer
+      # workers). Container runtimes default /dev/shm to 64Mi, which crashes multi-GPU runs.
+      # medium: Memory counts against the container memory limit.
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi

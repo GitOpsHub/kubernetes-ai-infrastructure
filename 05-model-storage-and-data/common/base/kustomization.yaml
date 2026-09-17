@@ -1,0 +1,19 @@
+# Shared pieces for every chapter-05 lab: namespace, model coordinates, service accounts.
+# Each lab (object-storage / shared-fs / init-container) includes this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - serviceaccounts.yaml
+configMapGenerator:
+  - name: model-coordinates
+    namespace: ch05-models
+    options:
+      disableNameSuffixHash: true
+    literals:
+      # Pin the exact commit so every node / replica loads identical bytes.
+      - MODEL_ID=Qwen/Qwen3-0.6B
+      - MODEL_REVISION=c1899de289a04d12100db370d81485cdf75e47ca
+      - MODEL_NAME=qwen3-0.6b
+      # Path layout inside a bucket / share: models/<name>/<revision>/
+      - MODEL_SUBDIR=models/qwen3-0.6b/c1899de289a04d12100db370d81485cdf75e47ca

@@ -1,0 +1,29 @@
+# eksctl create nodegroup -f nodegroup-ch05.yaml
+# Spot managed node group, diversified across Intel instance types with AVX-512 (vLLM CPU backend).
+# Edit metadata.name/region to match env.sh (EKS_CLUSTER / AWS_REGION).
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: eks-ai-lab
+  region: us-east-1
+managedNodeGroups:
+  - name: ch05-cpu-spot
+    amiFamily: AmazonLinux2023
+    spot: true
+    instanceTypes: ["m7i.2xlarge", "m6i.2xlarge", "m5.2xlarge"]
+    minSize: 0
+    desiredCapacity: 1
+    maxSize: 2
+    volumeSize: 100
+    labels:
+      ai-lab/chapter: "05"
+  # On-demand fallback – scale this up only if spot capacity is unavailable.
+  - name: ch05-cpu-ondemand
+    amiFamily: AmazonLinux2023
+    instanceType: m7i.2xlarge
+    minSize: 0
+    desiredCapacity: 0
+    maxSize: 2
+    volumeSize: 100
+    labels:
+      ai-lab/chapter: "05"

@@ -1,0 +1,29 @@
+# Tiny workload used to prove that (a) the spot CPU pool accepts pods and
+# (b) the cluster autoscaler adds a node when requests don't fit.
+# Overlays add the cloud-specific spot nodeSelector / toleration.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spot-smoke
+  labels:
+    app: spot-smoke
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: spot-smoke
+  template:
+    metadata:
+      labels:
+        app: spot-smoke
+    spec:
+      terminationGracePeriodSeconds: 25   # spot notice is ~30s on all three clouds
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.10.1
+        resources:
+          requests:
+            cpu: 500m
+            memory: 256Mi
+          limits:
+            memory: 256Mi
