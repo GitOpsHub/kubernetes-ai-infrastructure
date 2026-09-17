@@ -37,5 +37,11 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
 
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.*"
+          terraform_wrapper: false
+
       - name: Run repo-wide validation
         run: ./scripts/validate-all.sh

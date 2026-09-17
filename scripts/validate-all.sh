@@ -9,6 +9,8 @@
 #      cached schema would be worse than not checking it at all. Cross-check those by hand
 #      against the pinned version's CRD source when you touch them (see CLAUDE.md).
 #   3. every shell script passes `bash -n` (syntax) and, if shellcheck is installed, a lint pass
+#   4. every Terraform module (18-infrastructure-as-code/{gke,eks,aks}) passes `terraform fmt
+#      -check` and `terraform validate` (init with -backend=false -- no real backend/credentials)
 #
 # Usage: ./scripts/validate-all.sh   (run from anywhere; paths are repo-relative)
 set -euo pipefail
@@ -24,7 +26,7 @@ K8S_VERSION="${K8S_VERSION:-1.35.0}"   # matches the GKE control-plane version t
 KUSTOMIZATIONS="$(git ls-files -- '*/kustomization.yaml' | sort)"
 SCRIPTS="$(git ls-files -- '*.sh' | sort)"
 
-echo "== 1/3 kustomize build =="
+echo "== 1/4 kustomize build =="
 while IFS= read -r kfile; do
   [ -z "$kfile" ] && continue
   dir="$(dirname "$kfile")"
@@ -37,7 +39,7 @@ done <<< "$KUSTOMIZATIONS"
 [ "$fail" -eq 0 ] && echo "  all overlays render cleanly"
 
 echo
-echo "== 2/3 kubeconform (core K8s resources only; CRDs skipped) =="
+echo "== 2/4 kubeconform (core K8s resources only; CRDs skipped) =="
 if command -v kubeconform > /dev/null; then
   while IFS= read -r kfile; do
     [ -z "$kfile" ] && continue
@@ -55,7 +57,7 @@ else
 fi
 
 echo
-echo "== 3/3 shell scripts =="
+echo "== 3/4 shell scripts =="
 while IFS= read -r script; do
   [ -z "$script" ] && continue
   if ! bash -n "$script" 2>/tmp/bash-err; then
@@ -82,6 +84,33 @@ else
   echo "  shellcheck not installed -- skipping"
 fi
 [ "$fail" -eq 0 ] && echo "  all scripts OK"
+
+echo
+echo "== 4/4 terraform (18-infrastructure-as-code) =="
+if command -v terraform > /dev/null; then
+  for tfdir in 18-infrastructure-as-code/gke 18-infrastructure-as-code/eks 18-infrastructure-as-code/aks; do
+    [ -d "$tfdir" ] || continue
+    if ! terraform -chdir="$tfdir" fmt -check -recursive > /tmp/tf-fmt-err 2>&1; then
+      echo "FAIL  $tfdir (terraform fmt -- run 'terraform fmt' to fix)"
+      sed 's/^/      /' /tmp/tf-fmt-err
+      fail=1
+    fi
+    if ! terraform -chdir="$tfdir" init -backend=false -input=false > /tmp/tf-init-err 2>&1; then
+      echo "FAIL  $tfdir (terraform init)"
+      sed 's/^/      /' /tmp/tf-init-err
+      fail=1
+      continue
+    fi
+    if ! terraform -chdir="$tfdir" validate > /tmp/tf-validate-err 2>&1; then
+      echo "FAIL  $tfdir (terraform validate)"
+      sed 's/^/      /' /tmp/tf-validate-err
+      fail=1
+    fi
+  done
+  [ "$fail" -eq 0 ] && echo "  all modules OK"
+else
+  echo "  terraform not installed -- skipping (install: https://developer.hashicorp.com/terraform/install)"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

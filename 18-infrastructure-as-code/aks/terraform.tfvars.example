@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in (or pass -var-file, or -var on the CLI).
+# Mirrors the AKS section of ../../env.sh.example.
+
+resource_group_name = "rg-aks-ai-lab"
+location             = "eastus"
+cluster_name         = "aks-ai-lab"
+dns_prefix           = "aks-ai-lab"
