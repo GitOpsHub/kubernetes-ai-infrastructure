@@ -1,0 +1,12 @@
+# CPU-only variant: no cloud IAM, no GPU quota, works on kind/minikube too -- but you cannot
+# actually observe NODE autoscaling without a real cloud cluster autoscaler/Karpenter/NAP
+# controller watching real cloud capacity. This variant swaps the GPU scale-demo for a CPU one
+# and is meant to be run against a real GKE/EKS/AKS *CPU* node pool with the cluster autoscaler
+# already on (every cluster from 00-prerequisites-and-cluster-setup has one) -- see README
+# "What doesn't carry over" for exactly what's missing versus the GPU labs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch13-autoscale
+resources:
+- namespace.yaml
+- scale-demo-cpu.yaml

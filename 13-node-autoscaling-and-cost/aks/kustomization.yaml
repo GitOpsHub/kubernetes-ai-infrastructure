@@ -1,0 +1,14 @@
+# AKS: capacity comes from Node Auto Provisioning (NAP, Karpenter-based). NodePool/AKSNodeClass
+# are cluster-scoped and applied directly by enable-nap.sh (no envsubst needed here, unlike EKS).
+# The scale-demo Pod's GPU toleration is already in ../common/scale-demo.yaml; this overlay adds
+# the AKS spot-priority toleration the gpu-spot NodePool's taint requires.
+#   ./enable-nap.sh
+#   kubectl apply -k 13-node-autoscaling-and-cost/aks
+#   kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../common
+patches:
+- target: {kind: Deployment, name: scale-demo}
+  path: patch-spot-toleration.yaml
