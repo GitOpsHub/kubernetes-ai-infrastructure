@@ -1,0 +1,14 @@
+# Cloud-agnostic drain/cordon lab objects. Apply directly on any cluster (GKE/EKS/AKS/cpu-lab,
+# GPU or not) -- there is nothing cloud-specific here, unlike most other chapters' common/ base.
+#   kubectl apply -k 17-platform-day2-operations/common
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch17-day2ops
+labels:
+- pairs:
+    app.kubernetes.io/part-of: ch17-day2ops
+  includeSelectors: false
+resources:
+- namespace.yaml
+- drain-demo-deployment.yaml
+- drain-demo-pdb.yaml

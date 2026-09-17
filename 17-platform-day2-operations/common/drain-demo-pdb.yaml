@@ -1,0 +1,14 @@
+# minAvailable: 2 of 3 -- draining a node with exactly 1 replica on it succeeds immediately;
+# draining a node that would take the eviction count below 2 available replicas blocks until you
+# either scale up or accept `--disable-eviction-timeout`/force. Same mechanics as
+# 09-llm-inference-with-vllm/common/pdb.yaml, just against a free workload instead of a GPU one.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: drain-demo
+spec:
+  minAvailable: 2
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: drain-demo

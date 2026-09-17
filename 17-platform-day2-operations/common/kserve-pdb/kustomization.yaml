@@ -1,0 +1,6 @@
+# No `namespace:` transformer here on purpose -- pdb.yaml already targets ch11-kserve explicitly
+# (chapter 11's namespace, not this chapter's), so kustomize must not rewrite it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- pdb.yaml
