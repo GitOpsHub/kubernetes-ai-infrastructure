@@ -1,0 +1,47 @@
+# Quality gate every real platform team runs on manifest changes: does every kustomize
+# overlay in the repo still render, are core K8s resources schema-valid, and are the
+# scripts syntactically sound. See scripts/validate-all.sh for what this actually checks
+# (and why CRDs are intentionally skipped, not failed).
+name: validate
+
+on:
+  pull_request:
+    paths:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.sh"
+      - "scripts/validate-all.sh"
+      - ".github/workflows/validate.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.35.0"
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.*"
+          terraform_wrapper: false
+
+      - name: Run repo-wide validation
+        run: ./scripts/validate-all.sh

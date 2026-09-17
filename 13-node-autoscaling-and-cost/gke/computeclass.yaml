@@ -4,11 +4,10 @@
 # single object instead of two node pools you manage by hand.
 #
 # apiVersion cloud.google.com/v1, kind ComputeClass -- verified field names (priorities,
-# nodePoolAutoCreation, activeMigration, autoscalingPolicy.consolidationDelayMinutes) via GKE
-# ComputeClass docs/examples. flexStart.* nested fields are `# VERIFY` -- confirm exact schema
-# with `kubectl explain computeclass.spec.priorities.flexStart` on a live 1.33+ GKE cluster before
-# relying on it (DWS flex-start queues a GPU request for up to N minutes instead of failing
-# immediately when spot AND on-demand capacity are both unavailable).
+# nodePoolAutoCreation, activeMigration, autoscalingPolicy.consolidationDelayMinutes,
+# priorities[].flexStart.enabled) against GKE's "About custom compute classes" and "About DWS
+# flex-start" docs. DWS flex-start queues a GPU request for a bounded wait instead of failing
+# immediately when on-demand capacity isn't available right now.
 apiVersion: cloud.google.com/v1
 kind: ComputeClass
 metadata:

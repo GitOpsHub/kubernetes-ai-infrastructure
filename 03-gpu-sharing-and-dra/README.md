@@ -4,6 +4,16 @@
 > Allocation (`resource.k8s.io/v1`, GA in Kubernetes 1.35) as the newer, more expressive way
 > to hand out GPUs.
 
+## Before you start
+
+Needs from [`01-gpu-nodes-and-scheduling`](../01-gpu-nodes-and-scheduling) or
+[`02-nvidia-gpu-operator`](../02-nvidia-gpu-operator): a device plugin (either chapter's) already
+running on the node pools you point the time-slicing/MPS configs at — this chapter reconfigures the
+plugin, it doesn't install one fresh. DRA (Step 3) is the exception: it installs its own driver on a
+dedicated node pool and needs no prior device plugin. GPU quota from chapter 00 applies; MIG (Step 4)
+additionally needs A100/H100/H200 quota, which is rarer and slower to get approved — request it early
+if you plan to do the hands-on MIG lab.
+
 ## 1. Why this matters
 
 Chapter 01 gave every pod its own whole GPU (`nvidia.com/gpu: 1`). That's simple and safe, but
@@ -182,28 +192,88 @@ different pods.
 
 ### Step 2: MPS
 
-Same three tabs, swap `timeslicing` → `mps` and (GKE) `create-nodepool-timesharing.sh` →
-`create-nodepool-mps.sh` (EKS/AKS: `SHARE_MODE=mps-4` / relabel). Verify each pod sees
-`CUDA_MPS_*` env vars injected by the plugin:
+What you're about to do: create a GPU node pool with MPS sharing enabled, point 4 pods at the same
+physical GPU through a shared CUDA context, and confirm the plugin injects `CUDA_MPS_*` env vars —
+proof each pod is going through MPS, not a private GPU.
+
+<details><summary>GKE</summary>
+
+```bash
+./03-gpu-sharing-and-dra/gke/create-nodepool-mps.sh   # l4-mps-spot, gpu-sharing-strategy=mps, 4 clients/GPU
+kubectl apply -k 03-gpu-sharing-and-dra/gke/mps
+kubectl -n ch03-gpu-sharing get pods -o wide
+```
+Expected output:
+```
+NAME                         READY   STATUS    NODE
+mps-demo-7c9d8-2x4mz         1/1     Running   gke-...-l4-mps-spot-...
+mps-demo-7c9d8-8kq2n         1/1     Running   gke-...-l4-mps-spot-...
+mps-demo-7c9d8-tl5vw         1/1     Running   gke-...-l4-mps-spot-...
+mps-demo-7c9d8-x9k2q         1/1     Running   gke-...-l4-mps-spot-...
+```
+How to tell this worked: all 4 pods are `Running` on the same node (`gke-...-l4-mps-spot-...`), and
+each has `hostIPC: true` set (GKE's managed MPS requires it — see the overlay's patch).
+
+</details>
+
+<details><summary>EKS</summary>
+
+```bash
+./03-gpu-sharing-and-dra/eks/create-nodegroups.sh gpu-share-spot   # ships labeled time-sliced-4 by default
+kubectl label node -l course-chapter=03,eks.amazonaws.com/nodegroup=gpu-share-spot \
+  nvidia.com/device-plugin.config=mps-4 --overwrite
+./03-gpu-sharing-and-dra/eks/install-sharing-config.sh
+kubectl apply -k 03-gpu-sharing-and-dra/eks/mps
+kubectl -n ch03-gpu-sharing get pods -o wide
+```
+Expected output: same 4-pod `Running` table as GKE, all on the one `gpu-share-spot` node.
+How to tell this worked: `kubectl get nodes -o custom-columns=NAME:.metadata.name,CFG:.metadata.labels.nvidia\.com/device-plugin\.config`
+shows `mps-4` on that node, not `time-sliced-4`.
+
+</details>
+
+<details><summary>AKS</summary>
+
+```bash
+SHARE_MODE=mps-4 ./03-gpu-sharing-and-dra/aks/create-nodepool-share.sh
+./03-gpu-sharing-and-dra/aks/install-sharing-config.sh
+kubectl apply -k 03-gpu-sharing-and-dra/aks/mps
+kubectl -n ch03-gpu-sharing get pods -o wide
+```
+Expected output: same 4-pod `Running` table, all on the `gpushare` node.
+How to tell this worked: the node is labeled `nvidia.com/device-plugin.config=mps-4`
+(`az aks nodepool show ... --query nodeLabels` or `kubectl get nodes -L nvidia.com/device-plugin.config`).
+
+</details>
+
+Verify on any cloud — each pod sees `CUDA_MPS_*` env vars injected by the plugin, proof it's going
+through MPS and not a private full GPU:
 ```bash
 kubectl -n ch03-gpu-sharing logs deploy/mps-demo | grep CUDA_MPS
+```
+Expected output:
+```
+CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
+CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
 ```
 
 ### Step 3: DRA
 
-```bash
-# GKE
-./03-gpu-sharing-and-dra/gke/create-nodepool-dra.sh && ./03-gpu-sharing-and-dra/gke/install-dra-driver.sh
-# EKS
-./03-gpu-sharing-and-dra/eks/create-nodegroups.sh gpu-dra-spot && ./03-gpu-sharing-and-dra/eks/install-dra-driver.sh
-# AKS
-./03-gpu-sharing-and-dra/aks/create-nodepool-dra.sh && ./03-gpu-sharing-and-dra/aks/install-dra-driver.sh
+What you're about to do: install the NVIDIA DRA driver on its own node pool (never mixed with a
+device plugin), apply the four claim patterns from `common/dra/`, and confirm the scheduler allocated
+real devices through `ResourceClaim`/`ResourceSlice` objects instead of extended-resource counting.
 
-kubectl apply -k 03-gpu-sharing-and-dra/<cloud>/dra
+<details><summary>GKE</summary>
+
+```bash
+./03-gpu-sharing-and-dra/gke/create-nodepool-dra.sh    # l4-dra-spot, driver disabled, DRA-only labels
+kubectl -n kube-system rollout status ds/nvidia-driver-installer
+./03-gpu-sharing-and-dra/gke/install-dra-driver.sh
+kubectl apply -k 03-gpu-sharing-and-dra/gke/dra
 kubectl get resourceclaims -n ch03-gpu-sharing
 kubectl get resourceslices -o wide
 ```
-Expected:
+Expected output:
 ```
 NAME                    STATE
 dra-cpu-single-...      allocated,reserved
@@ -212,8 +282,47 @@ dra-cpu-single-...      allocated,reserved
 NAME                  NODE               DRIVER
 gke-...-l4-dra-spot   gke-...-l4-dra...  gpu.nvidia.com
 ```
-Inspect what the driver published: `kubectl get resourceslice -o yaml | less` — attribute names
-(e.g. `memory`) are what `03-cel-selector.yaml`'s CEL expression matches against.
+How to tell this worked: every claim in `kubectl get resourceclaims -n ch03-gpu-sharing` shows
+`allocated,reserved`, and `kubectl get deviceclass` lists `gpu.nvidia.com`.
+
+</details>
+
+<details><summary>EKS</summary>
+
+```bash
+./03-gpu-sharing-and-dra/eks/create-nodegroups.sh gpu-dra-spot
+./03-gpu-sharing-and-dra/eks/install-dra-driver.sh
+kubectl apply -k 03-gpu-sharing-and-dra/eks/dra
+kubectl get resourceclaims -n ch03-gpu-sharing
+kubectl get resourceslices -o wide
+```
+Expected output: same `allocated,reserved` claim state and a `ResourceSlice` with `DRIVER
+gpu.nvidia.com` on the `gpu-dra-spot` node.
+How to tell this worked: `kubectl get ds -n gpu-operator -o wide` shows **no** device-plugin
+DaemonSet pod on the `gpu-dra-spot` node (label `gpu-mode=dra` keeps it off), only the DRA
+kubelet plugin.
+
+</details>
+
+<details><summary>AKS</summary>
+
+```bash
+./03-gpu-sharing-and-dra/aks/create-nodepool-dra.sh    # gpudra, --gpu-driver none
+./03-gpu-sharing-and-dra/aks/install-dra-driver.sh
+kubectl apply -k 03-gpu-sharing-and-dra/aks/dra
+kubectl get resourceclaims -n ch03-gpu-sharing
+kubectl get resourceslices -o wide
+```
+Expected output: same `allocated,reserved` claim state and a `ResourceSlice` with `DRIVER
+gpu.nvidia.com` on the `gpudra` node.
+How to tell this worked: same as EKS — no device plugin on the `gpudra` node
+(`kubeletPlugin.nodeSelector={"gpu-mode":"dra"}` keeps the DRA plugin off the sharing/MIG pools
+and vice versa).
+
+</details>
+
+Inspect what the driver published on any cloud: `kubectl get resourceslice -o yaml | less` —
+attribute names (e.g. `memory`) are what `03-cel-selector.yaml`'s CEL expression matches against.
 
 ### Step 4: MIG (advanced, needs A100/H100/H200 quota)
 

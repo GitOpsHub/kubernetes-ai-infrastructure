@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and fill in (or pass -var-file, or -var on the CLI).
+# Mirrors the EKS section of ../../env.sh.example.
+
+aws_region   = "us-east-1"
+cluster_name = "eks-ai-lab"
+azs          = ["us-east-1a", "us-east-1b"]

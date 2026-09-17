@@ -219,3 +219,18 @@ __marimo__/
 
 # Local environment (project IDs, tokens)
 env.sh
+
+# Terraform (18-infrastructure-as-code)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+# terraform.tfvars holds real project/account values; only *.tfvars.example is committed
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

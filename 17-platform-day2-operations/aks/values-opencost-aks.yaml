@@ -1,0 +1,24 @@
+# Points OpenCost at chapter 04's existing kube-prometheus-stack instead of installing a second
+# in-cluster Prometheus. Azure list pricing (retail price sheet) is built into OpenCost's default
+# cost model -- no key needed for on-cluster cost modeling.
+opencost:
+  prometheus:
+    internal:
+      enabled: false
+    external:
+      enabled: true
+      url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/prometheus"
+  ui:
+    enabled: true
+
+# Reconciling against your actual negotiated Azure pricing instead of public retail rates --
+# optional. # VERIFY and fill in before enabling; do not commit real storage-account keys.
+# cloudIntegrationJSON: |-
+#   {
+#     "azure": [{
+#       "azureSubscriptionID": "YOUR_SUBSCRIPTION_ID",
+#       "azureStorageAccount": "YOUR_BILLING_EXPORT_STORAGE_ACCOUNT",
+#       "azureStorageAccessKey": "",
+#       "azureStorageContainer": "YOUR_BILLING_EXPORT_CONTAINER"
+#     }]
+#   }

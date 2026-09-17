@@ -4,6 +4,17 @@
 > prometheus-adapter, and KEDA (which can scale to zero). Do the cold-start math before you trust
 > either one on GPU capacity.
 
+## Before you start
+
+This chapter assumes:
+
+- Chapter `09-llm-inference-with-vllm`'s vLLM Deployment running (`ch09-vllm` namespace) on your
+  cloud — this chapter scales it, it doesn't deploy vLLM itself.
+- Chapter `04-gpu-observability`'s kube-prometheus-stack installed (namespace `monitoring`) — the
+  metric source for both HPA and KEDA here.
+- `env.sh` and `versions.env` sourced.
+- No GPU? Step 4 (`cpu-lab/`) only needs chapter `09`'s CPU-lab Ollama Deployment.
+
 ## 1. Why this matters
 
 `cpu` utilization is meaningless for a GPU-bound inference server — the container's CPU barely moves
@@ -110,17 +121,49 @@ kube-prometheus-stack installed (namespace `monitoring`).
 
 ### Step 1: Install prometheus-adapter and KEDA, wire the ServiceMonitor
 
+What you're about to do: install prometheus-adapter (exposes vLLM's queue-depth metric as a
+`custom.metrics.k8s.io` series) and KEDA (queries Prometheus directly), then apply the
+`ServiceMonitor` that tells Prometheus to scrape vLLM's `/metrics`.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-./10-autoscaling-inference/<gke|eks|aks>/install-prometheus-adapter.sh
-./10-autoscaling-inference/<gke|eks|aks>/install-keda.sh
-kubectl apply -k 10-autoscaling-inference/<gke|eks|aks>   # ServiceMonitor only
+./10-autoscaling-inference/gke/install-prometheus-adapter.sh
+./10-autoscaling-inference/gke/install-keda.sh
+kubectl apply -k 10-autoscaling-inference/gke   # ServiceMonitor only
 ```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./10-autoscaling-inference/eks/install-prometheus-adapter.sh
+./10-autoscaling-inference/eks/install-keda.sh
+kubectl apply -k 10-autoscaling-inference/eks   # ServiceMonitor only
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./10-autoscaling-inference/aks/install-prometheus-adapter.sh
+./10-autoscaling-inference/aks/install-keda.sh
+kubectl apply -k 10-autoscaling-inference/aks   # ServiceMonitor only
+```
+</details>
+
 Verify:
 ```bash
 kubectl -n ch09-vllm get servicemonitor vllm
 kubectl get --raw '/apis/custom.metrics.k8s.io/v1beta1/namespaces/ch09-vllm/pods/*/vllm_num_requests_waiting' | jq
 kubectl -n keda get pods
 ```
+How to tell this worked: the custom-metrics `get --raw` call returns a JSON body (not a 404/empty
+`items: []`) once at least one request has hit vLLM, and `kubectl -n keda get pods` shows
+`keda-operator` `Running`.
 
 ### Step 2: HPA v2 lab
 

@@ -1,0 +1,27 @@
+# Points OpenCost at chapter 04's existing kube-prometheus-stack instead of installing a second
+# in-cluster Prometheus. AWS list pricing is built into OpenCost's default cost model.
+opencost:
+  prometheus:
+    internal:
+      enabled: false
+    external:
+      enabled: true
+      url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/prometheus"
+  exporter:
+    extraEnv:
+      AWS_CLUSTER_ID: ""   # # VERIFY: set to your EKS cluster name if you enable Athena CUR reconciliation below
+  ui:
+    enabled: true
+
+# Reconciling against actual AWS billing (Cost and Usage Report via Athena) instead of list
+# pricing -- optional, needs a CUR export + Athena table set up outside this course's scope.
+# # VERIFY and fill in before enabling; do not commit real bucket/account details.
+# cloudIntegrationJSON: |-
+#   {
+#     "aws": [{
+#       "athenaBucketName": "s3://YOUR_ATHENA_RESULTS_BUCKET",
+#       "athenaRegion": "us-east-1",
+#       "athenaDatabase": "YOUR_CUR_DATABASE",
+#       "athenaTable": "YOUR_CUR_TABLE"
+#     }]
+#   }

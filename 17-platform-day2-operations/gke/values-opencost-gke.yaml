@@ -1,0 +1,31 @@
+# Rendered against opencost-helm-chart's actual values.yaml structure (verified 2026-09-17 --
+# see README "Versions tested"). Points OpenCost at chapter 04's existing kube-prometheus-stack
+# instead of installing a second in-cluster Prometheus -- one metrics backend per cluster.
+opencost:
+  prometheus:
+    internal:
+      enabled: false
+    external:
+      enabled: true
+      # kube-prometheus-stack's Prometheus Service, chapter 04's namespace/release name.
+      url: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090/prometheus"
+  exporter:
+    extraEnv:
+      CLOUD_PROVIDER_API_KEY: ""   # not needed for on-cluster cost modeling; only for cloud billing API reconciliation below
+  ui:
+    enabled: true
+
+# GKE list pricing is built into OpenCost's default cost model (no key needed) -- this block is
+# only for reconciling against your ACTUAL discounted/committed-use billing via BigQuery export.
+# # VERIFY: enable and fill in once you've set up GKE's BigQuery billing export
+# (https://cloud.google.com/kubernetes-engine/docs/how-to/cost-allocations), referenced from
+# 13-node-autoscaling-and-cost's cost-visibility section. Left disabled by default -- do not commit
+# real project IDs or service account keys into this file.
+# cloudIntegrationJSON: |-
+#   {
+#     "gcp": [{
+#       "projectID": "YOUR_PROJECT_ID",
+#       "billingDataDataset": "YOUR_DATASET.gcp_billing_export_resource_v1_XXXXXX",
+#       "key": {}
+#     }]
+#   }

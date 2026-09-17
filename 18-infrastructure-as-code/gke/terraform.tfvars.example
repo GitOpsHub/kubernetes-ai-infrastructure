@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in (or pass -var-file, or -var on the CLI).
+# Mirrors the GKE section of ../../env.sh.example.
+
+project_id   = "my-gcp-project"
+region       = "us-east1"
+zone         = "us-east1-b"
+cluster_name = "gke-ai-lab"

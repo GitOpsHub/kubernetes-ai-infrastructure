@@ -4,6 +4,13 @@
 > cloud's managed-observability alternative — so you can see what your GPUs are doing before
 > something expensive goes idle or something hot goes unnoticed.
 
+## Before you start
+
+Needs from [`02-nvidia-gpu-operator`](../02-nvidia-gpu-operator): a running GPU Operator install
+with `dcgmExporter.enabled: true` (the chart default) — this chapter scrapes that exporter, it
+doesn't install it. If you're only doing Step 0 (`cpu-lab/`), no prior chapter is needed: it ships
+its own fake exporter and needs no GPU or cloud account at all.
+
 ## 1. Why this matters
 
 A GPU node with no monitoring is a black box that bills you by the second. Chapter 02's GPU
@@ -181,6 +188,8 @@ kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:909
 
 ### Step 2: Grafana walkthrough
 
+What you're about to do: open the pre-loaded GPU Fleet dashboard, drive real GPU load, and watch the
+panels move — this is the "does the whole pipeline actually show me something useful" check.
 ```bash
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-grafana 3000:80
 ```
@@ -188,9 +197,13 @@ Open **GPU Fleet (DCGM)**. Run something GPU-heavy from chapter 01/03 (e.g. the 
 Deployments) and watch **GPU Utilization %** and **Power Usage** climb in near-real-time (30s
 scrape interval). Cross-reference with **GPUs Allocatable vs Allocated** to see scheduling
 pressure vs. actual usage — a common gap when device-plugin sharing (chapter 03) is misconfigured.
+How to tell this worked: **GPU Utilization %** rises above its idle baseline within ~1-2 scrape
+intervals of starting the workload, and drops back down within ~1-2 intervals of it finishing.
 
 ### Step 3: Trigger an alert for real
 
+What you're about to do: force a real alert to fire (not the cpu-lab's synthetic one) so you see the
+full path — metric crosses threshold, `PrometheusRule` evaluates, Alertmanager shows it — end to end.
 ```bash
 # Push GPU memory near the ceiling to fire GPUMemoryNearFull (needs a real GPU workload that
 # allocates most of the framebuffer - e.g. a larger batch size on chapter 09's vLLM, or just
@@ -198,11 +211,17 @@ pressure vs. actual usage — a common gap when device-plugin sharing (chapter 0
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
 # http://localhost:9093 -> Alerts, or query ALERTS{alertname=~"GPU.*"} in Prometheus.
 ```
+How to tell this worked: the alert shows state `firing` (not just `pending`) in either the
+Alertmanager UI or `ALERTS{alertname=~"GPU.*"}` in Prometheus, with the `for:` duration from
+`common/alerts/prometheusrule.yaml` elapsed.
 
 ### Step 4: Read the managed alternative for your cloud
 
-Read (don't necessarily run — these create billed resources) `gke/gmp/podmonitoring.yaml`,
-`eks/amp/create-workspace-and-scraper.sh`, or `aks/enable-managed-prometheus.sh` per section 3.3.
+What you're about to do: read (don't necessarily run — these create billed resources) the
+managed-Prometheus path for your cloud, so you can compare it against the self-hosted stack you just
+built. `gke/gmp/podmonitoring.yaml`, `eks/amp/create-workspace-and-scraper.sh`, or
+`aks/enable-managed-prometheus.sh` per section 3.3. How to tell you understood it: you can answer
+checkpoint question 4 without looking at the answer.
 
 ## 5. Spot considerations
 

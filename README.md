@@ -1,10 +1,18 @@
 # Kubernetes AI Infrastructure
 
+[![validate](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml/badge.svg)](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml)
+
 A hands-on course for DevOps engineers on running AI workloads (GPU scheduling, training, LLM serving,
 autoscaling, cost) on Kubernetes. Every lab has variants for **GKE, EKS and AKS**, and runs on **spot
 capacity** by default.
 
-Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup.
+Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup. Every kustomize
+overlay and shell script in this repo is checked on every PR by
+[`scripts/validate-all.sh`](scripts/validate-all.sh) — run it locally before you push:
+
+```bash
+./scripts/validate-all.sh
+```
 
 ## How to use this repo
 
@@ -14,7 +22,8 @@ source env.sh && source versions.env
 ```
 
 Each chapter folder has a `README.md` (theory + lab) plus `common/`, `gke/`, `eks/`, `aks/` and, where
-possible, a `cpu-lab/` so you can learn the mechanics before you have GPU quota.
+possible, a `cpu-lab/` so you can learn the mechanics before you have GPU quota. The one exception is
+chapter 18, which is Terraform instead of kustomize — see its README for why.
 
 > **Request GPU quota on day 1** (chapter 00). Spot GPU quota approval can take days, and default quota
 > for L4/T4 in most regions is 0.
@@ -38,7 +47,10 @@ flowchart LR
   subgraph P[Platform]
     C13[13 Node autoscaling & cost] --> C14[14 Security] --> C15[15 GitOps & MLOps] --> C16[16 Capstone]
   end
-  F --> D --> T --> S --> P
+  subgraph O[Operate]
+    C17[17 Day-2 operations] --> C18[18 Infrastructure as Code]
+  end
+  F --> D --> T --> S --> P --> O
 ```
 
 | # | Chapter | Core question it answers | Days @3h |
@@ -60,8 +72,10 @@ flowchart LR
 | 14 | [Multi-tenancy & security](14-multi-tenancy-and-security/) | How do I safely share the platform? | 1–2 |
 | 15 | [GitOps & MLOps pipelines](15-mlops-gitops-and-pipelines/) | How do I manage all this declaratively? | 2 |
 | 16 | [Capstone AI platform](16-capstone-ai-platform/) | Can I build and operate the whole thing? | 3 |
+| 17 | [Platform day-2 operations](17-platform-day2-operations/) | How do I keep this running: drains, upgrades, incidents, backup/DR, chargeback? | 2 |
+| 18 | [Infrastructure as Code](18-infrastructure-as-code/) | How would a platform team actually provision these clusters (Terraform, not CLI scripts)? | 1–2 |
 
-**About 25–30 days at 3 hours/day** (roughly 5–6 weeks at 5 days/week).
+**About 28–34 days at 3 hours/day** (roughly 6–7 weeks at 5 days/week).
 
 ## Suggested daily rhythm (3 hours)
 
@@ -82,4 +96,4 @@ the EKS/AKS overlays to learn the differences. Do the full labs on the other clo
 
 ## Versions
 
-All pinned in [versions.env](versions.env) (verified 2026-09-16, Kubernetes 1.35).
+All pinned in [versions.env](versions.env) (verified 2026-09-16/17, Kubernetes 1.35).

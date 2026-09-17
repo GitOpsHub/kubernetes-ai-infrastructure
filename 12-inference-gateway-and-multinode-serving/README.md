@@ -4,6 +4,26 @@
 > LeaderWorkerSet for models too big for one node. Builds directly on chapter 09's vLLM
 > Deployment and chapter 05's storage patterns instead of re-teaching them.
 
+## Before you start
+
+This chapter assumes:
+
+- **A GPU node pool that can scale to 2 nodes at once** from
+  [01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling) — run its `create-gpu-nodepool.sh`
+  (GKE) / `create-gpu-nodegroup.sh` (EKS) / `create-gpu-nodepool.sh` (AKS) with `MAX_NODES=2` (the
+  multi-node LWS section in 4.5 needs both nodes up simultaneously; single-node section 4.4 only
+  needs 1).
+- **Chapter 09's vLLM base** ([09-llm-inference-with-vllm](../09-llm-inference-with-vllm)) — this
+  chapter's `vllm-pool` imports `09-llm-inference-with-vllm/common` wholesale via kustomize rather
+  than re-defining the Deployment/Service/PDB; read 09 first if you haven't, especially its
+  HF-token secret step (`create-hf-secret.sh`) which this chapter reuses verbatim.
+- **A storage pattern for model weights** from
+  [05-model-storage-and-data](../05-model-storage-and-data) if you want persistent caching across
+  Pod restarts — this lab defaults to an `emptyDir` HF cache for simplicity, which re-downloads on
+  every restart.
+- No prior GAIE/Gateway API/LWS install is assumed — section 4.1 installs both CRDs and the LWS
+  controller from scratch.
+
 ## 1. Why this matters
 
 Chapter 09 put one vLLM replica behind a plain `Service`. That's fine for a demo, but a
@@ -114,95 +134,236 @@ CRDs/Helm values against the pinned llm-d release, not this description.
 
 ## 4. Lab
 
-Env: `cp env.sh.example env.sh` (repo root) then `source env.sh && source versions.env`. This
-chapter needs a GPU node pool with **room for 2 GPU nodes at once** (`MAX_NODES=2`) for the
-multi-node section — reuse chapter 01's pool.
-
-### 4.1 Install cluster-scoped prerequisites (once per cluster)
-
 ```bash
-common/install-gateway-crds.sh   # Gateway API core CRDs (standard channel) + GAIE CRDs
-common/install-lws.sh            # LeaderWorkerSet controller
+cp env.sh.example env.sh   # repo root, if not already done
+source env.sh && source versions.env
 ```
 
-### 4.2 GKE
+This chapter needs a GPU node pool with **room for 2 GPU nodes at once** (`MAX_NODES=2`) for the
+multi-node section (step 5) — reuse chapter 01's pool. Step 1-2 only need 1 node.
+
+### Step 1: Install cluster-scoped prerequisites (once per cluster)
+
+What you're about to do: install the Gateway API core CRDs (standard channel), the Gateway API
+Inference Extension CRDs (`InferencePool`), and the LeaderWorkerSet controller. These are
+cluster-scoped and shared by every cloud overlay — run once, not per-cloud.
 
 ```bash
-../01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh   # MAX_NODES=2 ./create-gpu-nodepool.sh
-gke/create-gateway.sh                                        # confirms Gateway API is enabled
-../09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
-kubectl apply -k gke
-kubectl get gateway inference-gateway -n ch12-gateway -o wide     # wait for an ADDRESS
-kubectl get inferencepool vllm-pool -n ch12-gateway -o yaml        # Accepted=True, ResolvedRefs=True
+./12-inference-gateway-and-multinode-serving/common/install-gateway-crds.sh
+./12-inference-gateway-and-multinode-serving/common/install-lws.sh
 ```
 
-GKE's `gke-l7-regional-external-managed` GatewayClass provisions a regional external Application
-Load Balancer. GKE also offers a **fully managed GKE Inference Gateway** experience where Google
-runs the EPP for you (no `epp-deployment.yaml` needed) — this lab uses the self-hosted EPP so the
-same manifests work unmodified on EKS/AKS; see
-[Deploy GKE Inference Gateway](https://cloud.google.com/kubernetes-engine/docs/how-to/deploy-gke-inference-gateway)
-for the managed variant.
+**Expected output**: `Gateway API + Inference Extension CRDs installed.` then
+`LeaderWorkerSet installed in namespace lws-system.`
 
-### 4.3 EKS / AKS
+**How to tell this worked**:
+```bash
+kubectl get crd inferencepools.inference.networking.k8s.io gateways.gateway.networking.k8s.io
+kubectl -n lws-system get deploy lws-controller-manager   # AVAILABLE 1/1
+```
+
+### Step 2: Create the GPU node pool and install your cloud's Gateway controller
+
+What you're about to do: bring up (or resize) the spot GPU node pool from chapter 01 to
+`MAX_NODES=2`, then install the Gateway implementation for your cloud (GKE's is built in and just
+needs enabling; EKS/AKS install NGINX Gateway Fabric with GAIE support turned on).
+
+<details>
+<summary><b>GKE</b></summary>
 
 ```bash
-# EKS
-MAX_NODES=2 ../01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh
-eks/install-nginx-gateway-fabric.sh
-../09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
-kubectl apply -k eks
-
-# AKS
-MAX_NODES=2 ../01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh
-aks/install-nginx-gateway-fabric.sh
-../09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
-kubectl apply -k aks
+MAX_NODES=2 ./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh
+./12-inference-gateway-and-multinode-serving/gke/create-gateway.sh
 ```
+**Expected output**: `create-gateway.sh` prints `GatewayClasses available on this cluster:`
+followed by a table that includes `gke-l7-regional-external-managed`.
 
-Neither cloud has a first-party Gateway implementation with **confirmed** Inference Extension
-conformance at the time this was written (AWS's Gateway API GA support for ALB/VPC-Lattice and
-Azure's Application Gateway for Containers ALB Controller are both real Gateway API
+**How to tell this worked**: `kubectl get gatewayclass gke-l7-regional-external-managed` shows
+`ACCEPTED=True`.
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+MAX_NODES=2 ./01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh
+./12-inference-gateway-and-multinode-serving/eks/install-nginx-gateway-fabric.sh
+```
+**Expected output**: `NGINX Gateway Fabric 2.7.0 installed (GatewayClass: nginx)`.
+
+**How to tell this worked**: `kubectl get gatewayclass nginx` shows `ACCEPTED=True`.
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+MAX_NODES=2 ./01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh
+./12-inference-gateway-and-multinode-serving/aks/install-nginx-gateway-fabric.sh
+```
+**Expected output**: `NGINX Gateway Fabric 2.7.0 installed (GatewayClass: nginx)`.
+
+**How to tell this worked**: `kubectl get gatewayclass nginx` shows `ACCEPTED=True`.
+</details>
+
+Neither AWS nor Azure has a first-party Gateway implementation with **confirmed** Inference
+Extension conformance at the time this was written (AWS's Gateway API GA support for ALB/VPC
+Lattice and Azure's Application Gateway for Containers ALB Controller are both real Gateway API
 implementations, just not verified against GAIE here — `# VERIFY` before swapping either in for
 NGINX Gateway Fabric). NGINX Gateway Fabric is upstream-listed as a conformant Inference Extension
 implementation and installs identically on both clouds behind a `LoadBalancer` Service.
 
-### 4.4 Send traffic and watch routing decisions
+### Step 3: Create the HF secret and deploy the chapter's manifests
+
+What you're about to do: create the Hugging Face token Secret vLLM needs to pull
+`Qwen/Qwen3-0.6B`, then apply this chapter's `kubectl kustomize`-rendered manifests for your cloud
+(Gateway, HTTPRoute, InferencePool/EPP, the single-node vLLM pool imported from chapter 09, and
+the multi-node LWS group).
+
+<details>
+<summary><b>GKE</b></summary>
 
 ```bash
-kubectl -n ch12-gateway port-forward svc/vllm-epp 9090:9090 &   # EPP's own /metrics
+./09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
+kubectl apply -k 12-inference-gateway-and-multinode-serving/gke
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
+kubectl apply -k 12-inference-gateway-and-multinode-serving/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
+kubectl apply -k 12-inference-gateway-and-multinode-serving/aks
+```
+</details>
+
+**Expected output**: a long list of `namespace/ch12-gateway created`, `gateway.gateway.networking.k8s.io/inference-gateway created`,
+`inferencepool.inference.networking.k8s.io/vllm-pool created`, `deployment.apps/vllm-epp created`,
+`deployment.apps/vllm created`, `leaderworkerset.leaderworkerset.x-k8s.io/vllm-multinode created`, etc.
+
+**How to tell this worked**:
+```bash
+kubectl -n ch12-gateway get gateway,inferencepool,deploy,lws
+```
+shows every object present with no error events yet (Pods may still be `Pending`/`ContainerCreating`
+while the node pool scales up and the image pulls).
+
+### Step 4: Wait for the Gateway and InferencePool to become ready
+
+What you're about to do: poll until the cloud load balancer is provisioned and the InferencePool
+has successfully wired up to its EPP — both take a few minutes the first time.
+
+```bash
+kubectl get gateway inference-gateway -n ch12-gateway -o wide --watch   # Ctrl-C once ADDRESS appears
+kubectl get inferencepool vllm-pool -n ch12-gateway -o yaml
+```
+
+**Expected output**: the `Gateway`'s `ADDRESS` column populates with an IP/hostname; the
+`InferencePool`'s `status.conditions` show `type: Accepted, status: "True"` and
+`type: ResolvedRefs, status: "True"`.
+
+**How to tell this worked**: both conditions above read `True` and the Gateway has a non-empty
+`ADDRESS`. If not, see section 7 (Troubleshooting) before moving on.
+
+### Step 5: Send traffic through the Gateway and watch EPP routing decisions
+
+What you're about to do: call the model through the Gateway (not the vLLM Service directly) and
+confirm the EPP is actually scoring endpoints, using its own `/metrics` port.
+
+```bash
+kubectl -n ch12-gateway port-forward svc/vllm-epp 9090:9090 &
 GW_IP=$(kubectl get gateway inference-gateway -n ch12-gateway -o jsonpath='{.status.addresses[0].value}')
 curl http://$GW_IP/v1/completions -H 'Content-Type: application/json' -d \
   '{"model":"Qwen/Qwen3-0.6B","prompt":"Kubernetes is","max_tokens":20}'
-curl -s localhost:9090/metrics | grep inference_pool   # EPP's scoring/queue-depth metrics
+curl -s localhost:9090/metrics | grep inference_pool
 ```
 
-**Expected output**: a normal OpenAI-style completion JSON from the Gateway (not from `vllm`'s
-Service directly — confirm by scaling to 2 replicas and watching the EPP metrics shift requests
-toward whichever Pod has the shorter queue).
+**Expected output**: a normal OpenAI-style completion JSON (`{"id": "...", "choices": [...]}`)
+from the Gateway, and `inference_pool_*` metric lines (e.g. `inference_pool_ready_pods`) from the
+EPP's own metrics endpoint.
 
-### 4.5 Multi-node: LeaderWorkerSet
+**How to tell this worked**: the completion succeeds through the Gateway's `$GW_IP`, not a
+port-forward to vLLM directly — confirm by scaling `vllm` to 2 replicas
+(`kubectl -n ch12-gateway scale deploy vllm --replicas=2`, needs a 2nd GPU) and watching the EPP
+metrics shift requests toward whichever Pod has the shorter queue.
+
+### Step 5b: Break it — kill a Pod mid-request
+
+What you're about to do: confirm the EPP reacts to a Pod disappearing, instead of the Gateway
+blindly sending traffic to a dead endpoint.
 
 ```bash
-kubectl apply -k common/multinode-lws -n ch12-gateway   # or via your cloud overlay, already included
+kubectl -n ch12-gateway delete pod -l app.kubernetes.io/name=vllm --wait=false
+curl http://$GW_IP/v1/completions -H 'Content-Type: application/json' -d \
+  '{"model":"Qwen/Qwen3-0.6B","prompt":"still working?","max_tokens":10}' -w '\n%{http_code}\n'
+```
+
+**Expected output**: the in-flight request to the deleted Pod fails/times out, but the next
+request (once the EPP's next scrape interval passes) succeeds again — a `200` with a completion.
+
+**How to tell this worked**: a request issued a few seconds after the delete succeeds again
+without you doing anything else; `kubectl -n ch12-gateway get pods -l app.kubernetes.io/name=vllm`
+shows a fresh Pod replacing the deleted one.
+
+### Step 6: Multi-node — LeaderWorkerSet
+
+What you're about to do: verify the `vllm-multinode` LeaderWorkerSet group (applied as part of
+step 3) has formed across 2 nodes and is serving via tensor parallelism.
+
+```bash
 kubectl get pods -n ch12-gateway -l app.kubernetes.io/name=vllm-multinode -o wide
-# expect vllm-multinode-0 (leader) and vllm-multinode-0-1 (worker) on DIFFERENT nodes
-kubectl logs -n ch12-gateway vllm-multinode-0 -f   # watch: "waiting for ray nodes to join" -> vllm serve starts
+kubectl logs -n ch12-gateway vllm-multinode-0 -f   # Ctrl-C once you see "Uvicorn running"
 kubectl -n ch12-gateway port-forward svc/vllm-multinode 8000:8000 &
-curl localhost:8000/v1/completions -d '{"model":"Qwen/Qwen3-0.6B","prompt":"hi","max_tokens":5}'
+curl localhost:8000/v1/completions -H 'Content-Type: application/json' -d \
+  '{"model":"Qwen/Qwen3-0.6B","prompt":"hi","max_tokens":5}'
 ```
 
-**Expected output**: two Pods, `-0` (leader) and `-0-1` (worker), `Running`, on two different
-nodes (`kubectl get pods -o wide`); the leader's log shows Ray forming a 2-node cluster before
-`vllm serve` starts listening.
+**Expected output**: two Pods, `vllm-multinode-0` (leader) and `vllm-multinode-0-1` (worker), both
+`Running` and on **different** nodes (check the `NODE` column); the leader's log shows
+`waiting for ray nodes to join...` then a Ray cluster forming before `vllm serve` starts listening
+on `:8000`; the `curl` returns a normal completion.
 
-### 4.6 CPU lab (no cloud account, no GPU)
+**How to tell this worked**:
+```bash
+kubectl get pods -n ch12-gateway -l app.kubernetes.io/name=vllm-multinode -o \
+  jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.nodeName}{"\n"}{end}'
+```
+prints two distinct node names — if both Pods land on the same node, tensor parallelism isn't
+actually spanning nodes and something's wrong with your node pool's scale-up.
+
+### Step 7: CPU lab (no cloud account, no GPU)
+
+What you're about to do: exercise the Gateway API and LWS mechanics without a GPU, using Ollama
+(chapter 09's CPU variant) behind a plain-`Service` HTTPRoute and a `busybox`-based LWS group.
 
 ```bash
-kubectl apply -k cpu-lab
+helm upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version 2.7.0 \
+  -n nginx-gateway --create-namespace
+./12-inference-gateway-and-multinode-serving/common/install-gateway-crds.sh
+./12-inference-gateway-and-multinode-serving/common/install-lws.sh
+kubectl apply -k 12-inference-gateway-and-multinode-serving/cpu-lab
 kubectl -n ch09-vllm-cpu port-forward svc/ollama 11434:11434 &
 kubectl get gateway inference-gateway -n ch09-vllm-cpu
 kubectl get pods -n ch09-vllm-cpu -l app.kubernetes.io/name=lws-demo
 ```
+
+**Expected output**: the Gateway gets an `ADDRESS`; `lws-demo-0` (leader) and `lws-demo-0-1`
+(worker) reach `Running`; `kubectl logs -n ch09-vllm-cpu lws-demo-0` prints a line containing
+`LWS_LEADER_ADDRESS=...` and `LWS_GROUP_INDEX=0`.
+
+**How to tell this worked**: both `lws-demo` Pods are `Running` (busybox sleep loops don't exit)
+and their startup log line shows non-empty `LWS_LEADER_ADDRESS`/`LWS_GROUP_INDEX` values, proving
+LWS injected them correctly even without real Ray/vLLM underneath.
 
 **What doesn't carry over from the CPU lab**: no `InferencePool`/EPP (Ollama doesn't expose
 vLLM's Prometheus metrics, so there's nothing for the EPP to score — the HTTPRoute targets a
@@ -322,7 +483,17 @@ Deployment, RBAC, and version upgrades yourself.
 </details>
 
 <details>
-<summary>8. Where does llm-d fit relative to what this chapter deploys?</summary>
+<summary>8b. In step 5b, why does a request sent right after <code>kubectl delete pod -l app.kubernetes.io/name=vllm</code> sometimes still fail even though a replacement Pod is created almost immediately?</summary>
+
+The EPP learns about endpoint health by scraping `/metrics` on an interval, not instantly — there's
+a window between the old Pod disappearing and the EPP's next scrape (or the Deployment's
+replacement Pod becoming Ready) during which the EPP may still route to a stale/dead endpoint or
+have no ready endpoint at all. This is the same class of lag as any polling-based health check, not
+an EPP-specific bug.
+</details>
+
+<details>
+<summary>9. Where does llm-d fit relative to what this chapter deploys?</summary>
 
 llm-d is built ON these same primitives (Gateway API Inference Extension, LWS) plus additional
 capabilities this chapter doesn't cover — prefill/decode disaggregation and fleet-wide
