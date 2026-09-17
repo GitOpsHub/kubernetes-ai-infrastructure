@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A hands-on course teaching Kubernetes for AI workloads (GPU scheduling, training, LLM serving,
 autoscaling, cost) to a DevOps audience. It is not an application — there is no build/lint/test suite.
-The "product" is a sequence of 17 numbered chapters (`00-prerequisites-and-cluster-setup` through
-`16-capstone-ai-platform`), each a self-contained lab with Kubernetes manifests, Helm values, and shell
-scripts for **GKE, EKS, and AKS**. Read [README.md](README.md) for the course map and
+The "product" is a sequence of 19 numbered chapters (`00-prerequisites-and-cluster-setup` through
+`18-infrastructure-as-code`), each a self-contained lab with Kubernetes manifests, Helm values, and shell
+scripts for **GKE, EKS, and AKS**. Chapter 18 is the one exception — Terraform instead of kustomize,
+see its README for why. Read [README.md](README.md) for the course map and
 [CONVENTIONS.md](CONVENTIONS.md) for the full chapter layout contract before adding or editing a chapter.
 
 ## Environment setup
