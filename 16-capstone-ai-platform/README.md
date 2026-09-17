@@ -5,6 +5,34 @@
 > observability, multi-tenant security, and GitOps — then break it on purpose (game day) and tear
 > it down.
 
+## Before you start
+
+This chapter assumes **every prior chapter's output, applied fresh in the order section 4 lays
+out** — it is not a chapter you can jump into cold. Concretely:
+
+- A cluster from [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) with
+  spot CPU + spot GPU node pools ([01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling))
+  and the GPU Operator ([02-nvidia-gpu-operator](../02-nvidia-gpu-operator)) installed.
+- Observability ([04-gpu-observability](../04-gpu-observability)) and model storage
+  ([05-model-storage-and-data](../05-model-storage-and-data)) from Phase 1.
+- Kueue ([06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue)) from Phase 2 — this chapter's
+  `common/kueue-bridge` only makes sense on top of chapter 06's cohort/ResourceFlavors, it doesn't
+  replace them.
+- Training ([07-distributed-training-kubeflow-trainer](../07-distributed-training-kubeflow-trainer))
+  and serving ([09-llm-inference-with-vllm](../09-llm-inference-with-vllm), optionally
+  [11-kserve](../11-kserve)) from Phase 3.
+- Gateway/autoscaling ([10-autoscaling-inference](../10-autoscaling-inference),
+  [12-inference-gateway-and-multinode-serving](../12-inference-gateway-and-multinode-serving),
+  [13-node-autoscaling-and-cost](../13-node-autoscaling-and-cost)) from Phase 4.
+- Security ([14-multi-tenancy-and-security](../14-multi-tenancy-and-security)) from Phase 5.
+- GitOps/pipelines ([15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines)) from Phase 6.
+
+If you don't have GPU quota on any cloud, skip straight to section 11 (CPU lab) — it reaches the
+same "train → register → promote → serve → verify" milestone using only chapters that already
+ship a `cpu-lab/`. Read section 10 ("Brief vs. reality") before filing a gap against your own run
+— it documents two known, deliberate scope boundaries (chapter 07 has no CPU `TrainingRuntime`;
+this chapter's own CPU lab reuses chapter 15's stand-in instead of patching chapter 07).
+
 ## 1. Why this matters
 
 Every earlier chapter proved one capability in isolation: Kueue admits a Job, a TrainJob trains a

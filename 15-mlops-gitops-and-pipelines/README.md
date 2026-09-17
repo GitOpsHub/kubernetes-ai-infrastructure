@@ -7,6 +7,30 @@
 
 ---
 
+## Before you start
+
+This chapter assumes:
+
+- **Lab A (cpu-lab) needs only a working cluster** from
+  [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) — no GPU quota, no
+  Argo CD.
+- **Lab B needs an Argo CD instance you already run** (chart `argo-cd`, namespace `argocd`) — this
+  chapter never installs or reconfigures Argo CD itself (see the note at the top of this README
+  and in [CLAUDE.md](../CLAUDE.md)). If you don't run Argo CD, skip straight to Lab A/cpu-lab;
+  there's no GitOps-specific prerequisite chapter to go read first.
+- **The chapters this app-of-apps wires together, if you want the synced Applications to actually
+  do something**: [06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue) (`app-kueue.yaml`/
+  `app-kueue-queues.yaml` reuse its values file and `team-a`/`team-b` ClusterQueue),
+  [04-gpu-observability](../04-gpu-observability) (`app-kube-prometheus-stack.yaml`),
+  [09-llm-inference-with-vllm](../09-llm-inference-with-vllm) (`app-vllm.yaml`),
+  [11-kserve](../11-kserve) (`app-kserve*.yaml`), and
+  [14-multi-tenancy-and-security](../14-multi-tenancy-and-security) (`app-ch14-security.yaml`) —
+  you don't need any of them deployed to *apply* the app-of-apps, only to have something
+  meaningful happen when you sync a given child.
+- A git fork of this repo you can push to, with every `YOUR_ORG`/`YOUR_PROJECT`/`YOUR_AWS_ACCOUNT`/
+  `YOUR_STORAGE_ACCOUNT` placeholder filled in — see §4 Step 2 before applying anything from this
+  chapter against a real Argo CD.
+
 ## 1. Why this matters
 
 Every chapter so far ended with a human running `helm install` / `kubectl apply -k` from a
@@ -190,10 +214,15 @@ Layout:
 ```
 
 ```bash
+cp env.sh.example env.sh   # repo root, if not already done
 source env.sh && source versions.env
 ```
 
-### Step 1 · No Argo CD yet? Start here (any cluster)
+### Step 1: No Argo CD yet? Start here (any cluster)
+
+What you're about to do: install Argo Workflows and MLflow directly via Helm (no Argo CD
+involved), then run the `train-and-register` pipeline end to end and confirm MLflow actually
+recorded the run.
 
 ```bash
 ./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh
@@ -204,25 +233,69 @@ kubectl -n mlflow port-forward svc/mlflow 5000:5000 &
 argo submit --watch -n ch15-pipelines --from workflowtemplate/train-and-register
 ```
 
-Expected: the Workflow completes both steps; `http://localhost:5000` shows experiment
-`ch15-train-and-register` with a logged run and a registered model `ch15-demo-model`.
+**Expected output**: `argo submit --watch` prints both steps (`train`, `register`) reaching
+`Succeeded`, ending with `Status: Succeeded`.
 
-### Step 2 (only if you run Argo CD) · Review, then apply the app-of-apps
+**How to tell this worked**: open `http://localhost:5000` — the `ch15-train-and-register`
+experiment has a new run with a logged `eval_loss` metric, and **Models** shows a registered
+model `ch15-demo-model` with a new version. If the Workflow succeeded but nothing shows up here,
+the register step ran against the wrong `MLFLOW_TRACKING_URI` — see section 6.
+
+### Step 2 (only if you run Argo CD): Review, then apply the app-of-apps
 
 **Do not skip the review.** Every `Application`/`AppProject` manifest here has `YOUR_ORG`,
 `YOUR_PROJECT`, `YOUR_AWS_ACCOUNT`, or `YOUR_STORAGE_ACCOUNT` placeholders — fill in your own
-fork's clone URL and cloud identifiers first (`grep -rn YOUR_ 15-mlops-gitops-and-pipelines/` to
-find every one), and push this repo somewhere Argo CD can reach.
+fork's clone URL and cloud identifiers first, and push this repo somewhere Argo CD can reach.
 
 ```bash
+grep -rln "YOUR_" 15-mlops-gitops-and-pipelines/   # find every placeholder before editing
 grep -rln "YOUR_" 15-mlops-gitops-and-pipelines/ | xargs sed -i '' 's#YOUR_ORG/kubernetes-ai-infrastructure#<your-fork>#g'   # example; do the rest by hand
-kubectl apply -f 15-mlops-gitops-and-pipelines/gke/root-app.yaml           # and the AppProject:
-kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
-argocd app get ch15-app-of-apps
-argocd app list -l app.kubernetes.io/part-of=ai-platform    # 8 child apps, all OutOfSync (manual sync — expected)
 ```
 
-### Step 3 · Sync one child app, read the diff first
+<details>
+<summary><b>GKE</b></summary>
+
+```bash
+kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/gke/root-app.yaml
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/root-app.yaml
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/aks/root-app.yaml
+```
+</details>
+
+```bash
+argocd app get ch15-app-of-apps
+argocd app list -l app.kubernetes.io/part-of=ai-platform
+```
+
+**Expected output**: `argocd app get ch15-app-of-apps` shows `Health: Healthy` (the root
+Application itself just creates the 8 child Application objects — a fast sync); `argocd app list`
+shows all 8 child apps with `SYNC STATUS: OutOfSync` (manual sync — expected, see §3.2).
+
+**How to tell this worked**: 8 child apps listed, not an error about `AppProject ai-platform does
+not allow ...` — if you see that, a `destinations`/`sourceRepos` entry is missing in
+`project.yaml` for the app's target namespace/repo (see section 6).
+
+### Step 3: Sync one child app, read the diff first
+
+What you're about to do: sync exactly one child Application after reviewing its diff — the
+pattern you'd repeat for each app once you trust it, never all 8 at once on a first run.
 
 ```bash
 argocd app diff ch15-mlflow
@@ -230,12 +303,33 @@ argocd app sync ch15-mlflow
 argocd app wait ch15-mlflow --health
 ```
 
-### Step 4 (optional) · Add a ninth Application
+**Expected output**: `argocd app diff` prints the resources about to be created (MLflow
+Deployment, Service, PVC, etc.); `argocd app sync` streams the apply; `argocd app wait --health`
+blocks until `Healthy` or times out.
 
-Copy `common/argocd-apps/apps-gke/app-vllm.yaml`, point it at a chapter this course didn't wire
-up yet (e.g. `11-kserve/gke`), add it to that directory's `kustomization.yaml`, commit, push,
-and `argocd app sync ch15-app-of-apps` — the new child Application appears without you ever
-running `argocd app create`.
+**How to tell this worked**: `argocd app get ch15-mlflow` shows `Sync Status: Synced` and
+`Health Status: Healthy`; `kubectl -n mlflow get pods` shows the MLflow pod `Running`.
+
+### Step 4 (optional): Add a ninth Application
+
+What you're about to do: extend the app-of-apps with a component this chapter didn't wire up, to
+prove the "commit a file, Argo CD creates the Application" mechanic from §3.1 yourself.
+
+```bash
+cp 15-mlops-gitops-and-pipelines/common/argocd-apps/apps-gke/app-vllm.yaml \
+   15-mlops-gitops-and-pipelines/common/argocd-apps/apps-gke/app-kserve-demo.yaml
+# edit app-kserve-demo.yaml: change metadata.name and spec.source.path to point at 11-kserve/gke
+# add it to apps-gke/kustomization.yaml's resources list
+git add -A && git commit -m "ch15: add kserve demo Application" && git push
+argocd app sync ch15-app-of-apps
+argocd app list -l app.kubernetes.io/part-of=ai-platform   # now 9
+```
+
+**Expected output**: after the push and root-app sync, a ninth Application (whatever you named
+it) appears in `argocd app list`, `OutOfSync` (manual sync, same as the others).
+
+**How to tell this worked**: you never ran `argocd app create` for the ninth app — it exists
+purely because it was a file in the directory the root Application's `source.path` points at.
 
 ## 5. Spot considerations
 
@@ -302,6 +396,9 @@ running `argocd app create`.
    chapter `07`, and why would you still want Kueue in that path?
 8. Your MLflow backend store is SQLite on a `ReadWriteOnce` PVC. What's the specific failure
    mode on spot capacity, and what's the fix?
+9. `root-app.yaml`'s `spec.destination.namespace` is `argocd`, and `app-pipelines.yaml`'s is
+   `ch15-pipelines`. Both need an entry in `project.yaml`'s `destinations` list to sync — why does
+   the FIRST one matter for literally every other Application in this chapter, not just the root?
 
 <details>
 <summary>Answers</summary>
@@ -347,6 +444,12 @@ running `argocd app create`.
    backend store until the original node/pod recovers. Fix: `backendStore.postgres` pointed at
    a managed database (Cloud SQL/RDS/Azure Database), which isn't tied to a single node's
    attached volume.
+9. Every child Application object (`ch15-kueue`, `ch15-mlflow`, all 8 of them) is itself a
+   Kubernetes object that lives IN the `argocd` namespace — they're what the root Application's
+   sync creates. If `argocd` isn't in `project.yaml`'s `destinations`, the root Application can't
+   sync at all ("destination not permitted"), which means none of the 8 children ever get created
+   in the first place — a missing `ch15-pipelines` entry only breaks that one child's own sync,
+   but a missing `argocd` entry breaks the entire app-of-apps before it starts.
 
 </details>
 

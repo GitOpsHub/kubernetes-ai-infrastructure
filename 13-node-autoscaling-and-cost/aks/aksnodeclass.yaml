@@ -1,12 +1,15 @@
 # AKS Node Auto Provisioning (NAP) runs Karpenter under the hood, so the NodePool CRD is the
 # SAME karpenter.sh/v1 API as EKS/OSS Karpenter -- only the NodeClass is Azure-specific.
-# apiVersion karpenter.azure.com/v1beta1 for AKSNodeClass verified via Microsoft Learn's
-# node-auto-provisioning-aksnodeclass reference. Fields beyond imageFamily are less commonly
-# documented -- `# VERIFY` osDiskSizeGB/maxPods against that page before depending on them.
+# apiVersion karpenter.azure.com/v1beta1, imageFamily and osDiskSizeGB verified against Microsoft
+# Learn's node-auto-provisioning-aksnodeclass reference. Corrected `imageFamily` from an invalid
+# `Ubuntu2204` (not a real enum value) to `Ubuntu` -- the only valid values are `Ubuntu`,
+# `AzureLinux`, `AzureContainerLinux`; the OS *version* (22.04 vs 24.04) is derived from the
+# cluster's Kubernetes version, not chosen here. `osDiskSizeGB: 128` matches the documented
+# default (min 30, no VERIFY needed).
 apiVersion: karpenter.azure.com/v1beta1
 kind: AKSNodeClass
 metadata:
   name: gpu
 spec:
-  imageFamily: Ubuntu2204 # VERIFY: exact enum value at v1beta1
-  osDiskSizeGB: 128 # VERIFY
+  imageFamily: Ubuntu
+  osDiskSizeGB: 128

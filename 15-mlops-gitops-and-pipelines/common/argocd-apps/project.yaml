@@ -18,10 +18,16 @@ spec:
     - "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY: set to your fork's actual clone URL
     - "oci://registry.k8s.io/kueue/charts/kueue"
     - "https://prometheus-community.github.io/helm-charts"
-    - "https://kserve.github.io/charts"
+    # KServe ships as OCI charts (ghcr.io), not the classic https://kserve.github.io/charts repo
+    # -- matches 11-kserve/*/install-kserve.sh's `helm upgrade --install ... oci://ghcr.io/kserve/
+    # charts/kserve-crd|kserve-resources`. Corrected from the non-OCI repo URL, which would have
+    # made app-kserve-crd.yaml/app-kserve.yaml fail to sync ("repo not permitted in project").
+    - "oci://ghcr.io/kserve/charts/*"
     - "https://argoproj.github.io/argo-helm"
     - "https://community-charts.github.io/helm-charts"
   destinations:
+    - namespace: "argocd"   # root-app.yaml and every child Application object itself live here --
+      server: "https://kubernetes.default.svc"   # without this, the app-of-apps can't sync at all
     - namespace: "ch06-kueue"
       server: "https://kubernetes.default.svc"
     - namespace: "kueue-system"
@@ -40,6 +46,8 @@ spec:
       server: "https://kubernetes.default.svc"
     - namespace: "kyverno"
       server: "https://kubernetes.default.svc"
+    - namespace: "ch15-pipelines"   # app-pipelines.yaml's destination -- was missing, sync would
+      server: "https://kubernetes.default.svc"   # have failed with "destination not permitted"
     - namespace: "argo"
       server: "https://kubernetes.default.svc"
     - namespace: "mlflow"
@@ -48,6 +56,13 @@ spec:
     # Namespaces + the cluster-scoped CRDs this course's child apps create. Empty list (the
     # AppProject default) would block Kueue's ResourceFlavor/ClusterQueue and this course's
     # ValidatingAdmissionPolicy/Kyverno ClusterPolicy objects from ever syncing.
+    #
+    # Deliberately does NOT include ClusterRoleBinding: chapter 14's RBAC
+    # (14-multi-tenancy-and-security/common/rbac) only ever creates a cluster-scoped ClusterRole
+    # (`ch14-platform-admin`) and namespaced Role/RoleBinding objects — no ClusterRoleBinding
+    # exists anywhere in this course's manifests. Whitelisting ClusterRoleBinding here would be
+    # the exact hole checkpoint question 4 below describes; leaving it off is what makes that
+    # question's answer true instead of aspirational.
     - group: ""
       kind: Namespace
     - group: "kueue.x-k8s.io"
@@ -60,8 +75,6 @@ spec:
       kind: ClusterPolicy
     - group: "rbac.authorization.k8s.io"
       kind: ClusterRole
-    - group: "rbac.authorization.k8s.io"
-      kind: ClusterRoleBinding
     - group: "external-secrets.io"
       kind: ClusterSecretStore
   orphanedResources:

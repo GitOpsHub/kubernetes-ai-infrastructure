@@ -1,8 +1,9 @@
 # Same karpenter.sh/v1 NodePool API as eks/nodepool.yaml -- spot first (weight 10), on-demand
-# fallback (weight 1). AKS's spot SKUs use `kubernetes.azure.com/scalesetpriority` OR the
-# Karpenter-native `karpenter.sh/capacity-type` requirement; `# VERIFY` which one the AKS
-# Karpenter provider expects at KARPENTER_VERSION (the OSS key is used here since NAP is
-# explicitly "based on the open-source Karpenter... project" per Microsoft's own docs).
+# fallback (weight 1). Verified against Microsoft Learn's "Configure node pools for NAP" selector
+# table: `karpenter.sh/capacity-type` (values spot/on-demand) IS the correct OSS Karpenter key on
+# AKS NAP too. Corrected `node.kubernetes.io/instance-type` (not in AKS NAP's supported selector
+# table) to `karpenter.azure.com/sku-name`, the Azure-provider-specific "explicit SKU name"
+# selector -- the AWS-style `node.kubernetes.io/instance-type` label doesn't exist on AKS NAP nodes.
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
@@ -18,7 +19,7 @@ spec:
       - key: karpenter.sh/capacity-type
         operator: In
         values: ["spot"]
-      - key: node.kubernetes.io/instance-type
+      - key: karpenter.azure.com/sku-name
         operator: In
         # T4 first (cheap, widely available), A10 as an advanced fallback.
         values: ["Standard_NC4as_T4_v3", "Standard_NV36ads_A10_v5"]
@@ -52,7 +53,7 @@ spec:
       - key: karpenter.sh/capacity-type
         operator: In
         values: ["on-demand"]
-      - key: node.kubernetes.io/instance-type
+      - key: karpenter.azure.com/sku-name
         operator: In
         values: ["Standard_NC4as_T4_v3"]
       taints:

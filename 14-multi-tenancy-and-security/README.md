@@ -7,6 +7,26 @@
 
 ---
 
+## Before you start
+
+This chapter assumes:
+
+- **A working cluster** from [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup)
+  — the `cpu-lab` sections need no GPU quota at all, but Lab B (your cloud) needs a real cloud
+  account with workload identity federation enabled the way chapter 00 sets it up (GKE Workload
+  Identity / EKS OIDC provider for IRSA / AKS Workload Identity — all three are cluster-creation-time
+  settings you can't easily bolt on after the fact).
+- **The `team-a`/`team-b` tenant concept from [06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue)**
+  — this chapter reuses those names for its namespaces (`ch14-team-a`/`ch14-team-b`) and explains
+  in §3.1/checkpoint 6 how its `ResourceQuota` layers on top of (not instead of) chapter 06's
+  ClusterQueue.
+- **`hf-token` Secret consumers from chapters 07/09** — Lab B's `ExternalSecret` produces a
+  `Secret` named `hf-token`, the same name those chapters' manifests already expect; you don't
+  need those chapters deployed to run this one, but the naming match is intentional.
+- **The `monitoring` namespace from [04-gpu-observability](../04-gpu-observability)** if you want
+  `common/netpol/allow-monitoring-scrape.yaml` to actually allow live traffic (the NetworkPolicy
+  applies regardless, it just has nothing to allow if `monitoring` doesn't exist yet).
+
 ## 1. Why this matters
 
 Every chapter so far assumed one friendly operator with cluster-admin. Real GPU clusters are
@@ -189,65 +209,164 @@ Layout:
 ```
 
 ```bash
+cp env.sh.example env.sh   # repo root, if not already done
 source env.sh && source versions.env
 ```
 
-### Step 1 · Namespaces, quotas, RBAC (any cluster)
+### Step 1: Namespaces, quotas, RBAC (any cluster)
+
+What you're about to do: apply the tenant namespaces/quota/RBAC (this is `cpu-lab`'s pull of
+`common/`, so it works on any cluster with no cloud IAM), then prove RBAC does what §3.2 claims —
+a tenant can create the objects it needs but can't touch Secrets, RoleBindings, or the other
+tenant's namespace.
 
 ```bash
 kubectl apply -k 14-multi-tenancy-and-security/cpu-lab
 kubectl get ns ch14-team-a ch14-team-b -o jsonpath='{.items[*].metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null
 kubectl describe resourcequota team-a-quota -n ch14-team-a
-kubectl auth can-i create jobs --as-group=team-a-engineers -n ch14-team-a         # yes
-kubectl auth can-i create secrets --as-group=team-a-engineers -n ch14-team-a      # no
-kubectl auth can-i create rolebindings --as-group=team-a-engineers -n ch14-team-a # no
-kubectl auth can-i get pods --as-group=team-a-engineers -n ch14-team-b            # no (RBAC is namespace-scoped)
+kubectl auth can-i create jobs --as-group=team-a-engineers -n ch14-team-a
+kubectl auth can-i create secrets --as-group=team-a-engineers -n ch14-team-a
+kubectl auth can-i create rolebindings --as-group=team-a-engineers -n ch14-team-a
+kubectl auth can-i get pods --as-group=team-a-engineers -n ch14-team-b
 ```
 
-### Step 2 · Pod Security Admission in action
+**Expected output**: the `pod-security` label query prints `restricted restricted` (one per
+namespace); `describe resourcequota` shows `Used` lines starting at `0` against the `Hard` limits
+from `common/base/resourcequota-team-a.yaml`; the four `auth can-i` calls print `yes`, `no`, `no`,
+`no` in that order.
+
+**How to tell this worked**: exactly that `yes`/`no`/`no`/`no` sequence — if the second or third
+prints `yes`, the RBAC Role is over-permissioned; if the first prints `no`, team-a can't do its
+actual job.
+
+### Step 2: Pod Security Admission in action
+
+What you're about to do: try to create a Pod that needs host access, and watch the API server
+reject it at admission time — no webhook, no extra pod, just the namespace's PSA label.
 
 ```bash
-kubectl run priv-test --image=nginx --overrides='{"spec":{"containers":[{"name":"priv-test","image":"nginx","securityContext":{"privileged":true}}]}}' -n ch14-team-a
-# Expected: error creating pod: pods "priv-test" is forbidden: violates PodSecurity "restricted:latest" ...
+kubectl run priv-test --image=nginx -n ch14-team-a \
+  --overrides='{"spec":{"containers":[{"name":"priv-test","image":"nginx","securityContext":{"privileged":true}}]}}'
 ```
 
-### Step 3 · NetworkPolicy: prove default-deny, then prove the allow rules
+**Expected output**:
+```
+Error from server (Forbidden): pods "priv-test" is forbidden: violates PodSecurity "restricted:latest": privileged (container "priv-test" must not set securityContext.privileged=true)
+```
+
+**How to tell this worked**: the Pod is rejected (never created) — `kubectl get pod priv-test -n ch14-team-a` returns `NotFound`, not `Pending`/`CrashLoopBackOff`.
+
+### Step 3: NetworkPolicy — prove default-deny, then prove the allow rules
+
+What you're about to do: confirm the default-deny baseline still lets the documented traffic
+through (DNS, HTTPS egress) while blocking cross-tenant traffic that's on no allow-list.
 
 ```bash
 kubectl run curler --image=curlimages/curl -n ch14-team-a --command -- sleep 3600
-kubectl exec -n ch14-team-a curler -- curl -m3 -s -o /dev/null -w '%{http_code}\n' https://huggingface.co   # allowed (443 egress rule)
-kubectl exec -n ch14-team-a curler -- curl -m3 -s -o /dev/null -w '%{http_code}\n' http://some-svc.ch14-team-b.svc.cluster.local  # times out — cross-tenant is not on any allow list
+kubectl wait --for=condition=Ready pod/curler -n ch14-team-a --timeout=60s
+kubectl exec -n ch14-team-a curler -- curl -m3 -s -o /dev/null -w '%{http_code}\n' https://huggingface.co
+kubectl exec -n ch14-team-a curler -- curl -m3 -s -o /dev/null -w '%{http_code}\n' http://some-svc.ch14-team-b.svc.cluster.local
 ```
 
-### Step 4 · ValidatingAdmissionPolicy: CEL rejecting bad manifests
+**Expected output**: the first `curl` prints `200` (or `301`/`302`) — allowed by
+`allow-egress-internet-https-team-a`. The second hangs for the full 3s timeout and prints nothing
+useful (connection timed out, `curl` exit code 28) — cross-tenant traffic is on no allow-list.
+
+**How to tell this worked**: the first call succeeds fast, the second one times out rather than
+getting a fast `Connection refused` — a timeout is what NetworkPolicy-level dropping looks like
+(no RST packet, unlike an actual closed port).
+
+### Step 4: ValidatingAdmissionPolicy — CEL rejecting bad manifests
+
+What you're about to do: apply the three CEL policies and confirm the `:latest`-tag rule actually
+fires on a manifest that violates it.
 
 ```bash
-kubectl apply -f 14-multi-tenancy-and-security/common/policy   # standalone, also included via common/kustomization.yaml
+kubectl apply -f 14-multi-tenancy-and-security/common/policy   # standalone; also included via common/kustomization.yaml
 kubectl create deployment bad --image=docker.io/library/nginx:latest -n ch14-team-a
-# Expected: error: deployments.apps "bad" is forbidden: ValidatingAdmissionPolicy 'ch14-disallow-latest-tag' ... denied request: container images must be pinned ...
 ```
 
-### Step 5 (your cloud) · External Secrets Operator with real Workload Identity
+**Expected output**:
+```
+error: failed to create deployment: admission webhook denied the request: deployments.apps "bad" is forbidden: ValidatingAdmissionPolicy 'ch14-disallow-latest-tag' with binding 'ch14-disallow-latest-tag-binding' denied request: container images must be pinned to an explicit tag or digest, not ':latest' or an implicit tag
+```
+
+**How to tell this worked**: the error names `ch14-disallow-latest-tag` specifically — if you see
+`ch14-require-resource-limits` instead (or both), that's expected too (this manifest also omits
+`resources`, so both policies are entitled to reject it; whichever one the API server evaluates
+and reports first is not guaranteed to be the same every time).
+
+### Step 5 (your cloud): External Secrets Operator with real Workload Identity
+
+What you're about to do: install ESO, print (then run yourself) the IAM commands that let ESO's
+controller pod read your cloud's secret manager via workload identity — no static key — then
+confirm a real secret synced into a Kubernetes `Secret`.
+
+<details>
+<summary><b>GKE</b></summary>
 
 ```bash
-./14-multi-tenancy-and-security/<gke|eks|aks>/install-external-secrets.sh
-./14-multi-tenancy-and-security/<gke|eks|aks>/setup-workload-identity.sh   # prints the IAM commands — review, then run them yourself
-kubectl apply -k 14-multi-tenancy-and-security/<gke|eks|aks>
+./14-multi-tenancy-and-security/gke/install-external-secrets.sh
+./14-multi-tenancy-and-security/gke/setup-workload-identity.sh   # prints gcloud commands — review, then run them yourself
+kubectl apply -k 14-multi-tenancy-and-security/gke
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./14-multi-tenancy-and-security/eks/install-external-secrets.sh
+./14-multi-tenancy-and-security/eks/setup-workload-identity.sh   # prints eksctl/aws commands — review, then run them yourself
+kubectl apply -k 14-multi-tenancy-and-security/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./14-multi-tenancy-and-security/aks/install-external-secrets.sh
+./14-multi-tenancy-and-security/aks/setup-workload-identity.sh   # prints az commands — review, then run them yourself
+kubectl apply -k 14-multi-tenancy-and-security/aks
+```
+</details>
+
+```bash
 kubectl get clustersecretstore
 kubectl get externalsecret -n ch14-team-a
 kubectl get secret hf-token -n ch14-team-a -o jsonpath='{.data.HF_TOKEN}' | base64 -d; echo
 ```
 
-Expected: `clustersecretstore` shows `READY: True`; `externalsecret` shows `STATUS: SecretSynced`.
+**Expected output**: `clustersecretstore` shows `READY  True`; `externalsecret` shows
+`STATUS  SecretSynced`; the last command prints your actual HF token value (proving the sync
+round-trip worked end to end, not just that the objects exist).
 
-### Step 6 · Kyverno signature verification
+**How to tell this worked**: `READY: True` and `SecretSynced` — if either is `False`, check
+section 6 (Troubleshooting) before assuming the secret value; a stale/empty `Secret` from a
+previous failed sync can still exist even while the current state is broken.
+
+### Step 6: Kyverno signature verification
+
+What you're about to do: install Kyverno, apply a `verifyImages` ClusterPolicy (after filling in
+your own org/identity), and confirm an unsigned image gets rejected at admission time.
 
 ```bash
 ./14-multi-tenancy-and-security/<gke|eks|aks|cpu-lab>/install-kyverno.sh
-kubectl apply -f 14-multi-tenancy-and-security/common/policy/kyverno-verify-images.yaml   # fill in YOUR_ORG/YOUR_REPO first
+# Edit common/policy/kyverno-verify-images.yaml first: replace YOUR_ORG/YOUR_REPO with a real
+# GitHub org/repo and the cosign keyless certificate-identity-regexp for your CI pipeline.
+kubectl apply -f 14-multi-tenancy-and-security/common/policy/kyverno-verify-images.yaml
 kubectl run test --image=ghcr.io/YOUR_ORG/unsigned:latest -n ch14-team-a
-# Expected: error ... admission webhook "validate.kyverno.svc-fail" denied the request: ... failed to verify signature
 ```
+
+**Expected output**:
+```
+Error from server: admission webhook "validate.kyverno.svc-fail" denied the request: ...
+failed to verify signature ...
+```
+
+**How to tell this worked**: the Pod is rejected before it's ever created (`kubectl get pod test -n ch14-team-a` returns `NotFound`); if it instead gets created and then fails PSA or the VAP
+policies, Kyverno's webhook isn't actually being called — check `kubectl get validatingwebhookconfigurations` for the Kyverno entry.
 
 ## 5. Spot considerations
 
