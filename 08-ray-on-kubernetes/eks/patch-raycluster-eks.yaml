@@ -1,0 +1,11 @@
+- op: add
+  path: /spec/workerGroupSpecs/0/template/spec/nodeSelector
+  value:
+    eks.amazonaws.com/capacityType: SPOT   # set automatically on managed node groups
+    ch08.lab/gpu: l4                       # set by create-gpu-nodegroup.sh (spot + on-demand)
+- op: add
+  path: /spec/workerGroupSpecs/0/template/spec/tolerations
+  value:
+    - key: nvidia.com/gpu                  # taint added by create-gpu-nodegroup.sh
+      operator: Exists
+      effect: NoSchedule

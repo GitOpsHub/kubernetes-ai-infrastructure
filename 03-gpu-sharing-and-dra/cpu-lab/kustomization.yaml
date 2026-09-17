@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Requires: create-kind-cluster.sh then install-example-driver.sh (installs the DeviceClass).
+namespace: ch03-dra-cpu-lab
+resources:
+  - namespace.yaml
+  - 01-single-claim.yaml
+  - 02-sharing-config.yaml

@@ -1,0 +1,29 @@
+# eksctl managed nodegroup config: a Spot group (default target) and a tiny on-demand group
+# for the Kueue controller itself. Edit metadata.name/region, or export EKS_CLUSTER/AWS_REGION
+# and run: eksctl create nodegroup -f 06-batch-jobs-and-kueue/eks/nodegroup-ch06.yaml
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: eks-ai-lab   # must match ${EKS_CLUSTER}
+  region: us-east-1   # must match ${AWS_REGION}
+
+managedNodeGroups:
+  - name: ch06-cpu-spot
+    instanceTypes: ["m6a.xlarge", "m6i.xlarge", "m5.xlarge"] # diversify across a spot pool
+    spot: true
+    capacityType: SPOT
+    desiredCapacity: 1
+    minSize: 0
+    maxSize: 3
+    volumeSize: 50
+    labels:
+      workload: ch06-batch
+  - name: ch06-cpu-ondemand
+    instanceTypes: ["m6a.xlarge"]
+    capacityType: ON_DEMAND
+    desiredCapacity: 1
+    minSize: 0
+    maxSize: 1
+    volumeSize: 50
+    labels:
+      workload: ch06-controller

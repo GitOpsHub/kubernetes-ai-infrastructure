@@ -1,0 +1,28 @@
+# THE app-of-apps entrypoint. This is the one Application a human applies by hand (or via
+# `argocd app create -f`) against the EXISTING Argo CD (chart argo-cd 10.4.0, namespace
+# argocd) — nothing in this repo installs or reconfigures Argo CD itself. Everything else in
+# this chapter (project.yaml, apps-aks/*) is content this Application points Argo CD at;
+# none of it runs until you apply this one object and it points at a real repoURL you control.
+#
+# Safe-by-default: manual sync only (no `syncPolicy.automated` block) so nothing changes on
+# your cluster the moment Argo CD notices this file — you `argocd app sync` (or click Sync in
+# the UI) once you've reviewed the diff. See README §4 Step 1 before applying this.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ch15-app-of-apps
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: ai-platform
+spec:
+  project: ai-platform
+  source:
+    repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY: replace with your fork's actual clone URL (and push this repo there) before applying
+    targetRevision: main
+    path: 15-mlops-gitops-and-pipelines/common/argocd-apps/apps-aks
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: argocd
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=false   # argocd namespace must already exist — this app never creates it

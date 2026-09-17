@@ -1,0 +1,29 @@
+# InferencePool groups Pods that serve the SAME model on the SAME hardware shape and hands
+# per-request endpoint selection to the EPP (Endpoint Picker), instead of the Gateway's default
+# round-robin/least-connections Service load balancing.
+#
+# Verified against the InferencePool CRD at gateway-api-inference-extension v1.6.1
+# (inference.networking.k8s.io_inferencepools.yaml): group inference.networking.k8s.io, kind
+# InferencePool, apiVersion v1 (promoted from v1alpha2 in the v1.0 GA migration); spec.selector
+# (matchLabels), spec.targetPorts ([]{number}, max 8), spec.endpointPickerRef
+# {group,kind,name,port{number},failureMode}.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: vllm-pool
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  targetPorts:
+  - number: 8000
+  endpointPickerRef:
+    # VERIFY: group/kind for a Kubernetes Service-backed EPP. Some implementations (e.g. GKE
+    # Inference Gateway) manage the EPP for you and only need `name`+`port`; this manifest targets
+    # the self-hosted reference EPP Service defined in epp-service.yaml.
+    group: ""
+    kind: Service
+    name: vllm-epp
+    port:
+      number: 9002
+    failureMode: FailClose

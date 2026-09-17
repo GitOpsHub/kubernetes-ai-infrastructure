@@ -1,0 +1,21 @@
+# Argo Workflows 2.0.6 (chart) / v4.1.3 (app) — helm show values oci://... isn't available for
+# this HTTPS-repo chart the way OCI charts are locally without a full add+update cycle; values
+# below were verified against https://github.com/argoproj/argo-helm/blob/main/charts/argo-workflows/values.yaml
+# at the pinned chart tag. # VERIFY if you bump ARGO_WORKFLOWS_CHART_VERSION.
+controller:
+  # Pin the controller off spot for the same reason chapter 06 pins Kueue's controller off
+  # spot: it's cluster-wide orchestration, not a per-tenant workload.
+  nodeSelector:
+    cloud.google.com/gke-spot: "false"   # overridden per-cloud below if you template this file per cloud
+  workflowNamespaces:
+    - ch06-kueue
+    - ch07-training
+    - ch08-ray
+    - ch14-team-a
+    - ch14-team-b
+  # Argo Workflows' own Workflow/WorkflowTemplate CRDs are queued through Kueue too when a step
+  # pod carries `kueue.x-k8s.io/queue-name` — same admission model as chapter 06/07/08.
+server:
+  extraArgs:
+    - --auth-mode=sso   # VERIFY: requires SSO configured against your IdP; use `--auth-mode=server` for the lab only, never in front of a shared cluster
+useDefaultArtifactRepo: false   # this chapter's example WorkflowTemplate sets its own artifact repo per cloud (see gke/eks/aks values-artifact-repo-*.yaml)

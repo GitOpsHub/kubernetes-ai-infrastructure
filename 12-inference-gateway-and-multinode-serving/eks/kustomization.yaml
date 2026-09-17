@@ -1,0 +1,22 @@
+# EKS: no first-party Gateway-API-Inference-Extension-conformant AWS controller yet (the AWS
+# Load Balancer Controller's Gateway API GA support and the VPC Lattice controller are ALB/mesh
+# implementations without confirmed InferencePool conformance at pin time -- VERIFY before relying
+# on either in place of this). We install NGINX Gateway Fabric instead: self-hosted, upstream-listed
+# as Inference Extension conformant, works identically on every cloud behind a Service of type
+# LoadBalancer.
+#   ../../01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh   # reuse spot-gpu, maxSize 2
+#   ./install-nginx-gateway-fabric.sh
+#   ../common/install-gateway-crds.sh && ../common/install-lws.sh
+#   ../../09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
+#   kubectl apply -k 12-inference-gateway-and-multinode-serving/eks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../common
+patches:
+- target: {kind: Gateway, name: inference-gateway}
+  path: patch-gatewayclass.yaml
+- target: {kind: Deployment, name: vllm}
+  path: patch-spot-vllm.yaml
+- target: {kind: LeaderWorkerSet, name: vllm-multinode}
+  path: patch-spot-lws.yaml

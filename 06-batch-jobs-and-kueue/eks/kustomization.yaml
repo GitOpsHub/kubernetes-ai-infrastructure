@@ -1,0 +1,24 @@
+# EKS: patches the "spot" ResourceFlavor to the label EKS managed node groups apply
+# automatically for capacityType: SPOT, and "on-demand" to ON_DEMAND.
+#   eksctl create nodegroup -f 06-batch-jobs-and-kueue/eks/nodegroup-ch06.yaml
+#   ./install-kueue.sh
+#   kubectl apply -k 06-batch-jobs-and-kueue/eks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common/base
+  - ../common/flavors
+  - ../common/queues
+patches:
+  - target: {kind: ResourceFlavor, name: spot}
+    patch: |-
+      - op: replace
+        path: /spec/nodeLabels
+        value:
+          eks.amazonaws.com/capacityType: SPOT
+  - target: {kind: ResourceFlavor, name: on-demand}
+    patch: |-
+      - op: replace
+        path: /spec/nodeLabels
+        value:
+          eks.amazonaws.com/capacityType: ON_DEMAND

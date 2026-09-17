@@ -1,0 +1,6 @@
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: batch-high
+value: 10000
+description: "Deadline-sensitive batch work: can preempt batch-low within the cohort."

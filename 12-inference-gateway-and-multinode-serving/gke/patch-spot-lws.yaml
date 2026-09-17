@@ -1,0 +1,10 @@
+- op: add
+  path: /spec/leaderWorkerTemplate/leaderTemplate/spec/nodeSelector
+  value:
+    cloud.google.com/gke-spot: "true"
+    cloud.google.com/gke-accelerator: nvidia-l4
+- op: add
+  path: /spec/leaderWorkerTemplate/workerTemplate/spec/nodeSelector
+  value:
+    cloud.google.com/gke-spot: "true"
+    cloud.google.com/gke-accelerator: nvidia-l4

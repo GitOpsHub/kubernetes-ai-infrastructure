@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: ch14-team-a
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - namespaceSelector: {}   # kube-dns/CoreDNS lives in kube-system; namespace label varies
+                               # by cloud, so match any namespace and pin the port instead
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53

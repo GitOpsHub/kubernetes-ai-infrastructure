@@ -1,0 +1,91 @@
+# Minimal train -> register pipeline: containerized "training" step (stands in for chapter 07's
+# TrainJob — swap the image/command for a real one) writes a metric + a tiny checkpoint, then
+# an MLflow step logs the run and registers the model. Demonstrates Argo Workflows orchestrating
+# across steps that live in different namespaces' worth of tooling (training compute + MLflow
+# registry) without hand-running each stage.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: train-and-register
+  namespace: ch15-pipelines
+spec:
+  entrypoint: pipeline
+  serviceAccountName: pipelines-runner
+  templates:
+  - name: pipeline
+    steps:
+    - - name: train
+        template: train-step
+    - - name: register
+        template: register-step
+        arguments:
+          parameters:
+          - name: run-dir
+            value: "{{steps.train.outputs.parameters.run-dir}}"
+
+  - name: train-step
+    # Real usage: replace this container with the trained checkpoint your TrainJob (chapter 07)
+    # or Ray training job (chapter 08) already produces, and skip straight to `register-step`
+    # with that job's output path — this inline Python step is the CPU-friendly stand-in so the
+    # pipeline runs end to end without GPU quota.
+    outputs:
+      parameters:
+      - name: run-dir
+        valueFrom:
+          path: /tmp/run-dir.txt
+    container:
+      image: python:3.12-slim
+      command: ["python", "-c"]
+      args:
+      - |
+        import json, os, pathlib, random
+        run_dir = "/mnt/artifacts/run-demo"
+        pathlib.Path(run_dir).mkdir(parents=True, exist_ok=True)
+        metrics = {"eval_loss": round(random.uniform(0.3, 0.6), 4)}
+        pathlib.Path(f"{run_dir}/metrics.json").write_text(json.dumps(metrics))
+        pathlib.Path(f"{run_dir}/model.txt").write_text("stand-in checkpoint\n")
+        pathlib.Path("/tmp/run-dir.txt").write_text(run_dir)
+        print("wrote", run_dir, metrics)
+      volumeMounts:
+      - name: artifacts
+        mountPath: /mnt/artifacts
+      resources:
+        requests: {cpu: 250m, memory: 256Mi}
+        limits: {cpu: "1", memory: 1Gi}
+    volumes:
+    - name: artifacts
+      persistentVolumeClaim:
+        claimName: pipeline-artifacts
+
+  - name: register-step
+    inputs:
+      parameters:
+      - name: run-dir
+    container:
+      image: ghcr.io/mlflow/mlflow:v3.4.0   # VERIFY: pin to the MLflow client version matching your server's app version (3.16.0 per mlflow chart 1.11.7); mlflow's own client/server compat policy allows a client older than the server
+      command: ["python", "-c"]
+      args:
+      - |
+        import json, mlflow, os
+        mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+        mlflow.set_experiment("ch15-train-and-register")
+        run_dir = "{{inputs.parameters.run-dir}}"
+        metrics = json.load(open(f"{run_dir}/metrics.json"))
+        with mlflow.start_run():
+            mlflow.log_metrics(metrics)
+            mlflow.log_artifact(f"{run_dir}/model.txt")
+            mlflow.register_model(f"runs:/{mlflow.active_run().info.run_id}/model.txt", "ch15-demo-model")
+        print("registered ch15-demo-model with", metrics)
+      env:
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow.mlflow.svc.cluster.local:5000"
+      volumeMounts:
+      - name: artifacts
+        mountPath: /mnt/artifacts
+      resources:
+        requests: {cpu: 250m, memory: 256Mi}
+        limits: {cpu: "1", memory: 1Gi}
+    volumes:
+    - name: artifacts
+      persistentVolumeClaim:
+        claimName: pipeline-artifacts

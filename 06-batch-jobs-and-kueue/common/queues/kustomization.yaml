@@ -1,0 +1,13 @@
+# Cohort + 2 ClusterQueues (cluster-scoped) + their LocalQueues (namespaced, ch06-kueue) +
+# 2 WorkloadPriorityClasses (cluster-scoped). Depends on common/flavors (flavor names
+# "spot"/"on-demand" referenced by name, not by object reference) and common/base (namespace).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - cohort.yaml
+  - clusterqueue-team-a.yaml
+  - clusterqueue-team-b.yaml
+  - localqueue-team-a.yaml
+  - localqueue-team-b.yaml
+  - workloadpriorityclass-low.yaml
+  - workloadpriorityclass-high.yaml

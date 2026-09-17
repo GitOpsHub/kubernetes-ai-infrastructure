@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch04-observability
+resources:
+  - ../namespace
+# kube-prometheus-stack's Grafana sidecar watches ConfigMaps labeled grafana_dashboard: "1"
+# in ANY namespace by default (sidecar.dashboards.searchNamespace unset = ALL) and mounts the
+# JSON key(s) it finds. See values-kube-prometheus-stack.yaml grafana.sidecar.dashboards.
+configMapGenerator:
+  - name: gpu-fleet-dashboard
+    files:
+      - dashboard.json
+    options:
+      labels:
+        grafana_dashboard: "1"
+      disableNameSuffixHash: true

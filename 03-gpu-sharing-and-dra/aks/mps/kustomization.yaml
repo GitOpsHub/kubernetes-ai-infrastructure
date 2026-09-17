@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# First: SHARE_MODE=mps-4 ./aks/create-nodepool-share.sh (or relabel an existing pool:
+# az aks nodepool update ... --labels nvidia.com/device-plugin.config=mps-4)
+resources:
+  - ../../common/mps
+patches:
+  - target:
+      kind: Deployment
+      name: mps-demo
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value:
+          kubernetes.azure.com/scalesetpriority: spot
+          nvidia.com/device-plugin.config: mps-4
+      - op: add
+        path: /spec/template/spec/tolerations/-
+        value:
+          key: kubernetes.azure.com/scalesetpriority
+          operator: Equal
+          value: spot
+          effect: NoSchedule
+      # NVIDIA's MPS device-plugin sharing (unlike GKE's managed MPS) does not need hostIPC:
+      # the plugin runs the MPS control daemon and mounts its pipe/log dirs into each client pod.

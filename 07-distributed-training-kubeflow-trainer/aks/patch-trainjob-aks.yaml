@@ -1,0 +1,28 @@
+# Adds a runtimePatch (Trainer v2.3 API) owned by "ch07.lab/cloud-overlay".
+# AKS taints spot nodes automatically (kubernetes.azure.com/scalesetpriority=spot:NoSchedule)
+# but does NOT taint GPU nodes automatically -- create-gpu-nodepool.sh adds that taint itself,
+# so both tolerations are needed.
+- op: add
+  path: /spec/runtimePatches
+  value:
+    - manager: ch07.lab/cloud-overlay
+      trainingRuntimeSpec:
+        template:
+          spec:
+            replicatedJobs:
+              - name: node
+                template:
+                  spec:
+                    template:
+                      spec:
+                        nodeSelector:
+                          kubernetes.azure.com/scalesetpriority: spot
+                          nvidia.com/gpu.present: "true"
+                        tolerations:
+                          - key: nvidia.com/gpu           # taint added by create-gpu-nodepool.sh
+                            operator: Exists
+                            effect: NoSchedule
+                          - key: kubernetes.azure.com/scalesetpriority   # added automatically by AKS
+                            operator: Equal
+                            value: spot
+                            effect: NoSchedule

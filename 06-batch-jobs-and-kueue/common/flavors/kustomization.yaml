@@ -1,0 +1,8 @@
+# ResourceFlavors are cluster-scoped (no namespace). "spot" is listed first in every
+# ClusterQueue's resourceGroups so Kueue tries it before "on-demand" (flavorFungibility
+# defaults to whenCanBorrow: Borrow, whenCanPreempt: TryNextFlavor).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - resourceflavor-spot.yaml
+  - resourceflavor-ondemand.yaml

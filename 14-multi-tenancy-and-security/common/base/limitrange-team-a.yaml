@@ -1,0 +1,26 @@
+# Without a LimitRange, a Pod that requests no CPU/memory still counts fully against
+# requests.nvidia.com/gpu in the ResourceQuota above but *nothing* against CPU/memory quota,
+# then bursts unbounded on a shared node. Defaults here are deliberately small — every GPU
+# workload manifest in this course (vLLM, Trainer, Ray, KServe) sets explicit requests/limits,
+# so this default only bites accidental/unmanaged Pods.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team-a-limits
+  namespace: ch14-team-a
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: "1"
+      memory: 2Gi
+    defaultRequest:
+      cpu: 250m
+      memory: 512Mi
+    max:
+      cpu: "8"
+      memory: 32Gi
+      nvidia.com/gpu: "2"
+    min:
+      cpu: 50m
+      memory: 64Mi

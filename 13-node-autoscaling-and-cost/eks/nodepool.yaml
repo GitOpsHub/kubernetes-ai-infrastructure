@@ -1,0 +1,72 @@
+# Two NodePools implement "spot first, on-demand fallback" as a scheduling PREFERENCE Karpenter
+# resolves at provision time (unlike a fixed eksctl node group, Karpenter creates exactly the
+# instance shape a pending Pod needs, from whichever pool matches first).
+# apiVersion karpenter.sh/v1 verified (requirements operators In/NotIn/Exists/Gt/Lt, disruption
+# consolidationPolicy/consolidateAfter, limits) against Karpenter v1.14.1 docs.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-spot
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      requirements:
+      - key: karpenter.sh/capacity-type
+        operator: In
+        values: ["spot"]
+      - key: node.kubernetes.io/instance-type
+        operator: In
+        # L4 first (chapter's default GPU), T4 fallback -- SPOT DIVERSIFICATION: listing several
+        # instance types/pools lets Karpenter fall back automatically if one is out of spot
+        # capacity, instead of the Pod staying Pending.
+        values: ["g6.xlarge", "g4dn.xlarge"]
+      - key: kubernetes.io/arch
+        operator: In
+        values: ["amd64"]
+      taints:
+      - key: nvidia.com/gpu
+        value: "present"
+        effect: NoSchedule
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+  limits:
+    cpu: "64"
+    nvidia.com/gpu: "8"
+  weight: 10 # tried before gpu-ondemand
+---
+# Fallback pool: same shape, on-demand. No `capacity-type` requirement narrowing to spot means
+# Karpenter will use it whenever gpu-spot can't be satisfied (lower weight = tried second).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-ondemand
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: gpu
+      requirements:
+      - key: karpenter.sh/capacity-type
+        operator: In
+        values: ["on-demand"]
+      - key: node.kubernetes.io/instance-type
+        operator: In
+        values: ["g6.xlarge"]
+      taints:
+      - key: nvidia.com/gpu
+        value: "present"
+        effect: NoSchedule
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+  limits:
+    cpu: "16"
+    nvidia.com/gpu: "2"
+  weight: 1

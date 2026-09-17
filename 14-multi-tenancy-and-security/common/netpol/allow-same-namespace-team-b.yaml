@@ -1,0 +1,17 @@
+# Lets vLLM/KServe/Ray/Trainer pods within the same tenant namespace talk to each other
+# (gang-scheduled training ranks, Ray head<->workers, Gateway->backend) without opening
+# anything cross-tenant.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: ch14-team-b
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  - from:
+    - podSelector: {}
+  egress:
+  - to:
+    - podSelector: {}

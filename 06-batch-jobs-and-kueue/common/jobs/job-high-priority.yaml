@@ -1,0 +1,41 @@
+# Submit this to team-b-queue *while* job-simple.yaml's pods are still running in team-a-cq
+# (Step 3 of the lab). team-b-cq's spot quota is only 1 CPU, so this 2-CPU workload must borrow
+# from the cohort; because it carries batch-high and team-a-cq's running pods carry batch-low,
+# reclaimWithinCohort: LowerPriority lets Kueue preempt (evict + requeue) enough of team-a's
+# pods to admit this one. Watch `kubectl get workloads -n ch06-kueue` during this step.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: team-b-high
+  namespace: ch06-kueue
+  labels:
+    kueue.x-k8s.io/queue-name: team-b-queue
+    kueue.x-k8s.io/priority-class: batch-high
+spec:
+  parallelism: 2
+  completions: 2
+  backoffLimit: 4
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
+  template:
+    metadata:
+      labels:
+        app: team-b-high
+    spec:
+      containers:
+        - name: worker
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          command: ["/bin/sh", "-c"]
+          args: ["echo urgent job start $(date); sleep 60; echo urgent job done $(date)"]
+          resources:
+            requests:
+              cpu: "1"
+              memory: "128Mi"
+            limits:
+              cpu: "1"
+              memory: "128Mi"
+      restartPolicy: Never

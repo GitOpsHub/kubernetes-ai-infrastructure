@@ -1,0 +1,21 @@
+# Scrapes vLLM's own /metrics endpoint (chapter 09's Deployment/Service, namespace ch09-vllm) into
+# the kube-prometheus-stack Prometheus installed by 04-gpu-observability. Requires that chapter's
+# Prometheus Operator CRDs; carries the same `release: kube-prometheus-stack` label its default
+# selector needs (see 04-gpu-observability/common/servicemonitor).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm
+  namespace: ch09-vllm
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: ch10-autoscale
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 15s
+    scrapeTimeout: 10s

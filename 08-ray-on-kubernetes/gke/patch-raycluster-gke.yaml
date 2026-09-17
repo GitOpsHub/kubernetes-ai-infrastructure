@@ -1,0 +1,18 @@
+# GKE places the "gpu-spot" Ray worker group on spot L4 GPU nodes. GKE tolerations here mirror
+# 07-distributed-training-kubeflow-trainer/gke: GKE auto-taints GPU nodes, spot nodes are
+# untainted unless you tainted the pool yourself.
+- op: add
+  path: /spec/workerGroupSpecs/0/template/spec/nodeSelector
+  value:
+    cloud.google.com/gke-spot: "true"
+    cloud.google.com/gke-accelerator: nvidia-l4
+- op: add
+  path: /spec/workerGroupSpecs/0/template/spec/tolerations
+  value:
+    - key: nvidia.com/gpu               # GKE taints GPU nodes automatically
+      operator: Exists
+      effect: NoSchedule
+    - key: cloud.google.com/gke-spot    # only needed if you tainted the spot pool
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

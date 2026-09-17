@@ -1,0 +1,20 @@
+# Cluster-wide role for the platform team only (Kueue ClusterQueues/ResourceFlavors,
+# ValidatingAdmissionPolicies, Namespaces themselves are cluster-scoped — tenants never get
+# these verbs, see role-team-*-edit.yaml for what tenants actually hold).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ch14-platform-admin
+rules:
+- apiGroups: [""]
+  resources: ["namespaces", "resourcequotas", "limitranges"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["resourceflavors", "clusterqueues", "cohorts", "workloadpriorityclasses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["kyverno.io"]
+  resources: ["clusterpolicies", "policyexceptions"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

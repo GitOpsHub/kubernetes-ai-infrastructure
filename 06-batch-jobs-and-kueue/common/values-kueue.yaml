@@ -1,0 +1,60 @@
+# Shared Helm values for `helm install kueue oci://registry.k8s.io/kueue/charts/kueue`.
+# This is the chart's default managerConfig.controllerManagerConfigYaml (verified against
+# charts/kueue/values.yaml at the pinned tag) with one block turned on for this chapter:
+#   - waitForPodsReady: all-or-nothing admission, so a Job's pods don't start trickling onto
+#     spot nodes one at a time only to have the Job stuck half-scheduled.
+# Classical preemption (reclaimWithinCohort / borrowWithinCohort, set per-ClusterQueue) is what
+# the lab uses by default. Fair Sharing is a *different* cohort-sharing mode - see
+# values-kueue-fairsharing.yaml and README section 6 before turning it on; the docs are explicit
+# that `borrowWithinCohort` (used below) only applies under Classical Preemption, not Fair Sharing.
+# `integrations.frameworks` is left at the chart default (already includes "batch/job").
+# Per-cloud overlays add `--set controllerManager.nodeSelector...` on top of this file so the
+# Kueue controller itself runs on an on-demand node (it's a control-plane component: don't
+# let a spot reclaim take down the scheduler for every team at once).
+managerConfig:
+  controllerManagerConfigYaml: |-
+    apiVersion: config.kueue.x-k8s.io/v1beta2
+    kind: Configuration
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8443
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    controller:
+      groupKindConcurrency:
+        Job.batch: 5
+        Pod: 5
+        Workload.kueue.x-k8s.io: 10
+        LocalQueue.kueue.x-k8s.io: 5
+        ClusterQueue.kueue.x-k8s.io: 5
+        ResourceFlavor.kueue.x-k8s.io: 1
+    clientConnection:
+      qps: 300
+      burst: 500
+    waitForPodsReady:
+      timeout: 5m
+      recoveryTimeout: 3m
+      blockAdmission: false
+      requeuingStrategy:
+        timestamp: Eviction
+        backoffLimitCount: null
+        backoffBaseSeconds: 60
+        backoffMaxSeconds: 3600
+    integrations:
+      frameworks:
+      - "batch/job"
+      - "kubeflow.org/mpijob"
+      - "ray.io/rayjob"
+      - "ray.io/rayservice"
+      - "ray.io/raycluster"
+      - "jobset.x-k8s.io/jobset"
+      - "workload.codeflare.dev/appwrapper"
+      - "trainer.kubeflow.org/trainjob"
+      - "pod"
+      - "deployment"
+      - "statefulset"
+      - "leaderworkerset.x-k8s.io/leaderworkerset"

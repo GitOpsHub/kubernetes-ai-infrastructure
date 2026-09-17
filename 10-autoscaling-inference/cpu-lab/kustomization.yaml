@@ -1,0 +1,17 @@
+# CPU-only lab: KEDA scaling the chapter-09 Ollama Deployment by CPU utilization, plus a load
+# generator. Pulls in 09's cpu-lab as a base (read-only reference, not edited here) so the
+# ScaledObject's patch target exists in this kustomization's resource graph. KEDA must be
+# installed first (any cloud's install-keda.sh, or a local `helm install keda kedacore/keda ...`).
+#   kubectl apply -k 10-autoscaling-inference/cpu-lab
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch09-vllm-cpu
+resources:
+- ../../09-llm-inference-with-vllm/cpu-lab
+- scaledobject-ollama.yaml
+- load-job.yaml
+patches:
+- target:
+    kind: Deployment
+    name: ollama
+  path: patch-ollama-resources.yaml

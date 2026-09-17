@@ -1,0 +1,8 @@
+# Cluster-scoped - usable by a Job in any namespace via the label
+# `kueue.x-k8s.io/priority-class: batch-low`. Independent of Pod PriorityClass.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: WorkloadPriorityClass
+metadata:
+  name: batch-low
+value: 100
+description: "Best-effort batch work: preemptible, restarts cheaply."

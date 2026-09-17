@@ -1,0 +1,74 @@
+# CPU-only OpenAI-compatible server: Ollama serving Qwen3-0.6B (GGUF, ~0.5 GiB) on any node.
+# No GPU, no cloud IAM — the same lab you'd run on a laptop kind/minikube cluster or a spot CPU pool.
+# Runs on ANY cluster: what does NOT carry over to real vLLM/GPU serving is noted in the README
+# ("cpu-lab vs GPU" table) — no tensor/continuous-batching GPU kernels, much lower throughput,
+# no tensor-parallel, KV cache math is different (llama.cpp, not the vLLM PagedAttention allocator).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  labels:
+    app.kubernetes.io/name: ollama
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+    spec:
+      containers:
+      - name: ollama
+        image: ollama/ollama:0.34.1   # OLLAMA_VERSION in versions.env
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -e
+          ollama serve &
+          SERVER_PID=$!
+          until ollama list >/dev/null 2>&1; do sleep 1; done
+          ollama pull "${OLLAMA_MODEL}"
+          wait "$SERVER_PID"
+        env:
+        - name: OLLAMA_HOST
+          value: "0.0.0.0:11434"
+        - name: OLLAMA_MODEL
+          value: "qwen3:0.6b"
+        # Keep the model resident so the Service doesn't reload it between requests.
+        - name: OLLAMA_KEEP_ALIVE
+          value: "-1"
+        ports:
+        - name: http
+          containerPort: 11434
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            memory: 4Gi
+        # / returns "Ollama is running" once the server has bound its port (before the model is pulled).
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        # Give the pull (first run) up to 10 min; cached on repeat starts via the emptyDir below.
+        startupProbe:
+          exec:
+            command: ["ollama", "list"]
+          periodSeconds: 10
+          failureThreshold: 60
+        volumeMounts:
+        - name: ollama-models
+          mountPath: /root/.ollama
+      volumes:
+      # emptyDir: model re-pulls on pod reschedule. Swap for a PVC (see 09 README "Model cache")
+      # to persist across restarts, same idea as common/components/model-cache-pvc for vLLM.
+      - name: ollama-models
+        emptyDir:
+          sizeLimit: 4Gi

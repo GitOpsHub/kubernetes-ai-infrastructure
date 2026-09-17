@@ -1,0 +1,21 @@
+# Cloud-agnostic base for all three Ray labs. Do not apply directly: use ../gke, ../eks, ../aks
+# or ../cpu-lab, which add cloud/spot placement (or, for cpu-lab, strip GPU requirements).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch08-ray
+resources:
+  - base
+  - raycluster-spot.yaml
+  - rayjob-batch.yaml
+  - rayservice-serve.yaml
+configMapGenerator:
+  - name: pi-estimate-script
+    files:
+      - pi_estimate.py
+    options:
+      disableNameSuffixHash: true   # RayJob references it by a fixed name
+  - name: qwen-serve-app
+    files:
+      - serve_app.py
+    options:
+      disableNameSuffixHash: true   # RayService's serveConfigV2 working_dir references it by a fixed name

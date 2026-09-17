@@ -1,4 +1,7 @@
 # GKE + Kueue:  kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/gke
+# Lives outside gke/ (a sibling "kueue/<cloud>" tree, not "gke/kueue") because kustomize refuses
+# a child overlay that resources its own parent directory ("cycle detected") -- ../../gke from
+# here is fine since kueue/gke is not nested inside gke/.
 # Removes the hard spot nodeSelector so Kueue's ResourceFlavor (spot or on-demand
 # fallback) decides the capacity type; keeps the GPU type selector and tolerations.
 apiVersion: kustomize.config.k8s.io/v1beta1

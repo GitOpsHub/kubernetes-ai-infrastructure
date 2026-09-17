@@ -1,0 +1,11 @@
+# AKS: spot T4 GPU Ray worker group.   kubectl apply -k 08-ray-on-kubernetes/aks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common
+patches:
+  - path: patch-raycluster-aks.yaml
+    target:
+      group: ray.io
+      kind: RayCluster
+      name: ray-spot

@@ -1,0 +1,7 @@
+# AKS: install-prometheus-adapter.sh + install-keda.sh first, then apply the ServiceMonitor and
+# ONE of common/hpa or common/keda on top (see README "Lab").
+#   kubectl apply -k 10-autoscaling-inference/aks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../common

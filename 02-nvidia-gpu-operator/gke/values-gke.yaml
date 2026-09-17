@@ -1,0 +1,59 @@
+# nvidia/gpu-operator Helm values for GKE, Container-Optimized OS (COS) GPU nodes.
+#
+# Why disable driver/toolkit/devicePlugin: COS is not a general-purpose Linux distro (no
+# module build toolchain, immutable rootfs), so the GPU Operator cannot install a driver on it —
+# GKE always installs the NVIDIA driver itself via a DaemonSet baked into the COS/Ubuntu node image
+# (see 01-gpu-nodes-and-scheduling/gke, `--accelerator gpu-driver-version=...`). GKE's node image also
+# preinstalls nvidia-container-toolkit and its own device plugin. Use the Operator here for the parts
+# GKE does NOT give you: DCGM metrics, GPU Feature Discovery labels, MIG manager, node status exporter,
+# and a single cross-cloud install/upgrade story.
+#
+# Node pool prerequisite: create the GPU node pool with the GKE driver installer explicitly disabled
+# so it doesn't fight the Operator's toolkit-validation step:
+#   GPU_DRIVER_VERSION=disabled ../01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh
+# # VERIFY: gpu-driver-version=disabled is documented for GKE Standard node pools; confirm it is still
+# # accepted for your GKE version (`gcloud container node-pools create --help` / release notes) before
+# # relying on it — if unsupported, keep the GKE driver installer and skip driver.enabled=false below
+# # only (toolkit/devicePlugin still stay preinstalled and disabled).
+
+driver:
+  enabled: false
+toolkit:
+  enabled: false
+devicePlugin:
+  enabled: false
+
+cdi:
+  enabled: true
+  default: true
+
+# GKE labels nodes itself (cloud.google.com/gke-accelerator=...); NFD adds the
+# feature.node.kubernetes.io/pci-10de.present style labels GFD/toolkit selectors expect.
+nfd:
+  enabled: true
+
+daemonsets:
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  # GKE does not auto-taint Spot nodes; the taint above (added by our node pool script) is the only
+  # one Operator DaemonSets need to tolerate to land on the spot-gpu pool.
+
+dcgmExporter:
+  enabled: true
+gfd:
+  enabled: true
+migManager:
+  enabled: true
+nodeStatusExporter:
+  enabled: true
+validator:
+  plugin:
+    env:
+    # GKE's own device plugin doesn't set NVIDIA_VISIBLE_DEVICES=all the way the Operator's
+    # validator expects; scope validation to the resource instead of the env var.
+    # VERIFY: confirm against the pinned chart's validator.plugin.env schema (`helm show values`)
+    # before relying on this in a real cluster — the default validator generally still passes.
+    - name: WITH_WORKLOAD
+      value: "true"

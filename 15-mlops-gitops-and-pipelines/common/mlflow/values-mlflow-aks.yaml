@@ -1,0 +1,23 @@
+# MLflow chart 1.11.7 (app 3.16.0). Azure Blob artifact store.
+backendStore:
+  defaultSqlitePath: /mlflow/data/mlflow.db
+artifactRoot:
+  proxiedArtifactStorage: true
+  azureBlob:
+    enabled: true
+    container: ch15-mlflow-artifacts   # VERIFY: create yourself (az storage container create) — not done by any script here
+    storageAccount: YOUR_STORAGE_ACCOUNT
+    path: artifacts
+serviceAccount:
+  create: true
+  labels:
+    azure.workload.identity/use: "true"   # VERIFY: bind via Azure Workload Identity federated credential, same pattern as ch14 aks/setup-workload-identity.sh
+service:
+  type: ClusterIP
+  port: 5000
+persistence:
+  enabled: true
+  size: 10Gi
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {cpu: "1", memory: 2Gi}

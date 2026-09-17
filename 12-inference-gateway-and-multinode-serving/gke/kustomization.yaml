@@ -1,0 +1,21 @@
+# GKE: Gateway API is enabled by default on Standard/Autopilot clusters >= 1.26 (no separate
+# `gcloud` flag needed beyond channel choice). GKE Inference Gateway manages the EPP wiring for
+# you when you use gke-l7-*; this overlay still ships the self-hosted EPP from ../common so the
+# lab works identically across clouds -- see README "GKE native inference gateway" note for the
+# managed alternative.
+#   ../../01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh   # reuse spot-gpu, MAX_NODES=2
+#   ./create-gateway.sh
+#   ../common/install-gateway-crds.sh && ../common/install-lws.sh
+#   ../../09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
+#   kubectl apply -k 12-inference-gateway-and-multinode-serving/gke
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../common
+patches:
+- target: {kind: Gateway, name: inference-gateway}
+  path: patch-gatewayclass.yaml
+- target: {kind: Deployment, name: vllm}
+  path: patch-spot-vllm.yaml
+- target: {kind: LeaderWorkerSet, name: vllm-multinode}
+  path: patch-spot-lws.yaml

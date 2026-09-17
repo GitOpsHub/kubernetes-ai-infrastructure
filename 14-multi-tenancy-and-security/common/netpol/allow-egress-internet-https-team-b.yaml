@@ -1,0 +1,22 @@
+# Model/dataset downloads (Hugging Face Hub), container registries, and cloud APIs
+# (Secrets Manager/Key Vault via ESO, object storage) are all outside the cluster. Restrict to
+# 443/tcp rather than opening all egress; narrow the CIDR further per cloud if you know your
+# NAT/egress gateway ranges. Cloud metadata endpoints (169.254.169.254) are intentionally
+# NOT included here — Workload Identity/IRSA/Azure Workload Identity token exchange doesn't
+# need arbitrary pod egress to the metadata server on GKE/EKS; where it does (AKS IMDS,
+# EKS IMDSv2 fallback), add a narrow /32 allow rule instead of removing this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-https
+  namespace: ch14-team-b
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443

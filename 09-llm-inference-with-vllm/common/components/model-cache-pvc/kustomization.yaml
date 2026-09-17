@@ -1,0 +1,17 @@
+# Component: swap the vLLM Deployment's emptyDir hf-cache for a PVC-backed one, so re-downloads
+# survive pod restarts. Used by ../../../<cloud>/kustomization.yaml. See README "Model cache" section.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+- pvc.yaml
+patches:
+- target:
+    kind: Deployment
+    name: vllm
+  patch: |-
+    - op: replace
+      path: /spec/template/spec/volumes/0
+      value:
+        name: hf-cache
+        persistentVolumeClaim:
+          claimName: hf-cache

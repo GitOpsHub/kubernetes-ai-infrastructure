@@ -1,0 +1,57 @@
+# OPTIONAL alternative to values-kueue.yaml (see README section 6, "Fair Sharing vs classical
+# preemption"). Adds `fairSharing.preemptionStrategies` to the Configuration. Fair Sharing
+# replaces reclaimWithinCohort/borrowWithinCohort as the mechanism that governs preemption
+# across a cohort, so before applying this:
+#   kubectl patch clusterqueue team-a-cq --type merge -p '{"spec":{"preemption":{"borrowWithinCohort":null}}}'
+#   kubectl patch clusterqueue team-b-cq --type merge -p '{"spec":{"preemption":{"borrowWithinCohort":null}}}'
+# then: helm upgrade kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}" \
+#   -n kueue-system -f common/values-kueue.yaml -f common/values-kueue-fairsharing.yaml <cloud --set flags>
+managerConfig:
+  controllerManagerConfigYaml: |-
+    apiVersion: config.kueue.x-k8s.io/v1beta2
+    kind: Configuration
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: :8443
+    webhook:
+      port: 9443
+    leaderElection:
+      leaderElect: true
+      resourceName: c1f6bfd2.kueue.x-k8s.io
+    controller:
+      groupKindConcurrency:
+        Job.batch: 5
+        Pod: 5
+        Workload.kueue.x-k8s.io: 10
+        LocalQueue.kueue.x-k8s.io: 5
+        ClusterQueue.kueue.x-k8s.io: 5
+        ResourceFlavor.kueue.x-k8s.io: 1
+    clientConnection:
+      qps: 300
+      burst: 500
+    waitForPodsReady:
+      timeout: 5m
+      recoveryTimeout: 3m
+      blockAdmission: false
+      requeuingStrategy:
+        timestamp: Eviction
+        backoffLimitCount: null
+        backoffBaseSeconds: 60
+        backoffMaxSeconds: 3600
+    integrations:
+      frameworks:
+      - "batch/job"
+      - "kubeflow.org/mpijob"
+      - "ray.io/rayjob"
+      - "ray.io/rayservice"
+      - "ray.io/raycluster"
+      - "jobset.x-k8s.io/jobset"
+      - "workload.codeflare.dev/appwrapper"
+      - "trainer.kubeflow.org/trainjob"
+      - "pod"
+      - "deployment"
+      - "statefulset"
+      - "leaderworkerset.x-k8s.io/leaderworkerset"
+    fairSharing:
+      preemptionStrategies: [LessThanOrEqualToFinalShare, LessThanInitialShare]

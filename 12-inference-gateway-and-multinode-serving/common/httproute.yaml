@@ -1,0 +1,22 @@
+# Routes /v1/... to the InferencePool instead of a plain Service. The Gateway's inference-extension
+# support (GAIE webhook/controller) rewrites this at reconcile time to call the EPP for endpoint
+# selection instead of doing Service-level round robin.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vllm-route
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    # A backendRef to an InferencePool (group inference.networking.k8s.io, kind InferencePool)
+    # instead of a Service is the mechanism this whole chapter is about.
+    - group: inference.networking.k8s.io
+      kind: InferencePool
+      name: vllm-pool
+      port: 8000

@@ -1,0 +1,49 @@
+# nvidia/gpu-operator Helm values for AKS.
+#
+# Unlike GKE/EKS, use the Operator's FULL stack here (driver + toolkit + device plugin all enabled,
+# the chart defaults) because the node pool is created with the AKS driver installer explicitly
+# skipped (`--gpu-driver none`, Azure CLI >= 2.72.2) — AKS's own AKSGPUDriver install and the Operator
+# are mutually exclusive on the same pool. See Microsoft's guide:
+# https://learn.microsoft.com/azure/aks/nvidia-gpu-operator
+#
+# Node pool prerequisite (overrides ../01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh, which
+# defaults to GPU_DRIVER=Install for the standalone device-plugin path):
+#   GPU_DRIVER=none ../01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh
+# and uninstall the standalone device plugin first if it's running:
+#   helm -n nvidia-device-plugin uninstall nvdp
+
+driver:
+  enabled: true
+toolkit:
+  enabled: true
+devicePlugin:
+  enabled: true
+
+cdi:
+  enabled: true
+  default: true
+
+# AKS has no built-in NFD; the chart's bundled NFD subchart (nfd.enabled) is what labels nodes
+# feature.node.kubernetes.io/pci-10de.present so GFD/toolkit selectors and validators work.
+nfd:
+  enabled: true
+
+daemonsets:
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  # AKS auto-taints Spot pools; without this Operator DaemonSets never schedule onto gpuspot nodes.
+  - key: kubernetes.azure.com/scalesetpriority
+    operator: Equal
+    value: spot
+    effect: NoSchedule
+
+dcgmExporter:
+  enabled: true
+gfd:
+  enabled: true
+migManager:
+  enabled: true
+nodeStatusExporter:
+  enabled: true

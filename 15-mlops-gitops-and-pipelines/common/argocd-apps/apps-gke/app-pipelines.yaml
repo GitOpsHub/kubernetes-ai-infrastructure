@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ch15-pipelines
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: ai-platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after argo-workflows controller (wave 0)
+spec:
+  project: ai-platform
+  source:
+    repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY
+    targetRevision: main
+    path: 15-mlops-gitops-and-pipelines/common/workflows
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: ch15-pipelines
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

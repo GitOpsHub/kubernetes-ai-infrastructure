@@ -1,0 +1,20 @@
+# CPU lab simplification: routes straight to the ollama Service (plain Kubernetes Service
+# backendRef), NOT an InferencePool. The EPP scores endpoints using vLLM's Prometheus metrics
+# (queue depth, KV-cache %); Ollama doesn't expose that endpoint, so InferencePool/EPP routing
+# has nothing meaningful to score here. This still teaches the Gateway API mechanics (GatewayClass,
+# Gateway, HTTPRoute, path routing) -- see README "What doesn't carry over" for the full list.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ollama-route
+spec:
+  parentRefs:
+  - name: inference-gateway
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: ollama
+      port: 11434

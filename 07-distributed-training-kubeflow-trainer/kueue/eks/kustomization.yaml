@@ -1,0 +1,16 @@
+# EKS + Kueue:  kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks
+# Removes the hard spot nodeSelector so Kueue's ResourceFlavor (spot or on-demand
+# fallback) decides the capacity type; keeps the GPU-family node-label selector and toleration.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../eks
+components:
+  - ../../common/kueue
+patches:
+  - target:
+      group: trainer.kubeflow.org
+      kind: TrainJob
+    patch: |-
+      - op: remove
+        path: /spec/runtimePatches/0/trainingRuntimeSpec/template/spec/replicatedJobs/0/template/spec/template/spec/nodeSelector/eks.amazonaws.com~1capacityType

@@ -1,0 +1,38 @@
+# Supply-chain guardrail #1: only pull from registries this course actually uses. Add your own
+# private registry/GAR/ECR/ACR prefix here before using this in anything beyond the lab.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ch14-restrict-registries
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["apps", "batch", ""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["deployments", "statefulsets", "jobs", "pods"]
+  variables:
+  - name: allowedPrefixes
+    expression: >-
+      ['docker.io/vllm/', 'docker.io/library/', 'docker.io/ollama/',
+       'quay.io/kserve/', 'quay.io/jupyter/', 'ghcr.io/kubeflow/', 'ghcr.io/ray-project/',
+       'registry.k8s.io/', 'nvcr.io/nvidia/', 'gcr.io/', 'ghcr.io/', 'us-docker.pkg.dev/']
+  validations:
+  - expression: >-
+      (object.kind == 'Pod' ? object.spec.containers : object.spec.template.spec.containers)
+      .all(c, variables.allowedPrefixes.exists(p, c.image.startsWith(p)))
+    message: "container image is not from an allow-listed registry prefix (see ch14-restrict-registries policy variables)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ch14-restrict-registries-binding
+spec:
+  policyName: ch14-restrict-registries
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+      - key: tenant
+        operator: Exists

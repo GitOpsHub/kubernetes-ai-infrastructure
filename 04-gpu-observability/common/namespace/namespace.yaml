@@ -1,0 +1,11 @@
+# kube-prometheus-stack's own Helm install creates its "monitoring" namespace with
+# --create-namespace (see install-kube-prometheus-stack.sh). This namespace is for chapter 04's
+# OWN objects that aren't part of that chart release: ServiceMonitor/PrometheusRule/dashboard
+# ConfigMap live here so `kubectl kustomize`/`kubectl apply -k` renders and diffs cleanly without
+# depending on the Helm release having run first, and so cleanup is one namespace delete away.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ch04-observability
+  labels:
+    course.chapter: "04"

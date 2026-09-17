@@ -1,0 +1,29 @@
+# MLflow chart (community-charts/mlflow) 1.11.7, app 3.16.0. Verified against
+# https://github.com/community-charts/helm-charts/blob/main/charts/mlflow/values.yaml at the
+# pinned chart tag — key names below (backendStore.*, artifactRoot.*, service.*) match that
+# schema. # VERIFY on any chart bump.
+backendStore:
+  # Lab-scale: SQLite on a PVC (defaultSqlitePath) is fine for a course, but every server
+  # restart risks the file if the PVC isn't durable storage — use backendStore.postgres for
+  # anything beyond the lab (RDS, via the same Workload Identity/IRSA pattern as chapter 05's
+  # storage CSI drivers).
+  defaultSqlitePath: /mlflow/data/mlflow.db
+artifactRoot:
+  proxiedArtifactStorage: true   # server proxies artifact reads/writes -> clients never need direct S3 credentials
+  s3:
+    enabled: true
+    bucket: YOUR_AWS_ACCOUNT-ch15-mlflow-artifacts   # VERIFY: create with `aws s3 mb`, not done by any script here
+    path: artifacts
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::YOUR_ACCOUNT_ID:role/ch15-mlflow-s3"   # VERIFY: bind via IRSA, same pattern as ch14 eks/setup-workload-identity.sh
+service:
+  type: ClusterIP
+  port: 5000
+persistence:
+  enabled: true
+  size: 10Gi
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {cpu: "1", memory: 2Gi}

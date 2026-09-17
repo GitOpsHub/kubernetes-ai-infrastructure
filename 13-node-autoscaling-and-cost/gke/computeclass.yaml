@@ -1,0 +1,36 @@
+# GKE ComputeClass: declarative, ranked node-shape preference for Node Auto-Provisioning. GKE
+# tries `priorities` top to bottom and creates/uses a matching (auto-provisioned) node pool for
+# whichever one has capacity -- this is what "spot first, on-demand fallback" looks like as a
+# single object instead of two node pools you manage by hand.
+#
+# apiVersion cloud.google.com/v1, kind ComputeClass -- verified field names (priorities,
+# nodePoolAutoCreation, activeMigration, autoscalingPolicy.consolidationDelayMinutes) via GKE
+# ComputeClass docs/examples. flexStart.* nested fields are `# VERIFY` -- confirm exact schema
+# with `kubectl explain computeclass.spec.priorities.flexStart` on a live 1.33+ GKE cluster before
+# relying on it (DWS flex-start queues a GPU request for up to N minutes instead of failing
+# immediately when spot AND on-demand capacity are both unavailable).
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: gpu-spot-first
+spec:
+  priorities:
+  # 1) Spot L4 -- cheapest, can be reclaimed with ~30s notice.
+  - machineFamily: g2
+    spot: true
+    gpu:
+      type: nvidia-l4
+      count: 1
+  # 2) On-demand L4 via DWS flex-start -- queues the request briefly instead of failing when
+  #    on-demand capacity isn't instantly available; still cheaper than a standing reservation.
+  - machineFamily: g2
+    spot: false
+    gpu:
+      type: nvidia-l4
+      count: 1
+    flexStart: # VERIFY
+      enabled: true
+  nodePoolAutoCreation:
+    enabled: true
+  autoscalingPolicy:
+    consolidationDelayMinutes: 5

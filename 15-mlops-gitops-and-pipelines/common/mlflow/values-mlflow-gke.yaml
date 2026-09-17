@@ -1,0 +1,29 @@
+# MLflow chart (community-charts/mlflow) 1.11.7, app 3.16.0. Verified against
+# https://github.com/community-charts/helm-charts/blob/main/charts/mlflow/values.yaml at the
+# pinned chart tag — key names below (backendStore.*, artifactRoot.*, service.*) match that
+# schema. # VERIFY on any chart bump.
+backendStore:
+  # Lab-scale: SQLite on a PVC (defaultSqlitePath) is fine for a course, but every server
+  # restart risks the file if the PVC isn't durable storage — use backendStore.postgres for
+  # anything beyond the lab (a Cloud SQL instance via the same Workload Identity pattern as
+  # chapter 05's storage CSI drivers).
+  defaultSqlitePath: /mlflow/data/mlflow.db
+artifactRoot:
+  proxiedArtifactStorage: true   # server proxies artifact reads/writes -> clients never need direct GCS credentials
+  gcs:
+    enabled: true
+    bucket: YOUR_PROJECT-ch15-mlflow-artifacts   # VERIFY: create this bucket yourself (gcloud storage buckets create) — not done by any script in this chapter
+    path: artifacts
+serviceAccount:
+  create: true
+  annotations:
+    iam.gke.io/gcp-service-account: mlflow-gcs@YOUR_PROJECT.iam.gserviceaccount.com   # VERIFY: bind via Workload Identity, same pattern as 14-multi-tenancy-and-security/gke/setup-workload-identity.sh
+service:
+  type: ClusterIP
+  port: 5000
+persistence:
+  enabled: true
+  size: 10Gi
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {cpu: "1", memory: 2Gi}

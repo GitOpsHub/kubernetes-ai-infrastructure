@@ -1,0 +1,8 @@
+# Mirrors values-eks.yaml so `kubectl kustomize eks` shows exactly what the Helm install produces,
+# without running Helm. The Helm install (install.sh) is the real install path for this chapter.
+- op: replace
+  path: /spec/driver/enabled
+  value: false
+- op: replace
+  path: /spec/toolkit/enabled
+  value: false

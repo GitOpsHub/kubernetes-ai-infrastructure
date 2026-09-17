@@ -1,0 +1,33 @@
+# Pattern (a): plain batch/v1 Job. Kueue's mutating webhook adds `spec.suspend: true` to any
+# Job carrying the queue-name label, then flips it to false once a Workload is admitted - you
+# never set `suspend` yourself.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: team-a-low
+  namespace: ch06-kueue
+  labels:
+    kueue.x-k8s.io/queue-name: team-a-queue
+    kueue.x-k8s.io/priority-class: batch-low
+spec:
+  parallelism: 3
+  completions: 3
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        app: team-a-low
+    spec:
+      containers:
+        - name: worker
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          command: ["/bin/sh", "-c"]
+          args: ["echo start $(date); sleep 120; echo done $(date)"]
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+      restartPolicy: Never

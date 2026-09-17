@@ -1,0 +1,73 @@
+# Pattern (b): Indexed Job - the shape used for embarrassingly-parallel ML work (per-shard data
+# processing, batch inference over N partitions, hyperparameter sweeps). Each pod gets a stable
+# $JOB_COMPLETION_INDEX it can use to pick its shard and checkpoint file.
+#
+# podFailurePolicy is what makes this safe on spot: without it, a pod killed by a spot reclaim
+# counts against backoffLimit exactly like a real bug in your code, and a job with enough
+# reclaims in a row permanently fails even though nothing was wrong with the work itself.
+#   - DisruptionTarget/"True" is the pod condition set for taint-based eviction, the kubelet's
+#     graceful node shutdown, and API-initiated eviction/preemption - which is what happens when
+#     the cloud reclaims the underlying spot/preemptible instance. We tell the Job to Ignore it:
+#     the pod's re-run doesn't count against backoffLimit.
+#   - A real (non-zero, non-spot) exit code still counts normally, so actual bugs still fail fast.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: team-a-indexed
+  namespace: ch06-kueue
+  labels:
+    kueue.x-k8s.io/queue-name: team-a-queue
+    kueue.x-k8s.io/priority-class: batch-low
+spec:
+  completionMode: Indexed
+  completions: 4
+  parallelism: 4
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
+      - action: FailJob
+        onExitCodes:
+          containerName: worker
+          operator: In
+          values: [1]
+  template:
+    metadata:
+      labels:
+        app: team-a-indexed
+    spec:
+      containers:
+        - name: worker
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "shard ${JOB_COMPLETION_INDEX} starting, checkpoint=/checkpoints/${JOB_COMPLETION_INDEX}.done"
+              if [ -f "/checkpoints/${JOB_COMPLETION_INDEX}.done" ]; then
+                echo "shard ${JOB_COMPLETION_INDEX} already checkpointed, skipping work"
+              else
+                sleep 90
+                touch "/checkpoints/${JOB_COMPLETION_INDEX}.done"
+              fi
+              echo "shard ${JOB_COMPLETION_INDEX} done"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "64Mi"
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /checkpoints
+      volumes:
+        # emptyDir only survives pod restarts on the SAME node, not a spot reclaim of the node
+        # itself. It's here to demonstrate the checkpoint pattern cheaply; chapter 05 covers the
+        # object-storage/shared-fs backends (S3/GCS/Blob, EFS/Filestore/Azure Files) a real
+        # distributed job checkpoints to so work survives losing the node entirely.
+        - name: checkpoints
+          emptyDir: {}
+      restartPolicy: Never

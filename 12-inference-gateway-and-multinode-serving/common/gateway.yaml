@@ -1,0 +1,15 @@
+# Cloud-agnostic Gateway API v1.6.2 Gateway. gatewayClassName is patched per cloud (gke/eks/aks
+# overlays) because each cloud's Gateway controller registers its own GatewayClass names.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+spec:
+  gatewayClassName: REPLACED_BY_OVERLAY # VERIFY: set per cloud, see gke|eks|aks/patch-gatewayclass.yaml
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same

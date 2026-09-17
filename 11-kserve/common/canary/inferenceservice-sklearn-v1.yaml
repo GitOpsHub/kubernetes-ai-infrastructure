@@ -1,0 +1,23 @@
+# Canary rollout in RawDeployment mode: KServe's native `canaryTrafficPercent` field is
+# Serverless-mode only (Knative Revisions do the traffic split) — RawDeployment has no equivalent
+# built in as of v0.20.0 (open feature request: kserve/kserve#5335). This directory demonstrates
+# the RawDeployment-compatible workaround instead: two independently-named InferenceServices + a
+# Gateway API HTTPRoute splitting weighted traffic between their Services. See README "Canary
+# rollout" for the Serverless-mode native alternative if you don't need to avoid the Knative
+# dependency.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sklearn-iris-stable
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: sklearn
+      protocolVersion: v2
+      storageUri: "gs://kfserving-examples/models/sklearn/1.0/model"
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "1", memory: 2Gi}

@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ch15-mlflow
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: ai-platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: ai-platform
+  sources:
+    - repoURL: "https://community-charts.github.io/helm-charts"
+      chart: mlflow
+      targetRevision: "1.11.7"   # MLFLOW_CHART_VERSION (app 3.16.0) — not in versions.env, see README
+      helm:
+        valueFiles:
+          - $values/15-mlops-gitops-and-pipelines/common/mlflow/values-mlflow-gke.yaml
+    - repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY
+      targetRevision: main
+      ref: values
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: mlflow
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,35 @@
+# Namespace-scoped "edit"-like role, deliberately narrower than the built-in `edit`
+# ClusterRole: no access to Secrets (ExternalSecret objects yes, the *decrypted* Secret they
+# produce no — see the External Secrets Operator section of the README for why that split is
+# safe), no RoleBindings (can't self-escalate), no ResourceQuota/LimitRange (platform-owned).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-edit
+  namespace: ch14-team-b
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/exec", "services", "configmaps",
+              "persistentvolumeclaims", "events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]   # read-only: Deployments still mount them; no create/edit
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["localqueues", "workloads"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["trainer.kubeflow.org"]
+  resources: ["trainjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["ray.io"]
+  resources: ["rayclusters", "rayjobs", "rayservices"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["serving.kserve.io"]
+  resources: ["inferenceservices"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

@@ -1,0 +1,37 @@
+# ValidatingAdmissionPolicy: GA since Kubernetes 1.30 (stable, no feature gate needed on the
+# 1.35 clusters this course targets). Runs in-process in kube-apiserver via CEL — no webhook,
+# no extra pod, admits/denies in the same request the default admission chain already handles.
+# Good for cheap, dependency-free structural rules; NOT a replacement for Kyverno's
+# image-signature verification below (CEL has no way to call out to a signature transparency
+# log or OCI registry).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ch14-disallow-latest-tag
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["apps", "batch", ""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["deployments", "statefulsets", "jobs", "pods"]
+  validations:
+  - expression: >-
+      object.kind == 'Pod'
+      ? object.spec.containers.all(c, !c.image.endsWith(':latest') && c.image.contains(':'))
+      : object.spec.template.spec.containers.all(c, !c.image.endsWith(':latest') && c.image.contains(':'))
+    message: "container images must be pinned to an explicit tag or digest, not ':latest' or an implicit tag"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ch14-disallow-latest-tag-binding
+spec:
+  policyName: ch14-disallow-latest-tag
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+      - key: tenant
+        operator: Exists

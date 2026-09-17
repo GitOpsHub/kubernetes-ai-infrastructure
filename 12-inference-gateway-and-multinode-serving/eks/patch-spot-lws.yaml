@@ -1,0 +1,10 @@
+- op: add
+  path: /spec/leaderWorkerTemplate/leaderTemplate/spec/nodeSelector
+  value:
+    eks.amazonaws.com/capacityType: SPOT
+    nvidia.com/gpu.present: "true"
+- op: add
+  path: /spec/leaderWorkerTemplate/workerTemplate/spec/nodeSelector
+  value:
+    eks.amazonaws.com/capacityType: SPOT
+    nvidia.com/gpu.present: "true"

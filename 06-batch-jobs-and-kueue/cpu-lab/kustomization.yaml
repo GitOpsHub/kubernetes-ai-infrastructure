@@ -1,0 +1,14 @@
+# Runs on any cluster (kind, minikube, or a spot CPU pool on GKE/EKS/AKS) - no cloud IAM, no
+# node-pool script. Reuses common/flavors UNPATCHED: both "spot" and "on-demand" keep empty
+# nodeLabels, so they match any node. That's the one thing that doesn't carry over: kind/minikube
+# has no real spot/preemptible concept, so you can walk through cohorts, LocalQueue/ClusterQueue,
+# preemption and WorkloadPriorityClass here, but not an actual spot reclaim - see chapter's
+# gke/eks/aks overlays for that, or simulate one with `kubectl delete pod` mid-Job.
+#   ./install-kueue.sh
+#   kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common/base
+  - ../common/flavors
+  - ../common/queues

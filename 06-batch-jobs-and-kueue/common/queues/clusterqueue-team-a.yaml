@@ -1,0 +1,33 @@
+# team-a gets the larger nominal quota. "spot" is listed before "on-demand" so Kueue tries
+# spot capacity first (flavorFungibility default: whenCanBorrow=Borrow, whenCanPreempt=TryNextFlavor).
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: team-a-cq
+spec:
+  cohortName: ch06-cohort
+  namespaceSelector: {} # match all namespaces; LocalQueues opt in explicitly.
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: spot
+          resources:
+            - name: "cpu"
+              nominalQuota: 4
+              borrowingLimit: 4
+            - name: "memory"
+              nominalQuota: 8Gi
+              borrowingLimit: 8Gi
+        - name: on-demand
+          resources:
+            - name: "cpu"
+              nominalQuota: 2
+            - name: "memory"
+              nominalQuota: 4Gi
+  preemption:
+    reclaimWithinCohort: LowerPriority
+    borrowWithinCohort:
+      policy: LowerPriority
+      maxPriorityThreshold: 10000
+    withinClusterQueue: LowerOrNewerEqualPriority

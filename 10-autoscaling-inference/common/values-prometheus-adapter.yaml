@@ -1,0 +1,23 @@
+# Shared by gke/eks/aks install-prometheus-adapter.sh. Points at chapter 04's in-cluster
+# kube-prometheus-stack Prometheus. For a cloud-managed Prometheus (GMP/AMP/Azure Managed
+# Prometheus) swap `prometheus.url` for that endpoint instead — see each cloud's README notes;
+# managed-Prometheus query APIs are not always PromQL-over-HTTP compatible with prometheus-adapter
+# out of the box (GMP needs its Frontend UI proxy; AMP needs SigV4-signed requests) so the
+# in-cluster route is what this chapter's lab actually exercises.
+prometheus:
+  url: http://kube-prometheus-stack-prometheus.monitoring.svc
+  port: 9090
+  path: ""
+
+rules:
+  default: false
+  custom:
+  - seriesQuery: 'vllm:num_requests_waiting{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        pod: {resource: "pod"}
+    name:
+      matches: "^vllm:num_requests_waiting$"
+      as: "vllm_num_requests_waiting"
+    metricsQuery: 'avg_over_time(<<.Series>>{<<.LabelMatchers>>}[1m])'

@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - default-deny-team-a.yaml
+  - default-deny-team-b.yaml
+  - allow-dns-team-a.yaml
+  - allow-dns-team-b.yaml
+  - allow-same-namespace-team-a.yaml
+  - allow-same-namespace-team-b.yaml
+  - allow-egress-internet-https-team-a.yaml
+  - allow-egress-internet-https-team-b.yaml
+  - allow-monitoring-scrape.yaml

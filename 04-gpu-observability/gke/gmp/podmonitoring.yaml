@@ -1,0 +1,19 @@
+# ALTERNATIVE to kube-prometheus-stack: Google Cloud Managed Service for Prometheus (GMP).
+# Managed collection is ON BY DEFAULT on GKE Standard >=1.27 and Autopilot >=1.25 - no operator
+# to install, no PVs to manage, metrics land in Cloud Monitoring and are queryable with PromQL
+# from the Cloud Console, Grafana (via the GMP Prometheus-compatible endpoint), or `gcloud
+# monitoring`. Trade-off: no local Alertmanager (use Cloud Monitoring alerting policies instead)
+# and egress/ingestion is billed per sample - fine for a lab, check pricing before fleet-wide use.
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: dcgm-exporter
+  namespace: gpu-operator
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter   # VERIFY against your gpu-operator version's pod label
+  endpoints:
+    - port: gpu-metrics
+      path: /metrics
+      interval: 30s

@@ -1,0 +1,68 @@
+# AppProject scopes what the app-of-apps (and everything it manages) is allowed to touch —
+# deliberately not the default "project: default" with wildcard everything. Argo CD 10.4.0 /
+# argocd namespace is assumed ALREADY RUNNING on your cluster (this course's brief: never
+# install/touch a live Argo CD yourself) — this manifest only adds an AppProject and
+# Applications to that existing instance; apply it with plain `kubectl apply` or
+# `argocd app create`, reviewed, from your own workstation.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: ai-platform
+  namespace: argocd
+spec:
+  description: >-
+    GitOps-managed components of the kubernetes-ai-infrastructure course:
+    Kueue, kube-prometheus-stack, vLLM, KServe, chapter-14 tenancy/security,
+    Argo Workflows, MLflow. Scoped narrower than `default` on purpose.
+  sourceRepos:
+    - "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY: set to your fork's actual clone URL
+    - "oci://registry.k8s.io/kueue/charts/kueue"
+    - "https://prometheus-community.github.io/helm-charts"
+    - "https://kserve.github.io/charts"
+    - "https://argoproj.github.io/argo-helm"
+    - "https://community-charts.github.io/helm-charts"
+  destinations:
+    - namespace: "ch06-kueue"
+      server: "https://kubernetes.default.svc"
+    - namespace: "kueue-system"
+      server: "https://kubernetes.default.svc"
+    - namespace: "monitoring"
+      server: "https://kubernetes.default.svc"
+    - namespace: "ch09-vllm"
+      server: "https://kubernetes.default.svc"
+    - namespace: "kserve"
+      server: "https://kubernetes.default.svc"
+    - namespace: "ch14-team-a"
+      server: "https://kubernetes.default.svc"
+    - namespace: "ch14-team-b"
+      server: "https://kubernetes.default.svc"
+    - namespace: "external-secrets"
+      server: "https://kubernetes.default.svc"
+    - namespace: "kyverno"
+      server: "https://kubernetes.default.svc"
+    - namespace: "argo"
+      server: "https://kubernetes.default.svc"
+    - namespace: "mlflow"
+      server: "https://kubernetes.default.svc"
+  clusterResourceWhitelist:
+    # Namespaces + the cluster-scoped CRDs this course's child apps create. Empty list (the
+    # AppProject default) would block Kueue's ResourceFlavor/ClusterQueue and this course's
+    # ValidatingAdmissionPolicy/Kyverno ClusterPolicy objects from ever syncing.
+    - group: ""
+      kind: Namespace
+    - group: "kueue.x-k8s.io"
+      kind: "*"
+    - group: "admissionregistration.k8s.io"
+      kind: ValidatingAdmissionPolicy
+    - group: "admissionregistration.k8s.io"
+      kind: ValidatingAdmissionPolicyBinding
+    - group: "kyverno.io"
+      kind: ClusterPolicy
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRole
+    - group: "rbac.authorization.k8s.io"
+      kind: ClusterRoleBinding
+    - group: "external-secrets.io"
+      kind: ClusterSecretStore
+  orphanedResources:
+    warn: true

@@ -1,0 +1,12 @@
+# AKS: spot T4 GPUs + Azure Blob checkpoints.   kubectl apply -k 07-distributed-training-kubeflow-trainer/aks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common
+  - storage
+patches:
+  - path: patch-trainjob-aks.yaml
+    target:
+      group: trainer.kubeflow.org
+      kind: TrainJob
+      name: ddp-gpu

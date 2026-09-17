@@ -1,0 +1,30 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ch14-require-resource-limits
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["apps", "batch", ""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["deployments", "statefulsets", "jobs", "pods"]
+  validations:
+  - expression: >-
+      (object.kind == 'Pod' ? object.spec.containers : object.spec.template.spec.containers)
+      .all(c, has(c.resources.limits) && has(c.resources.requests))
+    message: "every container must set resources.requests and resources.limits (LimitRange only supplies a default for containers that omit them entirely at the pod-defaulting stage, not a hard requirement — this policy makes it one)"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ch14-require-resource-limits-binding
+spec:
+  policyName: ch14-require-resource-limits
+  validationActions: ["Deny"]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+      - key: tenant
+        operator: Exists

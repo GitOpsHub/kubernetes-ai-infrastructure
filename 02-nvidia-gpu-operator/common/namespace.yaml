@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-operator
+  labels:
+    # Required so the Operator's own components (which run with elevated host access) are exempt
+    # from restrictive cluster-wide Pod Security admission, same as upstream install docs.
+    pod-security.kubernetes.io/enforce: privileged

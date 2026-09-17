@@ -1,0 +1,68 @@
+# Pin: helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack
+#   --version ${KUBE_PROMETHEUS_STACK_VERSION} -f values-kube-prometheus-stack.yaml
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { memory: 1Gi }
+    nodeSelector:
+      kubernetes.azure.com/scalesetpriority: spot
+    tolerations:
+      - key: kubernetes.azure.com/scalesetpriority
+        operator: Equal
+        value: spot
+        effect: NoSchedule
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi   # AKS default CSI SC (Azure Disk) - VERIFY yours
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 20Gi } }
+    serviceMonitorSelectorNilUsesHelmValues: true
+    ruleSelectorNilUsesHelmValues: true
+
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      kubernetes.azure.com/scalesetpriority: spot
+    tolerations:
+      - key: kubernetes.azure.com/scalesetpriority
+        operator: Equal
+        value: spot
+        effect: NoSchedule
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 2Gi } }
+
+grafana:
+  nodeSelector:
+    kubernetes.azure.com/scalesetpriority: spot
+  tolerations:
+    - key: kubernetes.azure.com/scalesetpriority
+      operator: Equal
+      value: spot
+      effect: NoSchedule
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  persistence:
+    enabled: true
+    storageClassName: managed-csi
+    size: 5Gi
+
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - "nodes=[kubernetes.azure.com/scalesetpriority,kubernetes.azure.com/mode,nvidia.com/gpu.present]"
+
+nodeExporter:
+  enabled: true

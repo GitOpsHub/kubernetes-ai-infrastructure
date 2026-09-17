@@ -1,0 +1,15 @@
+# AKS + Kueue:  kubectl apply -k 08-ray-on-kubernetes/kueue/aks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../aks
+components:
+  - ../../common/kueue
+patches:
+  - target:
+      group: ray.io
+      kind: RayCluster
+      name: ray-spot
+    patch: |-
+      - op: remove
+        path: /spec/workerGroupSpecs/0/template/spec/nodeSelector/kubernetes.azure.com~1scalesetpriority

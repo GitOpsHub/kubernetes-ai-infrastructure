@@ -1,0 +1,27 @@
+# Karpenter v1.14.1 EC2NodeClass: the "what the node looks like" half of a NodePool.
+# apiVersion karpenter.k8s.aws/v1 verified. ${...} placeholders are envsubst'd by install-karpenter.sh
+# from env.sh (EKS_CLUSTER) -- Karpenter's own discovery convention is a
+# karpenter.sh/discovery=<cluster-name> tag on subnets/security groups, set for you by
+# 01-gpu-nodes-and-scheduling's eksctl cluster if you used the standard VPC.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: gpu
+spec:
+  role: KarpenterNodeRole-${EKS_CLUSTER} # VERIFY: matches the IAM role install-karpenter.sh creates
+  amiFamily: AL2023
+  amiSelectorTerms:
+  - alias: al2023@latest
+  subnetSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: ${EKS_CLUSTER}
+  securityGroupSelectorTerms:
+  - tags:
+      karpenter.sh/discovery: ${EKS_CLUSTER}
+  blockDeviceMappings:
+  - deviceName: /dev/xvda
+    ebs:
+      volumeSize: 100Gi
+      volumeType: gp3
+      deleteOnTermination: true
+  instanceStorePolicy: RAID0

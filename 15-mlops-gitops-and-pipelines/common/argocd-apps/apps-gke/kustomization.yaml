@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - app-kueue.yaml
+  - app-kueue-queues.yaml
+  - app-kube-prometheus-stack.yaml
+  - app-kserve-crd.yaml
+  - app-kserve.yaml
+  - app-vllm.yaml
+  - app-ch14-security.yaml
+  - app-argo-workflows.yaml
+  - app-mlflow.yaml
+  - app-pipelines.yaml

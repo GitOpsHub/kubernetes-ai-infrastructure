@@ -1,0 +1,39 @@
+# Generates sustained concurrent chat-completion requests against vLLM so num_requests_waiting
+# climbs past the HPA/KEDA threshold. Uses vLLM's own bench client image (already CPU-only, no GPU
+# needed for the client) so no extra image to pull.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-generator
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: load-generator
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: load
+        image: vllm/vllm-openai-cpu:v0.29.0
+        command: ["vllm", "bench", "serve"]
+        args:
+        - --backend=openai
+        - --base-url=http://vllm.ch09-vllm.svc:8000
+        - --model=Qwen/Qwen3-0.6B
+        - --dataset-name=random
+        - --random-input-len=256
+        - --random-output-len=256
+        # High concurrency, sustained for several minutes: enough load, for long enough, to watch
+        # the scale-up decision and the cold-start delay it causes (see README "Cold-start math").
+        - --num-prompts=2000
+        - --max-concurrency=48
+        - --request-rate=inf
+        - --ready-check-timeout-sec=900
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            memory: 4Gi

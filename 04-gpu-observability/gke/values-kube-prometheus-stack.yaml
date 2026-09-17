@@ -1,0 +1,75 @@
+# Pin: helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack
+#   --version ${KUBE_PROMETHEUS_STACK_VERSION} -f values-kube-prometheus-stack.yaml
+# Runs on the spot CPU pool (chapter 00), never on GPU nodes - monitoring must survive a GPU
+# node's spot eviction.
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { memory: 1Gi }
+    nodeSelector:
+      cloud.google.com/gke-spot: "true"
+    tolerations:
+      - key: cloud.google.com/gke-spot
+        operator: Exists
+        effect: NoSchedule
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard-rwo   # GKE default CSI SC (zonal PD); use premium-rwo for SSD
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 20Gi } }
+    # Discover ServiceMonitors/PrometheusRules everywhere (see common/servicemonitor comments) -
+    # required for the dcgm-exporter ServiceMonitor to be picked up automatically.
+    serviceMonitorSelectorNilUsesHelmValues: true
+    ruleSelectorNilUsesHelmValues: true
+
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      cloud.google.com/gke-spot: "true"
+    tolerations:
+      - key: cloud.google.com/gke-spot
+        operator: Exists
+        effect: NoSchedule
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: standard-rwo
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 2Gi } }
+
+grafana:
+  defaultDashboardsTimezone: browser
+  nodeSelector:
+    cloud.google.com/gke-spot: "true"
+  tolerations:
+    - key: cloud.google.com/gke-spot
+      operator: Exists
+      effect: NoSchedule
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL   # so common/dashboards' ConfigMap (any namespace) is picked up
+  persistence:
+    enabled: true
+    storageClassName: standard-rwo
+    size: 5Gi
+  # VERIFY: set a real admin password/secret (grafana.admin.existingSecret) before anything but a
+  # throwaway lab cluster - the chart's default random password is fine for this lab only.
+
+kubeStateMetrics:
+  enabled: true
+
+# GPU node labels (cloud.google.com/gke-accelerator, cloud.google.com/gke-spot) aren't on
+# kube-state-metrics' default label allow-list; the GPULowUtilizationOnDemandNode alert and the
+# dashboard's node panels need them.
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - "nodes=[cloud.google.com/gke-accelerator,cloud.google.com/gke-spot,cloud.google.com/gke-gpu-sharing-strategy]"
+
+nodeExporter:
+  enabled: true

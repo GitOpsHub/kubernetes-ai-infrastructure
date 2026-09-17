@@ -1,0 +1,6 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch11-kserve
+resources:
+- inferenceservice-sklearn.yaml
+- inferenceservice-xgboost.yaml

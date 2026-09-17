@@ -1,0 +1,22 @@
+# Same idea with the xgboost runtime and KServe's public xgboost Iris example — shows the
+# modelFormat swap is the only thing that changes for a different predictive framework.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: xgboost-iris
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: xgboost
+      protocolVersion: v2
+      storageUri: "gs://kfserving-examples/models/xgboost/1.5/model"
+      resources:
+        requests:
+          cpu: "1"
+          memory: 2Gi
+        limits:
+          cpu: "1"
+          memory: 2Gi

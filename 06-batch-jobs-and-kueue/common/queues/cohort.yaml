@@ -1,0 +1,10 @@
+# A Cohort is its own object in v1beta2 (it was just a free-text `spec.cohort` string in v1beta1).
+# team-a-cq and team-b-cq join it via `spec.cohortName` below, which lets them lend/borrow quota
+# from each other and controls Fair Sharing via this object's weight.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: Cohort
+metadata:
+  name: ch06-cohort
+spec:
+  fairSharing:
+    weight: "1"

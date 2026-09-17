@@ -1,0 +1,15 @@
+# CPU-only lab: no GPU, no cloud account. `kubectl apply -k 09-llm-inference-with-vllm/cpu-lab`
+# Try it: kubectl -n ch09-vllm-cpu port-forward svc/ollama 11434:11434
+#   curl http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' -d \
+#     '{"model":"qwen3:0.6b","messages":[{"role":"user","content":"Say hi in 5 words"}]}'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch09-vllm-cpu
+labels:
+- pairs:
+    app.kubernetes.io/part-of: ch09-vllm-cpu
+  includeSelectors: false
+resources:
+- namespace.yaml
+- ollama-deployment.yaml
+- service.yaml

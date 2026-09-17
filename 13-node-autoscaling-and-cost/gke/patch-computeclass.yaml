@@ -1,0 +1,7 @@
+# A Pod opts into a ComputeClass with a nodeSelector on cloud.google.com/compute-class, the same
+# way it would target any other node label -- GKE's autoscaler (NAP) reads this to decide which
+# ComputeClass's `priorities` to satisfy.
+- op: add
+  path: /spec/template/spec/nodeSelector
+  value:
+    cloud.google.com/compute-class: gpu-spot-first

@@ -1,0 +1,4 @@
+# NGINX Gateway Fabric (self-hosted) registers GatewayClass "nginx" by default.
+- op: replace
+  path: /spec/gatewayClassName
+  value: nginx

@@ -1,0 +1,11 @@
+# Default-deny both directions. Kubernetes NetworkPolicies are additive/allow-list: once any
+# policy selects a Pod for a direction, only explicitly-allowed traffic in that direction gets
+# through. An empty podSelector selects every Pod in the namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: ch14-team-a
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]

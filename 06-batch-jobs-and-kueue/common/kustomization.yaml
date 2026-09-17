@@ -1,0 +1,12 @@
+# Chapter-06 common entry point = namespace + Kueue objects only (no cloud-specific bits: the
+# ResourceFlavors here have empty nodeLabels until a cloud overlay patches them).
+# No top-level `namespace:` transformer here on purpose: ResourceFlavor, Cohort, ClusterQueue and
+# WorkloadPriorityClass are all cluster-scoped; only LocalQueue is namespaced and it already
+# carries `metadata.namespace: ch06-kueue` explicitly.
+# Jobs live in jobs/ and are applied individually during the lab, not as part of this bundle.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - base
+  - flavors
+  - queues

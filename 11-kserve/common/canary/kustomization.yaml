@@ -1,0 +1,10 @@
+# Optional/advanced: apply on top of ../predictive. Needs Gateway API installed for the HTTPRoute
+# (comment it out of resources below to just compare the two InferenceServices via port-forward
+# instead, no Gateway API required).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch11-kserve
+resources:
+- inferenceservice-sklearn-v1.yaml
+- inferenceservice-sklearn-canary.yaml
+- httproute-canary.yaml

@@ -1,0 +1,65 @@
+# Pin: helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack
+#   --version ${KUBE_PROMETHEUS_STACK_VERSION} -f values-kube-prometheus-stack.yaml
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { memory: 1Gi }
+    nodeSelector:
+      eks.amazonaws.com/capacityType: SPOT
+    tolerations:
+      - key: eks.amazonaws.com/capacityType
+        operator: Exists
+        effect: NoSchedule
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3          # EBS CSI driver default SC name on most EKS clusters - VERIFY yours
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 20Gi } }
+    serviceMonitorSelectorNilUsesHelmValues: true
+    ruleSelectorNilUsesHelmValues: true
+
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      eks.amazonaws.com/capacityType: SPOT
+    tolerations:
+      - key: eks.amazonaws.com/capacityType
+        operator: Exists
+        effect: NoSchedule
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: gp3
+          accessModes: ["ReadWriteOnce"]
+          resources: { requests: { storage: 2Gi } }
+
+grafana:
+  nodeSelector:
+    eks.amazonaws.com/capacityType: SPOT
+  tolerations:
+    - key: eks.amazonaws.com/capacityType
+      operator: Exists
+      effect: NoSchedule
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  persistence:
+    enabled: true
+    storageClassName: gp3
+    size: 5Gi
+
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  metricLabelsAllowlist:
+    - "nodes=[eks.amazonaws.com/capacityType,node.kubernetes.io/instance-type,nvidia.com/gpu.present]"
+
+nodeExporter:
+  enabled: true

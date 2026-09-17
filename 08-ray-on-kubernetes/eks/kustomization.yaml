@@ -1,0 +1,11 @@
+# EKS: spot g6 (L4) GPU Ray worker group.   kubectl apply -k 08-ray-on-kubernetes/eks
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../common
+patches:
+  - path: patch-raycluster-eks.yaml
+    target:
+      group: ray.io
+      kind: RayCluster
+      name: ray-spot

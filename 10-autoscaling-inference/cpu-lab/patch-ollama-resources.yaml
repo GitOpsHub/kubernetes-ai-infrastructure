@@ -1,0 +1,6 @@
+# The cpu trigger reads CPU utilization against `resources.requests.cpu` — chapter 09's cpu-lab
+# Deployment requests 1 core; this patch is a strategic-merge no-op placeholder if you already set
+# requests there. Kept separate so this chapter never edits chapter 09's files directly.
+- op: replace
+  path: /spec/template/spec/containers/0/resources/requests/cpu
+  value: "1"

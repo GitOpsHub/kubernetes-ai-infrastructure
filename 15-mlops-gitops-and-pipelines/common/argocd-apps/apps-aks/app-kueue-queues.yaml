@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ch15-kueue-queues
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: ai-platform
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"   # after the Kueue controller/CRDs (wave 0) are up
+spec:
+  project: ai-platform
+  source:
+    repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY
+    targetRevision: main
+    path: 06-batch-jobs-and-kueue/aks
+  destination:
+    server: "https://kubernetes.default.svc"
+    namespace: ch06-kueue
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

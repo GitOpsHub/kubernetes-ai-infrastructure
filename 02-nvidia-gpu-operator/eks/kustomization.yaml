@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../common
+patches:
+- target:
+    kind: ClusterPolicy
+    name: cluster-policy
+  path: clusterpolicy-patch.yaml

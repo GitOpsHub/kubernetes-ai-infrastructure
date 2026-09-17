@@ -1,0 +1,46 @@
+# serving.kserve.io/v1alpha1 LLMInferenceService: KServe 0.20's purpose-built generative-AI CRD
+# (vLLM backend baked in, prefix-cache-aware routing, disaggregated prefill/decode, multi-node TP
+# via LeaderWorkerSet — none of the last three used here, single-GPU only).
+# # VERIFY: LLMInferenceService is ALPHA in v0.20.0 and churns fast — re-check this shape against
+# https://github.com/kserve/kserve/tree/v0.20.0/config/crd (or `kubectl explain llminferenceservice.spec`
+# after install) before relying on it; the field set below matches the official overview example at
+# the time this chapter was written, not a stable API guarantee.
+apiVersion: serving.kserve.io/v1alpha1
+kind: LLMInferenceService
+metadata:
+  name: qwen3-0-6b
+spec:
+  model:
+    # HF runtime, vLLM backend: pulls straight from Hugging Face Hub at startup (ungated model).
+    # For a cloud-storage-backed alternative (mirrors 09/05's model-cache approach — avoids an
+    # HF download on every cold start) see README "Model source per cloud"; # VERIFY object-storage
+    # URIs (gs://, s3://, https://<acct>.blob.core.windows.net/...) work identically for
+    # LLMInferenceService's spec.model.uri before switching — this manifest was only verified with hf://.
+    uri: hf://Qwen/Qwen3-0.6B
+    name: Qwen/Qwen3-0.6B
+  replicas: 1
+  template:
+    # Same taint every GPU node pool in this course applies (see 01-gpu-nodes-and-scheduling).
+    # Overlays add the spot nodeSelector/toleration per cloud.
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    containers:
+    - name: main
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+          nvidia.com/gpu: "1"
+        limits:
+          memory: 12Gi
+          nvidia.com/gpu: "1"
+  router:
+    # Empty sub-objects = KServe's own managed HTTPRoute/Gateway API resources (needs Gateway API
+    # CRDs + a controller installed — see 12-inference-gateway-and-multinode-serving for the real
+    # deep-dive on InferencePool/EPP; this chapter just needs Gateway API installed for the route to
+    # come up at all). # VERIFY router defaults against your installed Gateway API implementation.
+    gateway: {}
+    route: {}
+    scheduler: {}
