@@ -6,6 +6,14 @@
 
 ---
 
+## Before you start
+
+This chapter's labs need **no GPU** (every serving pod uses `vllm/vllm-openai-cpu:v0.29.0`), so it
+only needs [`00-prerequisites-and-cluster-setup`](../00-prerequisites-and-cluster-setup)'s cluster
+and tools — not chapter 01/02's GPU node pools. Step 2 (object storage) and Step 4 (shared FS) do
+need cloud IAM permissions to create buckets/roles/identities and, on GKE/AKS, a new CPU node pool —
+make sure your account has that before starting.
+
 ## 1. Why this matters
 
 In a normal microservice, the container image *is* the application: a few hundred MB, pulled in seconds.
@@ -204,7 +212,13 @@ kubectl -n ch05-models wait --for=condition=complete job/populate-model-cache --
 kubectl -n ch05-models delete pod -l app=qwen-from-pvc   # restart: no download, loads from disk
 ```
 
-### Step 2 · Object storage: GKE (Cloud Storage FUSE + Workload Identity Federation)
+### Step 2 · Object storage
+
+What you're about to do: create a bucket, grant your pods keyless read/write access to it via each
+cloud's workload identity mechanism, upload the model once with a loader Job, then serve it straight
+from the mount — this is pattern (c), the "best for production" row from section 3.2.
+
+<details><summary>GKE (Cloud Storage FUSE + Workload Identity Federation)</summary>
 
 ```bash
 ./05-model-storage-and-data/gke/create-nodepool.sh      # n2-standard-8 --spot pool + GcsFuseCsiDriver add-on
@@ -214,14 +228,15 @@ kubectl kustomize 05-model-storage-and-data/gke | less  # review first
 kubectl apply -k 05-model-storage-and-data/gke
 kubectl -n ch05-models get pod -l app=upload-model -o jsonpath='{.items[0].spec.initContainers[*].name}'; echo
 ```
-
-Expected: `gke-gcsfuse-sidecar` is injected as a native sidecar (init container with `restartPolicy: Always`).
-
+Expected output: `gke-gcsfuse-sidecar` is injected as a native sidecar (init container with
+`restartPolicy: Always`).
 ```bash
 kubectl -n ch05-models logs job/upload-model -c upload -f
 gcloud storage ls -l "gs://$(grep GCS_BUCKET 05-model-storage-and-data/gke/bucket.env | cut -d= -f2)/models/qwen3-0.6b/**"
 kubectl -n ch05-models rollout status deploy/qwen-from-bucket --timeout=15m
 ```
+How to tell this worked: the upload Job log ends with a `_COMPLETE` write and `gcloud storage ls`
+lists the model files under `models/qwen3-0.6b/`; `rollout status` reports the deployment available.
 
 Things to notice in `gke/pv-pvc-gcsfuse.yaml`:
 - `file-cache:max-size-mb:-1` plus `file-cache:enable-parallel-downloads:true`. Parallel downloads **require** the file cache,
@@ -229,7 +244,9 @@ Things to notice in `gke/pv-pvc-gcsfuse.yaml`:
 - `metadata-cache:ttl-secs:60`. We use a finite TTL so the reader notices `_COMPLETE`. For immutable prefixes in production, `-1` together with `gcsfuseMetadataPrefetchOnMount: "true"` is faster.
 - IAM is bound to `principal://iam.googleapis.com/projects/NUMBER/locations/global/workloadIdentityPools/PROJECT.svc.id.goog/subject/ns/ch05-models/sa/model-reader`. No Google service account and no KSA annotation are needed.
 
-### Step 2 · Object storage: EKS (Mountpoint for S3 + EKS Pod Identity)
+</details>
+
+<details><summary>EKS (Mountpoint for S3 + EKS Pod Identity)</summary>
 
 ```bash
 eksctl create nodegroup -f 05-model-storage-and-data/eks/nodegroup-ch05.yaml   # edit name/region first
@@ -239,6 +256,8 @@ kubectl -n mount-s3 get pods -o wide        # Mountpoint pods run beside your wo
 kubectl -n ch05-models logs job/upload-model -f
 aws s3 ls "s3://$(grep S3_BUCKET 05-model-storage-and-data/eks/bucket.env | cut -d= -f2)/models/qwen3-0.6b/" --recursive --human-readable
 ```
+How to tell this worked: `kubectl -n mount-s3 get pods` shows a Mountpoint pod `Running` next to
+your workload pod's node, and `aws s3 ls` lists the uploaded model files.
 
 Things to notice:
 - `authenticationSource: pod` makes the Mountpoint process use **the workload pod's** ServiceAccount credentials. Two pods
@@ -246,7 +265,9 @@ Things to notice:
 - Mountpoint's defaults (write new files, no overwrite, no delete) suit immutable model paths well.
 - Pod Identity trust policy principal: `pods.eks.amazonaws.com`, actions `sts:AssumeRole` + `sts:TagSession`.
 
-### Step 2 · Object storage: AKS (Blob CSI / blobfuse2 + Azure Workload Identity)
+</details>
+
+<details><summary>AKS (Blob CSI / blobfuse2 + Azure Workload Identity)</summary>
 
 ```bash
 ./05-model-storage-and-data/aks/create-nodepool.sh      # OIDC + workload identity + blob driver; Spot pool ch05spot
@@ -256,6 +277,9 @@ kubectl -n ch05-models logs job/upload-model -f
 az storage blob list --account-name "$(grep AZ_STORAGE_ACCOUNT 05-model-storage-and-data/aks/bucket.env | cut -d= -f2)" \
   -c models --auth-mode login --prefix models/qwen3-0.6b/ -o table   # needs a Blob data role for *you*
 ```
+How to tell this worked: the upload Job log ends clean and `az storage blob list` shows the
+`models/qwen3-0.6b/` blobs (your own `az` identity needs a Blob data role to run that command — a
+403 there is about *your* access, not the pod's).
 
 Things to notice:
 - The spot overlay needs **both** the nodeSelector and the toleration, because AKS taints spot nodes automatically.
@@ -263,6 +287,8 @@ Things to notice:
   *Storage Account Contributor* and effectively has full access to the account. The writer/reader split is enforced only by
   `readOnly` mounts here. For least privilege, use `mountWithWorkloadIdentityToken: "true"` (preview) with
   *Storage Blob Data Reader* / *Contributor*, and use separate PVs/identities for reader and writer.
+
+</details>
 
 ### Step 3 · Verify the serving pod reads from the mount
 

@@ -4,6 +4,14 @@
 > the labels/taints/tolerations you need on GKE, EKS and AKS. Ends with a real CUDA job on spot GPU
 > nodes on each cloud.
 
+## Before you start
+
+Needs from [`00-prerequisites-and-cluster-setup`](../00-prerequisites-and-cluster-setup): a cluster
+with a spot CPU pool up (Step 4), tools verified (Step 1), `env.sh`/`versions.env` sourced, and GPU
+quota approved on at least one cloud (Step 2) — this chapter creates the first real GPU node pool, so
+without quota the pool stays at 0 nodes forever. If you only did the fake-GPU drill in chapter 00,
+this chapter's Step 2 (cpu-lab) works without any of that.
+
 ## 1. Why this matters
 
 `nvidia.com/gpu: 1` in a pod spec looks like any other resource request, but nothing about it is
@@ -112,12 +120,16 @@ source env.sh && source versions.env
 
 Read them before applying anything — this is the entire cloud-agnostic surface.
 
-### GKE
+What you're about to do next: create a real GPU node pool on your cloud, install a device plugin
+where the cloud doesn't ship one, then run `nvidia-smi-pod` and `cuda-vectoradd-job` to prove the
+whole chain works end to end.
+
+<details><summary>GKE</summary>
 
 ```bash
 ./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh   # spot-gpu, g2-standard-4 + 1x L4, min 0 max 1
 ```
-Expected:
+Expected output:
 ```
 config.accelerators:
 - acceleratorCount: '1'
@@ -126,18 +138,19 @@ config.accelerators:
 config.spot: true
 autoscaling: {enabled: true, maxNodeCount: 1}
 ```
-The driver and GKE's own device plugin come with the pool — nothing else to install.
+How to tell this worked: the pool shows up in `gcloud container node-pools list`. The driver and
+GKE's own device plugin come with the pool — nothing else to install.
 ```bash
 NODES=1 ./01-gpu-nodes-and-scheduling/gke/scale-gpu-pool.sh   # pre-warm; or let a Pending pod trigger it
 kubectl apply -k 01-gpu-nodes-and-scheduling/gke
 kubectl -n ch01-gpu get pods -w
 ```
-Expected (after node boot + driver load, ~3–5 min from 0 nodes):
+Expected output (after node boot + driver load, ~3–5 min from 0 nodes):
 ```
 nvidia-smi   1/1   Running
 cuda-vectoradd   0/1   Completed
 ```
-Verify:
+How to tell this worked:
 ```bash
 kubectl -n ch01-gpu logs nvidia-smi | head -15
 kubectl describe node -l cloud.google.com/gke-nodepool=spot-gpu | grep -A6 "Allocated resources"
@@ -147,8 +160,11 @@ Allocated resources:
   Resource           Requests   Limits
   nvidia.com/gpu     1          1
 ```
+`nvidia-smi` logs show a real GPU (model, driver/CUDA version) and `cuda-vectoradd` reaches `Completed`.
 
-### EKS
+</details>
+
+<details><summary>EKS</summary>
 
 ```bash
 ./01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh   # spot-gpu, g6.xlarge/g4dn.xlarge, min 0 max 1
@@ -162,19 +178,23 @@ NODES=1 ./01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh   # EKS has no 
 kubectl apply -k 01-gpu-nodes-and-scheduling/eks
 kubectl -n ch01-gpu get pods -w
 ```
-Expected:
+Expected output:
 ```
 NAME          READY   STATUS      RESTARTS
 nvidia-smi    1/1     Running     0
 cuda-vectoradd-xxxxx   0/1   Completed   0
 ```
-Verify:
+How to tell this worked:
 ```bash
 kubectl -n nvidia-device-plugin get ds
 kubectl get nodes -l eks.amazonaws.com/nodegroup=spot-gpu -L nvidia.com/gpu.present,eks.amazonaws.com/capacityType
 ```
+The `nvdp` DaemonSet shows `DESIRED == READY == 1`, and the node is labeled
+`nvidia.com/gpu.present=true` and `eks.amazonaws.com/capacityType=SPOT`.
 
-### AKS
+</details>
+
+<details><summary>AKS</summary>
 
 ```bash
 ./01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh    # gpuspot, Standard_NC4as_T4_v3, min 0 max 1
@@ -187,21 +207,27 @@ MIN=1 ./01-gpu-nodes-and-scheduling/aks/scale-gpu-pool.sh
 kubectl apply -k 01-gpu-nodes-and-scheduling/aks
 kubectl -n ch01-gpu get pods -w
 ```
-Expected:
+Expected output:
 ```
 nvidia-smi        1/1     Running
 cuda-vectoradd-xxxxx   0/1   Completed
 ```
-Verify:
+How to tell this worked:
 ```bash
 kubectl -n nvidia-device-plugin get ds
 kubectl get nodes -l agentpool=gpuspot -L kubernetes.azure.com/scalesetpriority,nvidia.com/gpu.present
 ```
+The `nvdp` DaemonSet is `1/1` Ready on the `gpuspot` node, and the node carries both the
+`scalesetpriority=spot` and `nvidia.com/gpu.present=true` labels.
+
+</details>
 
 ### Step 2: Fake-GPU scheduling drills (no GPU needed, any cluster)
 
-Run this whether or not your cloud GPU pool is up — it's cheaper and faster to build intuition here
-first. Prereq: `00-prerequisites-and-cluster-setup/cpu-lab/advertise-fake-gpu.sh` (patches a CPU node
+What you're about to do: run five pods with different taint/toleration/selector combinations against
+a fake `nvidia.com/gpu` node, and predict each one's fate before you look at the answer — this builds
+scheduling intuition without spending on a real GPU. Run this whether or not your cloud GPU pool is
+up. Prereq: `00-prerequisites-and-cluster-setup/cpu-lab/advertise-fake-gpu.sh` (patches a CPU node
 to `nvidia.com/gpu: 2` + taint + `fake-gpu=true` label).
 
 ```bash
@@ -210,7 +236,18 @@ NODE=$NODE COUNT=2 00-prerequisites-and-cluster-setup/cpu-lab/advertise-fake-gpu
 kubectl apply -k 01-gpu-nodes-and-scheduling/cpu-lab
 kubectl -n ch01-gpu get pods -l drill=gpu-scheduling
 ```
-**Before** applying, predict each pod's fate — the file's comments have the answer:
+Expected output (after a few seconds):
+```
+NAME                          READY   STATUS    RESTARTS
+a-no-toleration-xxxxx         0/1     Pending   0
+b-wrong-model-xxxxx           0/1     Pending   0
+c-correct-xxxxx                1/1     Running   0
+d-cpu-pod-on-gpu-node-xxxxx    1/1     Running   0
+```
+How to tell this worked: `c-correct` and `d-cpu-pod-on-gpu-node` are `Running`, `a-no-toleration` and
+`b-wrong-model` stay `Pending` (`kubectl -n ch01-gpu describe pod a-no-toleration-xxxxx | grep -A2
+Events` shows the taint/selector reason). **Before** applying, predict each pod's fate — the file's
+comments have the answer:
 - `a-no-toleration` — `Pending`, untolerated taint
 - `b-wrong-model` — `Pending`, nodeSelector doesn't match (simulates a GFD label from chapter 02)
 - `c-correct` — `Running`

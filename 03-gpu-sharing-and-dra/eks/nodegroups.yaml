@@ -23,7 +23,7 @@ managedNodeGroups:
       nvidia.com/device-plugin.config: time-sliced-4   # switch to mps-4 later with kubectl label
     taints:
       - key: nvidia.com/gpu
-        value: "true"
+        value: "present"
         effect: NoSchedule
 
   # 2) DRA: the GPU Operator must NOT run its device plugin here (label below), the NVIDIA DRA
@@ -42,7 +42,7 @@ managedNodeGroups:
       nvidia.com/gpu.deploy.device-plugin: "false"
     taints:
       - key: nvidia.com/gpu
-        value: "true"
+        value: "present"
         effect: NoSchedule
 
   # 3) ADVANCED / EXPENSIVE - MIG needs A100/H100-class GPUs (P4d/P5/P6, or Blackwell g7/g7e).
@@ -62,6 +62,6 @@ managedNodeGroups:
       nvidia.com/device-plugin.config: mig-single
     taints:
       - key: nvidia.com/gpu
-        value: "true"
+        value: "present"
         effect: NoSchedule
 # ON-DEMAND FALLBACK: set spot: false (or remove it) on a copy of the group with a different name.

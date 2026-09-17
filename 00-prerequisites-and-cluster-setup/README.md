@@ -3,6 +3,19 @@
 > Tools, spot-first clusters on GKE / EKS / AKS, GPU quota, cost guardrails, and a fake-GPU trick so
 > you can practise GPU scheduling before any GPU quota is approved.
 
+## Before you start
+
+This is the first chapter — there's no prior chapter output required. You do need, before you begin:
+
+- Admin/owner-level access to at least one cloud account you're allowed to spend money on (GCP project,
+  AWS account, or Azure subscription) — cluster and GPU-quota changes need elevated IAM.
+- Nothing installed yet is assumed; Step 1 installs the CLI toolchain for you.
+- A `env.sh.example` → `env.sh` copy filled in with your project ID / AWS account / Azure subscription
+  before running any script (every script in this chapter sources `env.sh` + `versions.env`).
+
+Everything chapters 01+ build on (the spot CPU/GPU node pools, the cluster itself, `versions.env`) comes
+from this chapter's Step 4 (Cluster) — do that before starting chapter 01.
+
 ## 1. Why this matters
 
 GPU work on Kubernetes goes wrong in boring ways before it goes wrong in interesting ones: the
@@ -124,10 +137,15 @@ Log in: `gcloud auth login && gcloud auth application-default login`, `aws confi
 
 ### Step 2: Quota (start now, it takes time)
 
-#### GKE
+What you're about to do: run a read-only quota check per cloud, then file the increase request for
+the ones showing 0 — these approvals can take hours, so kick them off before you need the GPU pool.
+
+<details><summary>GKE</summary>
+
 ```bash
 ./00-prerequisites-and-cluster-setup/gke/quota-check.sh
 ```
+Expected output:
 ```
 == Regional GPU quotas in us-east1 ==
 NVIDIA_L4_GPUS               limit=1   usage=0
@@ -136,27 +154,44 @@ NVIDIA_T4_GPUS               limit=1   usage=0
 == Global GPUS_ALL_REGIONS ==
 GPUS_ALL_REGIONS             limit=0   usage=0     <- request 1-2
 ```
-Request in the Console (IAM & Admin → Quotas & System Limits) or with `gcloud quotas preferences create` (the script prints the exact form).
+How to tell this worked: the script exits 0 and prints both the regional and global quota tables
+(an auth error means `gcloud auth login`/`application-default login` wasn't run in Step 1).
+Request in the Console (IAM & Admin → Quotas & System Limits) or with `gcloud quotas preferences create`
+(the script prints the exact form).
 
-#### EKS
+</details>
+
+<details><summary>EKS</summary>
+
 ```bash
 ./00-prerequisites-and-cluster-setup/eks/quota-check.sh
 ```
+Expected output:
 ```
 L-3819A6DF  All G and VT Spot Instance Requests   0.0
 L-DB2E81BA  Running On-Demand G and VT instances  0.0
 L-34B43A08  All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests  5.0
 ```
+How to tell this worked: `L-3819A6DF` (spot G/VT vCPUs) shows a nonzero limit before you try to
+create the GPU node group, otherwise `create-cluster.sh` will succeed but the GPU group will never
+get capacity.
 ```bash
 aws service-quotas request-service-quota-increase --region "$AWS_REGION" \
   --service-code ec2 --quota-code L-3819A6DF --desired-value 8
 ```
 
-#### AKS
+</details>
+
+<details><summary>AKS</summary>
+
 ```bash
 ./00-prerequisites-and-cluster-setup/aks/quota-check.sh
 ```
-Request **Total Regional Spot vCPUs ≥ 8** in the portal (Subscriptions → Usage + quotas).
+How to tell this worked: the script lists your subscription's current `LowPriorityCores` (Spot vCPU)
+usage/limit without erroring. Request **Total Regional Spot vCPUs ≥ 8** in the portal
+(Subscriptions → Usage + quotas) if the limit is below 8.
+
+</details>
 
 ### Step 3: Budgets (cost guardrails)
 
@@ -171,47 +206,70 @@ every session, and deleting clusters you aren't using.
 
 ### Step 4: Cluster
 
-Pick **one** path per cloud.
+What you're about to do: create the spot-first cluster (or extend your existing one) that every later
+chapter runs on. Pick **one** path per cloud.
 
-#### GKE: path A, new cluster
+<details><summary>GKE</summary>
+
+Path A, new cluster:
 ```bash
 ./00-prerequisites-and-cluster-setup/gke/create-cluster.sh
 ```
-Expected (the GPU pool is at 0, so no GPU node yet):
+Expected output (the GPU pool is at 0, so no GPU node yet):
 ```
 NAME                                         STATUS   GKE-NODEPOOL   GKE-SPOT
 gke-gke-ai-lab-spot-cpu-3f1c2a7e-k2lq        Ready    spot-cpu       true
 ```
+How to tell this worked: `kubectl get nodes` shows at least one `spot-cpu` node with `GKE-SPOT=true`,
+and `gcloud container node-pools list` shows `spot-gpu` at 0 nodes (not missing).
 
-#### GKE: path B, your existing Standard zonal cluster (2× e2-medium spot, nearly full)
-e2-medium has 2 shared vCPUs and 4 GiB, and after system pods there is little left. Add a 4 vCPU / 16 GiB spot pool that scales to zero:
+Path B, your existing Standard zonal cluster (2× e2-medium spot, nearly full): e2-medium has 2 shared
+vCPUs and 4 GiB, and after system pods there is little left. Add a 4 vCPU / 16 GiB spot pool that
+scales to zero:
 ```bash
 POOL=spot-cpu-4 MACHINE=e2-standard-4 MAX_NODES=3 \
   ./00-prerequisites-and-cluster-setup/gke/add-spot-cpu-pool-existing-cluster.sh
 ```
-Then add the spot GPU pool with `01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh` when quota arrives.
-Optional: `--autoscaling-profile optimize-utilization` (commented in the script) scales idle nodes down faster.
+How to tell this worked: `kubectl get nodes -L cloud.google.com/gke-nodepool` lists `spot-cpu-4`
+once a workload lands on it (the pool starts at 1 node). Then add the spot GPU pool with
+`01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh` when quota arrives. Optional:
+`--autoscaling-profile optimize-utilization` (commented in the script) scales idle nodes down faster.
 
-#### EKS
+</details>
+
+<details><summary>EKS</summary>
+
 ```bash
 ./00-prerequisites-and-cluster-setup/eks/create-cluster.sh    # ~15-20 min
 ```
+Expected output:
 ```
 NAME                          STATUS  NODEGROUP  CAPACITYTYPE  INSTANCE-TYPE
 ip-192-168-12-34.ec2.internal Ready   spot-cpu   SPOT          m5.large
 ip-192-168-55-10.ec2.internal Ready   spot-cpu   SPOT          t3a.large
 ```
-`--install-nvidia-plugin=false` is intentional. Chapter 01 installs a pinned device plugin.
+How to tell this worked: `eksctl get cluster` shows `ACTIVE`, and `kubectl get nodes` shows 1-2
+`spot-cpu` nodes Ready. `--install-nvidia-plugin=false` is intentional — chapter 01 installs a
+pinned device plugin instead of the eksctl default.
 
-#### AKS
+</details>
+
+<details><summary>AKS</summary>
+
 ```bash
 ./00-prerequisites-and-cluster-setup/aks/create-cluster.sh
 ```
+Expected output:
 ```
 NAME                              STATUS  AGENTPOOL  SCALESETPRIORITY
 aks-system-12345678-vmss000000    Ready   system
 aks-spotcpu-12345678-vmss000000   Ready   spotcpu    spot
 ```
+How to tell this worked: `az aks show` reports `provisioningState: Succeeded`, and `kubectl get
+nodes -L kubernetes.azure.com/scalesetpriority` shows one `system` node with no priority label and
+one `spotcpu` node labeled `spot`.
+
+</details>
 
 ### Step 5: Spot smoke test
 

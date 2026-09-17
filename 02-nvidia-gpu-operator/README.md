@@ -4,6 +4,15 @@
 > and Node Feature Discovery, managed as a single `ClusterPolicy` custom resource — and when that's
 > worth it over the per-cloud driver paths chapter 01 used.
 
+## Before you start
+
+Needs from [`01-gpu-nodes-and-scheduling`](../01-gpu-nodes-and-scheduling): a spot GPU node pool up
+on your cloud, and its driver disabled/skipped at create time for the cloud you're using (GKE:
+`GPU_DRIVER_VERSION=disabled`, AKS: `GPU_DRIVER=none` — EKS keeps its baked-in AMI driver as-is). If
+chapter 01's standalone `nvdp` device plugin is running on the cluster, uninstall it first (Step 4
+below) — two device plugins double-register GPUs. Read section 3.3 before you install anything: which
+components you disable is different per cloud.
+
 ## 1. Why this matters
 
 Chapter 01 used three different driver installers (GKE's DaemonSet, EKS's baked-in AMI, AKS's
@@ -98,13 +107,19 @@ moving parts to reconcile.
 source env.sh && source versions.env   # GPU_OPERATOR_VERSION=v26.7.0, DEVICE_PLUGIN_VERSION, DCGM_EXPORTER_CHART_VERSION
 ```
 
-Before installing on **any** cloud: if chapter 01's standalone device plugin (`nvdp`) is running on
-this cluster, remove it first — two device plugins double-register GPUs.
+### Step 1: Remove chapter 01's standalone device plugin (any cloud, if present)
+
+What you're about to do and why: the Operator installs its own device plugin; leaving chapter 01's
+`nvdp` release running alongside it double-registers `nvidia.com/gpu`.
 ```bash
 helm -n nvidia-device-plugin uninstall nvdp || true
 ```
+How to tell this worked: `helm -n nvidia-device-plugin list` returns no `nvdp` release (or the
+namespace never existed — that's fine too).
 
-### GKE
+### Step 2: Install the Operator on your cloud
+
+<details><summary>GKE</summary>
 
 ```bash
 GPU_DRIVER_VERSION=disabled ./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh   # skip GKE's driver
@@ -112,17 +127,24 @@ GPU_DRIVER_VERSION=disabled ./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepoo
 ```
 `values-gke.yaml` disables `driver`, `toolkit` and `devicePlugin` (COS already has all three) and
 keeps GFD, DCGM, NFD, MIG manager, node-status-exporter on — the Operator only adds what GKE doesn't.
+How to tell this worked: `install.sh` exits 0 (it runs `--wait --timeout 15m`, so a hang means a
+DaemonSet couldn't schedule) and prints `clusterpolicy cluster-policy` state `ready`.
 
-### EKS
+</details>
+
+<details><summary>EKS</summary>
 
 ```bash
 ./01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh   # AL2023 NVIDIA AMI already has driver+toolkit
 ./02-nvidia-gpu-operator/eks/install.sh
 ```
 `values-eks.yaml` disables `driver` and `toolkit` (preinstalled on the AMI) but leaves `devicePlugin`
-**enabled** — the Operator's plugin replaces chapter 01's standalone `nvdp` release.
+**enabled** — the Operator's plugin replaces chapter 01's standalone `nvdp` release. How to tell this
+worked: same as GKE — `install.sh` completes and `ClusterPolicy` reports `ready`.
 
-### AKS
+</details>
+
+<details><summary>AKS</summary>
 
 ```bash
 GPU_DRIVER=none ./01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh   # skip AKS's own driver
@@ -131,10 +153,13 @@ GPU_DRIVER=none ./01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh   # ski
 `values-aks.yaml` leaves `driver`, `toolkit`, `devicePlugin` **all enabled** (chart defaults) — the
 full stack, because we told AKS not to install its own driver. It also adds a toleration for AKS's
 auto-added spot taint (`kubernetes.azure.com/scalesetpriority=spot`) so every Operator DaemonSet can
-actually land on the `gpuspot` pool.
+actually land on the `gpuspot` pool. How to tell this worked: `install.sh` completes and
+`ClusterPolicy` reports `ready` — if it hangs, check `kubectl -n gpu-operator get pods` for a driver
+DaemonSet stuck `Init` (the slowest stage on AKS, see section 5).
 
-### Expected output (any cloud)
+</details>
 
+Expected output (any cloud):
 ```bash
 kubectl -n gpu-operator get pods
 ```
@@ -155,24 +180,29 @@ kubectl get clusterpolicy cluster-policy -o jsonpath='{.status.state}'
 ready
 ```
 
-### Validate
+### Step 3: Validate
 
+What you're about to do: confirm every operand is healthy and GFD's labels landed on the GPU node,
+then re-run chapter 01's CUDA smoke test against the same node with the Operator now doing the work.
 ```bash
 ./02-nvidia-gpu-operator/common/validate.sh
 ```
-Expect GFD labels on the GPU node:
+Expected output — GFD labels on the GPU node:
 ```
 NAME              GPU-PRODUCT            GPU-MEMORY   GPU-COUNT
 gke-...-spot-gpu   NVIDIA-L4              23034MiB     1
 ```
-Re-run chapter 01's smoke test against the Operator-managed node — same manifests, same result,
-different plumbing underneath:
+How to tell this worked: every pod listed by `validate.sh` is `Running` (validators `Completed`), and
+the GFD columns are non-empty for your GPU node. Re-run chapter 01's smoke test against the
+Operator-managed node — same manifests, same result, different plumbing underneath:
 ```bash
 kubectl apply -k 01-gpu-nodes-and-scheduling/<cloud>
 kubectl -n ch01-gpu logs job/cuda-vectoradd
 ```
+How to tell this worked: the job reaches `Completed` and its log shows the vector-add result, exactly
+like chapter 01 — proving the Operator's driver/toolkit/plugin chain is a drop-in replacement.
 
-### 4.1 cpu-lab: what doesn't carry over
+### Step 4: cpu-lab (what doesn't carry over)
 
 **There is no meaningful GPU-Operator lab on CPU-only nodes.** The Operator's entire purpose is
 installing and reconciling a real driver, container toolkit and DCGM stack against physical GPU
