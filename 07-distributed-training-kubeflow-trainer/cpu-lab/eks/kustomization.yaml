@@ -1,0 +1,11 @@
+# EKS: schedules onto the spot managed nodegroup from chapter 00 (no GPU nodegroup needed).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - path: patch-trainjob-eks.yaml
+    target:
+      group: trainer.kubeflow.org
+      kind: TrainJob
+      name: ddp-cpu

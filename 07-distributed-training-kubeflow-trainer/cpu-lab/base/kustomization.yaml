@@ -1,0 +1,23 @@
+# CPU-only variant of ../../common/base: same TrainJob/TrainingRuntime shape and
+# the SAME train_ddp.py (it already auto-selects gloo when no GPU is visible — see
+# common/base/train_ddp.py "use_cuda = torch.cuda.is_available()"), but:
+#   * no nvidia.com/gpu request, no GPU tolerations/nodeSelector
+#   * checkpoints go to an emptyDir, not a bucket mount (this lab is about DDP
+#     mechanics and gang scheduling, not storage — see chapter 05 for buckets)
+#   * numNodes: 2, numProcPerNode: 2 -> 4 ranks total, all on CPU, so you can
+#     watch rendezvous and all_reduce without touching cloud IAM or GPU quota
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ch07-training-cpu
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - trainingruntime-torch-ddp-cpu.yaml
+  - trainjob-ddp-cpu.yaml
+configMapGenerator:
+  - name: ddp-train-script
+    files:
+      - train_ddp.py   # copy of ../../common/base/train_ddp.py -- kustomize forbids
+                        # configMapGenerator files outside the kustomization root
+    options:
+      disableNameSuffixHash: true

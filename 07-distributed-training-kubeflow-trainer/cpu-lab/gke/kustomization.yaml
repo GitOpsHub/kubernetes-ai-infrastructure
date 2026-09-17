@@ -1,0 +1,11 @@
+# GKE: same spot CPU pool chapter 00 creates. No GPU, no bucket -- just the base.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - path: patch-trainjob-gke.yaml
+    target:
+      group: trainer.kubeflow.org
+      kind: TrainJob
+      name: ddp-cpu
