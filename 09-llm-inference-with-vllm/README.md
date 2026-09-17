@@ -3,6 +3,18 @@
 > Serve an OpenAI-compatible LLM endpoint on Kubernetes with vLLM: probes that match a multi-minute
 > weight-load, KV cache / GPU memory sizing, tensor parallelism, benchmarking, and a CPU fallback.
 
+## Before you start
+
+This chapter assumes:
+
+- A spot GPU node pool from `01-gpu-nodes-and-scheduling` (`gke/create-gpu-nodepool.sh`,
+  `eks/create-gpu-nodegroup.sh` + `install-device-plugin.sh`, or `aks/create-gpu-nodepool.sh` +
+  `install-device-plugin.sh`) — this chapter reuses that pool, it does not create its own.
+- The NVIDIA GPU Operator or device plugin from `01`/`02` already installed on that pool.
+- `env.sh` and `versions.env` sourced.
+- No GPU? Skip straight to Step 5 (`cpu-lab/` with Ollama) — it needs only the base cluster from
+  chapter `00`.
+
 ## 1. Why this matters
 
 A vLLM pod is not "just another Deployment." It boots for minutes (not seconds), owns the *entire*
@@ -111,9 +123,38 @@ Prerequisite: a spot GPU node pool from `01-gpu-nodes-and-scheduling` (`gke/crea
 
 ### Step 2: Deploy (pick your cloud)
 
+What you're about to do: create an optional HF token Secret (avoids anonymous rate limits), then
+apply the cloud overlay and watch the pod come up.
+
 ```bash
 ./09-llm-inference-with-vllm/common/create-hf-secret.sh ch09-vllm   # optional but recommended
-kubectl apply -k 09-llm-inference-with-vllm/gke    # or eks / aks
+```
+
+<details>
+<summary><b>GKE</b></summary>
+
+```bash
+kubectl apply -k 09-llm-inference-with-vllm/gke
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -k 09-llm-inference-with-vllm/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -k 09-llm-inference-with-vllm/aks
+```
+</details>
+
+```bash
 kubectl -n ch09-vllm get pods -w
 ```
 
@@ -221,7 +262,9 @@ GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that PV in 
 ## 7. Cleanup and cost notes
 
 ```bash
-./09-llm-inference-with-vllm/gke/cleanup.sh    # or eks / aks
+./09-llm-inference-with-vllm/gke/cleanup.sh    # GKE
+./09-llm-inference-with-vllm/eks/cleanup.sh    # EKS
+./09-llm-inference-with-vllm/aks/cleanup.sh    # AKS
 kubectl delete -k 09-llm-inference-with-vllm/cpu-lab
 ```
 - A single L4/T4 spot GPU running vLLM idle-but-loaded still bills for the whole node — this chapter

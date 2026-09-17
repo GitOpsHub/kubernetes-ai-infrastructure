@@ -4,6 +4,18 @@
 > CPU predictive models, the new `LLMInferenceService` CRD for GPU generative models with a vLLM
 > backend, RawDeployment mode (no Knative dependency), and canary rollouts.
 
+## Before you start
+
+This chapter assumes:
+
+- A cluster from `00-prerequisites-and-cluster-setup`. Step 2 (predictive models) is CPU-only and
+  works on any cluster (`cpu-lab/` is the same overlay, cloud-agnostic).
+- Step 3 (generative model) needs the spot GPU node pool from `01-gpu-nodes-and-scheduling` /
+  `09-llm-inference-with-vllm` — this chapter reuses it, it does not create its own.
+- Step 4's optional native-Serverless canary demo needs Knative Serving installed separately (not
+  provisioned by this course); the RawDeployment workaround (default path) needs nothing extra.
+- `env.sh` and `versions.env` sourced.
+
 ## 1. Why this matters
 
 Chapters 09-10 hand-wrote a Deployment, Service, probes, HPA/KEDA — correct, but every team doing
@@ -99,19 +111,82 @@ source env.sh && source versions.env
 
 ### Step 1: Install KServe
 
+What you're about to do: install the KServe CRDs + controller via Helm, pinned to
+`${KSERVE_VERSION}`, in RawDeployment mode.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-./11-kserve/<gke|eks|aks>/install-kserve.sh
+./11-kserve/gke/install-kserve.sh
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./11-kserve/eks/install-kserve.sh
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./11-kserve/aks/install-kserve.sh
+```
+</details>
+
+```bash
 kubectl -n kserve get pods
 kubectl get crd | grep serving.kserve.io
 ```
 Expected: `inferenceservices.serving.kserve.io`, `llminferenceservices.serving.kserve.io`,
 `clusterservingruntimes.serving.kserve.io` among the CRDs; `kserve-controller-manager` `Running` in
-`kserve`.
+`kserve`. How to tell this worked: `kubectl -n kserve rollout status deploy/kserve-controller-manager` reports `successfully rolled out`.
 
 ### Step 2: Predictive models (CPU, any cloud)
 
+What you're about to do: apply the namespace + sklearn/xgboost `InferenceService`s and hit the V2
+inference API once they're ready.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-kubectl apply -k 11-kserve/<gke|eks|aks>   # namespace + sklearn + xgboost InferenceServices
+kubectl apply -k 11-kserve/gke   # namespace + sklearn + xgboost InferenceServices
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -k 11-kserve/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -k 11-kserve/aks
+```
+</details>
+
+<details>
+<summary><b>No cloud overlay needed: cpu-lab (any cluster)</b></summary>
+
+```bash
+kubectl apply -k 11-kserve/cpu-lab
+```
+
+Identical to the cloud overlays for this step — `cpu-lab/` is `common` + `common/predictive` with
+no cloud-specific patches, since predictive models here need no GPU/spot nodeSelector at all.
+</details>
+
+```bash
 kubectl -n ch11-kserve get inferenceservice
 ```
 Expected (after the storage-initializer downloads the public model, ~1-2 min):
@@ -126,11 +201,39 @@ kubectl -n ch11-kserve port-forward svc/sklearn-iris-predictor 8080:80 &
 curl -s http://localhost:8080/v2/models/sklearn-iris/infer -H 'Content-Type: application/json' -d \
   '{"inputs":[{"name":"input-0","shape":[1,4],"datatype":"FP32","data":[[6.8,2.8,4.8,1.4]]}]}' | jq
 ```
+How to tell this worked: the response JSON's `outputs[0].data` is a 3-class probability/label
+array, not an HTTP error.
 
 ### Step 3: Generative model (GPU, needs a spot GPU node pool — see chapter 01/09)
 
+What you're about to do: layer the `generative` component on top of your cloud overlay to deploy
+the GPU `LLMInferenceService`.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-kubectl apply -k 11-kserve/<gke|eks|aks>/generative
+kubectl apply -k 11-kserve/gke/generative
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -k 11-kserve/eks/generative
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -k 11-kserve/aks/generative
+```
+</details>
+
+```bash
 kubectl -n ch11-kserve get llminferenceservice
 kubectl -n ch11-kserve get pods -w
 ```
@@ -190,8 +293,11 @@ spec:
 ## 7. Cleanup and cost notes
 
 ```bash
-./11-kserve/<gke|eks|aks>/cleanup.sh            # UNINSTALL_KSERVE=true also removes the controller/CRDs cluster-wide
+./11-kserve/gke/cleanup.sh            # GKE — UNINSTALL_KSERVE=true also removes the controller/CRDs cluster-wide
+./11-kserve/eks/cleanup.sh            # EKS
+./11-kserve/aks/cleanup.sh            # AKS
 kubectl delete -k 11-kserve/common/canary --ignore-not-found
+kubectl delete -k 11-kserve/cpu-lab --ignore-not-found
 ```
 - The CPU predictive models are cheap (1 CPU / 2Gi each) — leave them running is fine between
   sessions if you're not GPU-constrained.

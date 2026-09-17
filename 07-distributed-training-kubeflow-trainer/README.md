@@ -6,6 +6,20 @@
 
 ---
 
+## Before you start
+
+This chapter assumes:
+
+- A cluster from `00-prerequisites-and-cluster-setup`, with the GPU node-pool mechanics from
+  `01-gpu-nodes-and-scheduling` and the NVIDIA GPU Operator from `02-nvidia-gpu-operator` already
+  understood — this chapter creates its own dedicated GPU node pool (§4.3) but assumes you know
+  why the driver/device-plugin steps happen.
+- Bucket-mount CSI drivers from `05-model-storage-and-data` (GCS FUSE / Mountpoint-S3 / Blob CSI)
+  if you want persisted checkpoints — the GPU lab path uses them; `cpu-lab/` doesn't.
+- Optional: the `team-research` ClusterQueue from `06-batch-jobs-and-kueue` if you plan to run
+  §3.4/Lab C (`kueue/<cloud>` overlay) — not required for the base GPU or cpu-lab paths.
+- `env.sh` and `versions.env` sourced.
+
 ## 1. Why this matters
 
 A distributed training run is not a bag of independent pods — it's a **gang**: `torchrun` needs
@@ -118,7 +132,8 @@ pod annotation that injects the GCS FUSE sidecar.
 | Spot taint added by | nobody (opt-in) | nobody (opt-in) | **AKS automatically** |
 | Checkpoint bucket | GCS via GCS FUSE CSI | S3 via Mountpoint CSI (IRSA) | Azure Blob via Blob CSI (kubelet managed identity) |
 
-Apply a full lab with `kubectl apply -k 07-distributed-training-kubeflow-trainer/<gke|eks|aks>`.
+Apply a full lab with `kubectl apply -k 07-distributed-training-kubeflow-trainer/gke` (or
+`eks`/`aks` — see §4.4 for the explicit per-cloud commands).
 
 ### 3.4 Optional: Kueue admission (`kueue/<cloud>`)
 
@@ -155,15 +170,45 @@ A running cluster from `00-prerequisites-and-cluster-setup`, and GPU quota for t
 (spot **and** on-demand family — spot capacity can be unavailable). `kubectl get ns kubeflow-system`
 should not yet exist (first run) or should already have Trainer installed (idempotent `install.sh`).
 
-### 4.2 Install Kubeflow Trainer (same on every cloud)
+### 4.2 Install Kubeflow Trainer
+
+What you're about to do: install the Trainer controller + JobSet CRDs via Helm, pinned to
+`${KUBEFLOW_TRAINER_VERSION}`. The chart and values are identical across clouds — only the script
+path differs.
+
+<details>
+<summary><b>GKE</b></summary>
 
 ```bash
-./07-distributed-training-kubeflow-trainer/<gke|eks|aks>/install.sh
+./07-distributed-training-kubeflow-trainer/gke/install.sh
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./07-distributed-training-kubeflow-trainer/eks/install.sh
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./07-distributed-training-kubeflow-trainer/aks/install.sh
+```
+</details>
+
+Expected output (tail):
+
+```
+customresourcedefinition.apiextensions.k8s.io/trainjobs.trainer.kubeflow.org created
+clustertrainingruntime.trainer.kubeflow.org/torch-distributed created
 ```
 
-Installs the `kubeflow-trainer` Helm chart (controller + JobSet CRDs/controller as a dependency)
-with the built-in `torch-distributed` `ClusterTrainingRuntime` enabled, and prints the CRDs and
-`clustertrainingruntimes` once the post-install hook has applied them.
+How to tell this worked: `kubectl get clustertrainingruntimes` lists `torch-distributed`, and
+`kubectl -n kubeflow-system get pods` shows the trainer-controller-manager `Running`.
 
 ### 4.3 GPU node pool and checkpoint storage
 
@@ -188,9 +233,35 @@ AKS — no per-pod identity needed there, see `aks/setup-storage.sh`), and write
 
 ### 4.4 Run the lab
 
+What you're about to do: apply the cloud overlay (TrainJob + patched runtime), watch the 2-rank
+DDP TrainJob rendezvous and start writing checkpoints.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/<gke|eks|aks>
-kubectl -n ch07-training get trainjob ddp-gpu -w
+kubectl apply -k 07-distributed-training-kubeflow-trainer/gke
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -k 07-distributed-training-kubeflow-trainer/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -k 07-distributed-training-kubeflow-trainer/aks
+```
+</details>
+
+```bash
+kubectl -n ch07-training get trainjob ddp-gpu -w   # Ctrl-C once JOBSSTATUS shows Running
 kubectl -n ch07-training logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f --prefix
 ```
 
@@ -201,16 +272,24 @@ Expected log lines (rank 0):
 [rank 0/2] checkpoint written: /mnt/checkpoints/ddp-gpu/step-00000500.pt (+.done)
 ```
 
+How to tell this worked: `kubectl -n ch07-training get pods` shows 2 `Running` pods (one per
+rank) and neither log stream shows a NCCL timeout.
+
 ### 4.5 Simulate a spot reclaim
 
+What you're about to do: delete the rank-1 pod to simulate a spot reclaim mid-run, and watch the
+JobSet recreate the whole gang instead of just the one pod.
+
 ```bash
-kubectl -n ch07-training delete pod -l trainer.kubeflow.org/trainjob-ancestor-step=trainer --field-selector status.phase=Running --grep node-1 2>/dev/null \
-  || kubectl -n ch07-training delete pod $(kubectl -n ch07-training get pod -o name | grep node-1)
+kubectl -n ch07-training delete pod \
+  "$(kubectl -n ch07-training get pod -o name | grep node-1)"
+kubectl -n ch07-training get jobs -w   # Ctrl-C once both Jobs show a new, higher restart count
 ```
 
-Watch: the Job's `backoffLimit: 0` fails that Job, the JobSet's `Recreate` policy recreates
-**both** Jobs, and rank 0's resume logic picks up the newest `.done` checkpoint instead of
-restarting from step 0.
+Expected: both `ddp-gpu-node-0` and `ddp-gpu-node-1` Jobs restart together (not just node-1).
+How to tell this worked: rank 0's log picks up the newest `.done` checkpoint step instead of
+restarting from `step=0` — the Job's `backoffLimit: 0` fails that Job fast, and the JobSet's
+`Recreate` policy recreates **both** Jobs so all ranks re-rendezvous together.
 
 ### 4.6 No GPU quota yet? Run it on CPU
 
@@ -221,15 +300,40 @@ restarting from step 0.
 contrast to see once, then go set up chapter 05's bucket-backed checkpoints for the real thing).
 It runs 2 nodes x 2 procs = 4 ranks on whatever spot CPU pool chapter 00 gave you:
 
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/gke   # or eks / aks
+kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/gke
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/aks
+```
+</details>
+
+```bash
 kubectl -n ch07-training-cpu get trainjob,jobset,pods -w
 kubectl -n ch07-training-cpu logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f
 ```
 
-Do the same 4.5 "simulate a spot reclaim" drill against `ch07-training-cpu` and watch the
-resume logic restart from step 0 (no persistent checkpoint volume) — that's the concrete
-argument for wiring up real storage before you run this on spot GPUs for real.
+How to tell this worked: 4 pods (2 nodes x 2 procs) go `Running`, and the log shows
+`world_size=4 device=cpu`. Do the same 4.5 "simulate a spot reclaim" drill against
+`ch07-training-cpu` and watch the resume logic restart from step 0 (no persistent checkpoint
+volume) — that's the concrete argument for wiring up real storage before you run this on spot
+GPUs for real.
 
 ## 5. Spot considerations
 
@@ -259,7 +363,9 @@ argument for wiring up real storage before you run this on spot GPUs for real.
 ## 7. Cleanup and cost notes
 
 ```bash
-./07-distributed-training-kubeflow-trainer/<gke|eks|aks>/cleanup.sh
+./07-distributed-training-kubeflow-trainer/gke/cleanup.sh   # GKE
+./07-distributed-training-kubeflow-trainer/eks/cleanup.sh   # EKS
+./07-distributed-training-kubeflow-trainer/aks/cleanup.sh   # AKS
 ```
 
 Deletes the TrainJob, applied manifests and the GPU node pool(s) (scaled from 0, so idle cost is

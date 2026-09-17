@@ -7,6 +7,18 @@
 
 ---
 
+## Before you start
+
+This chapter assumes:
+
+- A cluster from `00-prerequisites-and-cluster-setup`. The `cpu-lab` path needs nothing else; the
+  GPU path needs the node-pool mechanics from `01-gpu-nodes-and-scheduling` (this chapter creates
+  its own dedicated GPU node pool in §4.2).
+- Optional: the `team-research` ClusterQueue and Ray integrations enabled by
+  `06-batch-jobs-and-kueue`'s Kueue install, only if you plan to run §3.5's `kueue/<cloud>`
+  overlay.
+- `env.sh` and `versions.env` sourced.
+
 ## 1. Why this matters
 
 Kubeflow Trainer (chapter `07`) is purpose-built for one shape of workload: a fixed-size gang of
@@ -137,30 +149,122 @@ admitted); the always-on `RayCluster` is admitted once at creation and simply st
 quota isn't free.
 
 ```bash
-kubectl apply -k 08-ray-on-kubernetes/kueue/gke   # or eks / aks
+kubectl apply -k 08-ray-on-kubernetes/kueue/gke   # GKE
+kubectl apply -k 08-ray-on-kubernetes/kueue/eks   # EKS
+kubectl apply -k 08-ray-on-kubernetes/kueue/aks   # AKS
 ```
 
 ## 4. Lab
 
 ### 4.1 Install KubeRay
 
+What you're about to do: install the KubeRay operator via Helm, pinned to `${KUBERAY_VERSION}`.
+Skip this step entirely if you're only running `cpu-lab` on a cluster that already has KubeRay —
+otherwise run it once per cluster.
+
 ```bash
 source env.sh && source versions.env
-./08-ray-on-kubernetes/<gke|eks|aks>/install.sh   # or skip if you're doing cpu-lab only
 ```
+
+<details>
+<summary><b>GKE</b></summary>
+
+```bash
+./08-ray-on-kubernetes/gke/install.sh
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./08-ray-on-kubernetes/eks/install.sh
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./08-ray-on-kubernetes/aks/install.sh
+```
+</details>
+
+How to tell this worked: `kubectl -n kuberay-system get pods` shows `kuberay-operator` `Running`,
+and `kubectl get crd | grep ray.io` lists `rayclusters.ray.io`, `rayjobs.ray.io`,
+`rayservices.ray.io`.
 
 ### 4.2 GPU node pool (skip for `cpu-lab`)
 
+What you're about to do: create the dedicated spot GPU node pool the `gpu-spot` worker group
+targets.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-./08-ray-on-kubernetes/gke/create-gpu-nodepool.sh     # or
-./08-ray-on-kubernetes/eks/create-gpu-nodegroup.sh    # or
+./08-ray-on-kubernetes/gke/create-gpu-nodepool.sh
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+./08-ray-on-kubernetes/eks/create-gpu-nodegroup.sh
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
 ./08-ray-on-kubernetes/aks/create-gpu-nodepool.sh
 ```
+</details>
+
+How to tell this worked: `kubectl get nodes -l nvidia.com/gpu.present=true` (GKE/EKS) or the
+AKS-equivalent label lists at least one node once the pool scales up on demand (these pools scale
+from 0, so it may show nothing until Step 4.3's worker Pods trigger a scale-up).
 
 ### 4.3 RayCluster
 
+What you're about to do: apply the cloud overlay (or `cpu-lab`) and watch the head + worker group
+come up.
+
+<details>
+<summary><b>GKE</b></summary>
+
 ```bash
-kubectl apply -k 08-ray-on-kubernetes/<gke|eks|aks|cpu-lab>
+kubectl apply -k 08-ray-on-kubernetes/gke
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+kubectl apply -k 08-ray-on-kubernetes/eks
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+kubectl apply -k 08-ray-on-kubernetes/aks
+```
+</details>
+
+<details>
+<summary><b>No GPU quota yet: cpu-lab</b></summary>
+
+```bash
+kubectl apply -k 08-ray-on-kubernetes/cpu-lab
+```
+</details>
+
+```bash
 kubectl -n ch08-ray get raycluster,pods -w
 kubectl -n ch08-ray port-forward svc/ray-spot-head-svc 8265:8265   # dashboard
 ```
@@ -173,6 +277,9 @@ NAME       DESIRED WORKERS   AVAILABLE WORKERS   STATUS   AGE
 ray-spot   1                 1                    ready    2m
 ```
 
+How to tell this worked: the `raycluster` shows `STATUS: ready` and the dashboard's "Cluster"
+tab lists the head plus at least one worker.
+
 ### 4.4 RayJob (ephemeral cluster)
 
 ```bash
@@ -182,7 +289,9 @@ kubectl -n ch08-ray logs -l job-name=pi-estimate-<suffix> -f   # get the exact n
 
 Watch a fresh `raycluster` and its Pods appear for `pi-estimate`, run to completion
 (`pi ~= 3.14...` in the logs), and then (after `ttlSecondsAfterFinished: 60`) disappear —
-`shutdownAfterJobFinishes: true` tore the ephemeral cluster down for you.
+`shutdownAfterJobFinishes: true` tore the ephemeral cluster down for you. How to tell this
+worked: `kubectl -n ch08-ray get rayjob pi-estimate -o jsonpath='{.status.jobStatus}'` reads
+`SUCCEEDED`, and `kubectl -n ch08-ray get raycluster` eventually shows no cluster left for it.
 
 ### 4.5 RayService
 
@@ -195,9 +304,10 @@ curl -s localhost:8000/generate -X POST \
 ```
 
 First request is slow (downloading and loading `Qwen/Qwen3-0.6B` on CPU); subsequent ones are
-fast. Bump `serveConfigV2`'s `pip` list or `route_prefix` and re-apply to trigger a zero-downtime
-upgrade — watch `kubectl -n ch08-ray get rayservice qwen-serve -w` show a second cluster come up
-before the old one is torn down.
+fast. How to tell this worked: the response is JSON with a `"generated_text"` field starting with
+your prompt. Bump `serveConfigV2`'s `pip` list or `route_prefix` and re-apply to trigger a
+zero-downtime upgrade — watch `kubectl -n ch08-ray get rayservice qwen-serve -w` show a second
+cluster come up before the old one is torn down.
 
 ## 5. Spot considerations
 
@@ -229,7 +339,9 @@ before the old one is torn down.
 ## 7. Cleanup and cost notes
 
 ```bash
-./08-ray-on-kubernetes/<gke|eks|aks>/cleanup.sh
+./08-ray-on-kubernetes/gke/cleanup.sh   # GKE
+./08-ray-on-kubernetes/eks/cleanup.sh   # EKS
+./08-ray-on-kubernetes/aks/cleanup.sh   # AKS
 ```
 
 Deletes RayServices/RayJobs/RayClusters, the applied manifests and the GPU node pool(s) (already

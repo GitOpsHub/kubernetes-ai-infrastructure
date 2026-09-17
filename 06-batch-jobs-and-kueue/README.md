@@ -6,6 +6,19 @@
 
 ---
 
+## Before you start
+
+This chapter assumes:
+
+- A cluster from chapter `00-prerequisites-and-cluster-setup` (GKE/EKS/AKS) or any cluster for the
+  cpu-lab path — Kueue itself needs no GPUs.
+- `env.sh` and `versions.env` sourced (`source env.sh && source versions.env`) so `${KUEUE_VERSION}`
+  and per-cloud project/account variables are set.
+- For Step 5 (real spot vs on-demand ResourceFlavors): cloud IAM/quota to create a second (on-demand)
+  node pool alongside the spot pool — see the table in `CONVENTIONS.md` for each cloud's spot label.
+- No GPU node pool is required for this chapter — it's CPU-only quota management. If you're
+  continuing straight from chapter `05-model-storage-and-data`, you can reuse that cluster as-is.
+
 ## 1. Why this matters
 
 The default Kubernetes scheduler answers one question: "is there a node with room for this
@@ -261,40 +274,118 @@ to `Pending` and are retried automatically — you don't resubmit anything.
 
 ### Step 5 (your cloud) · Real spot vs on-demand ResourceFlavors
 
+What you're about to do: tear down the cpu-lab install, create a real spot + on-demand node-pool
+pair on your cloud, and re-install Kueue with the controller pinned to the on-demand pool.
+
 ```bash
 kubectl delete -k 06-batch-jobs-and-kueue/cpu-lab   # tear down the cpu-lab queues first
 helm uninstall kueue -n kueue-system
+```
 
-./06-batch-jobs-and-kueue/<gke|eks|aks>/create-nodepool.sh   # spot pool + on-demand pool
-./06-batch-jobs-and-kueue/<gke|eks|aks>/install-kueue.sh     # controller pinned to the on-demand pool
-kubectl apply -k 06-batch-jobs-and-kueue/<gke|eks|aks>
+<details>
+<summary><b>GKE</b></summary>
+
+```bash
+./06-batch-jobs-and-kueue/gke/create-nodepool.sh   # ch06-cpu-spot + ch06-cpu-ondemand node pools
+./06-batch-jobs-and-kueue/gke/install-kueue.sh     # controller pinned to cloud.google.com/gke-nodepool=ch06-cpu-ondemand
+kubectl apply -k 06-batch-jobs-and-kueue/gke
 kubectl get resourceflavor spot -o yaml | grep -A3 nodeLabels
 ```
 
-Re-run Steps 2–4. This time `kubectl get pods -n ch06-kueue -o wide` plus `kubectl get nodes -L
-<cloud's spot label>` (see the table in `CONVENTIONS.md`) shows the pods landing specifically on
-the spot pool — you never wrote a `nodeSelector` on the Job; Kueue's admission webhook copied it
-in from the ResourceFlavor.
+Expected: `nodeLabels` shows `cloud.google.com/gke-nodepool: ch06-cpu-spot` (or your spot pool's
+name). How to tell this worked: `kubectl get nodes -L cloud.google.com/gke-spot` shows `true` on
+the spot pool's nodes.
+</details>
 
-**AKS-specific:** `kubectl describe pod` will show a toleration for
-`kubernetes.azure.com/scalesetpriority=spot:NoSchedule` that you also never wrote — it comes from
-`ResourceFlavor.spec.tolerations` (see `aks/kustomization.yaml`), because AKS is the one cloud of
-the three that taints its spot pool automatically.
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+eksctl create nodegroup -f 06-batch-jobs-and-kueue/eks/nodegroup-ch06.yaml   # ch06-cpu-spot + ch06-cpu-ondemand
+./06-batch-jobs-and-kueue/eks/install-kueue.sh     # controller pinned to eks.amazonaws.com/capacityType=ON_DEMAND
+kubectl apply -k 06-batch-jobs-and-kueue/eks
+kubectl get resourceflavor spot -o yaml | grep -A3 nodeLabels
+```
+
+Expected: `nodeLabels` shows `eks.amazonaws.com/capacityType: SPOT`. How to tell this worked:
+`kubectl get nodes -L eks.amazonaws.com/capacityType` shows `SPOT` on the spot nodegroup's nodes.
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+./06-batch-jobs-and-kueue/aks/create-nodepool.sh   # ch06spot + ch06ondemand node pools
+./06-batch-jobs-and-kueue/aks/install-kueue.sh     # controller pinned to agentpool=ch06ondemand
+kubectl apply -k 06-batch-jobs-and-kueue/aks
+kubectl get resourceflavor spot -o yaml | grep -A6 nodeLabels
+```
+
+Expected: `nodeLabels` shows `kubernetes.azure.com/scalesetpriority: spot`, and (unlike GKE/EKS)
+`spec.tolerations` includes `kubernetes.azure.com/scalesetpriority=spot:NoSchedule` — AKS is the
+one cloud of the three that taints its spot pool automatically, so the flavor needs a matching
+toleration or admitted pods will never schedule there. How to tell this worked: `kubectl describe
+pod <team-a pod>` shows that toleration even though you never wrote it on the Job — it came from
+`ResourceFlavor.spec.tolerations`.
+</details>
+
+Re-run Steps 2–4 against whichever cloud overlay you applied. `kubectl get pods -n ch06-kueue -o
+wide` plus `kubectl get nodes -L <cloud's spot label>` (see the table in `CONVENTIONS.md`) shows
+the pods landing specifically on the spot pool — you never wrote a `nodeSelector` on the Job;
+Kueue's admission webhook copied it in from the ResourceFlavor.
 
 ### Step 6 (optional) · Fair Sharing instead of classical preemption
+
+What you're about to do: switch the cohort from classical preemption to Fair Sharing and observe
+that admission order now follows historical share instead of priority.
 
 ```bash
 kubectl patch clusterqueue team-a-cq --type merge -p '{"spec":{"preemption":{"borrowWithinCohort":null}}}'
 kubectl patch clusterqueue team-b-cq --type merge -p '{"spec":{"preemption":{"borrowWithinCohort":null}}}'
+```
+
+<details>
+<summary><b>GKE</b></summary>
+
+```bash
 helm upgrade kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}" \
   -n kueue-system -f 06-batch-jobs-and-kueue/common/values-kueue.yaml \
-  -f 06-batch-jobs-and-kueue/common/values-kueue-fairsharing.yaml   # add cloud --set flag again if you re-ran Step 5
+  -f 06-batch-jobs-and-kueue/common/values-kueue-fairsharing.yaml \
+  --set 'controllerManager.nodeSelector.cloud\.google\.com/gke-nodepool=ch06-cpu-ondemand'
+```
+</details>
+
+<details>
+<summary><b>EKS</b></summary>
+
+```bash
+helm upgrade kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}" \
+  -n kueue-system -f 06-batch-jobs-and-kueue/common/values-kueue.yaml \
+  -f 06-batch-jobs-and-kueue/common/values-kueue-fairsharing.yaml \
+  --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/capacityType=ON_DEMAND'
+```
+</details>
+
+<details>
+<summary><b>AKS</b></summary>
+
+```bash
+helm upgrade kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}" \
+  -n kueue-system -f 06-batch-jobs-and-kueue/common/values-kueue.yaml \
+  -f 06-batch-jobs-and-kueue/common/values-kueue-fairsharing.yaml \
+  --set controllerManager.nodeSelector.agentpool=ch06ondemand
+```
+</details>
+
+```bash
 kubectl get clusterqueue -o custom-columns=NAME:.metadata.name,WEIGHTEDSHARE:.status.fairSharing.weightedShare
 ```
 
-Re-run Step 4's two `kubectl apply` commands. Now admission order depends on each ClusterQueue's
-historical share of the cohort (`Cohort.spec.fairSharing.weight`, both `1` here so it's an even
-split), not purely on `batch-high` vs `batch-low`.
+Expected: both ClusterQueues listed, `WEIGHTEDSHARE` starts at `0` for both. Re-run Step 4's two
+`kubectl apply` commands. How to tell this worked: admission order now depends on each
+ClusterQueue's historical share of the cohort (`Cohort.spec.fairSharing.weight`, both `1` here so
+it's an even split), not purely on `batch-high` vs `batch-low` — check `WEIGHTEDSHARE` climbing on
+whichever queue is consuming more than its fair split.
 
 ## 5. Spot considerations
 
@@ -334,8 +425,10 @@ split), not purely on `batch-high` vs `batch-low`.
 
 ```bash
 kubectl delete -f 06-batch-jobs-and-kueue/common/jobs --ignore-not-found
-kubectl delete -k 06-batch-jobs-and-kueue/<cpu-lab|gke|eks|aks>
-./06-batch-jobs-and-kueue/<gke|eks|aks>/cleanup.sh   # deletes node pools too — GPU/spot capacity costs money even idle
+kubectl delete -k 06-batch-jobs-and-kueue/cpu-lab --ignore-not-found   # or gke / eks / aks — whichever you applied
+./06-batch-jobs-and-kueue/gke/cleanup.sh   # GKE — deletes node pools too, spot/on-demand capacity costs money even idle
+./06-batch-jobs-and-kueue/eks/cleanup.sh   # EKS
+./06-batch-jobs-and-kueue/aks/cleanup.sh   # AKS
 ```
 
 - Kueue itself costs nothing beyond the controller pod (small, one on-demand node). The cost here
