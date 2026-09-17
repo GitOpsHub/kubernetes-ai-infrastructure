@@ -40,14 +40,19 @@ NN-chapter-slug/
 
 ## Each README contains
 
+0. **Before you start** — which earlier chapters' output this one assumes (cluster, node pool, CRDs,
+   storage) and any optional prerequisites, so you know what to go back and do first
 1. **Why this matters** — the problem, in DevOps terms
 2. **Learning objectives** and a **~3 hour time plan** (theory / lab / review)
 3. **Concepts** with diagrams (Mermaid or ASCII)
-4. **Lab** — numbered steps with GKE / EKS / AKS tabs-as-subsections, expected output, verification
+4. **Lab** — numbered, independently copy-pasteable steps under GKE / EKS / AKS `<details>` tabs. Every
+   step says what it does and why *before* the command, and gives an **expected output** snippet plus a
+   one-line **"how to tell this worked"** *after* it — you should never have to type a command blind or
+   guess whether it succeeded.
 5. **Spot considerations** for this topic
 6. **Troubleshooting** — the failures you will actually hit
 7. **Cleanup** and **cost notes**
-8. **Checkpoint questions** (answer before moving on)
+8. **Checkpoint questions** (answer before moving on) — testing the lab you just did, not generic trivia
 9. **Further reading** (official docs) and **versions tested**
 
 ## Environment
@@ -59,3 +64,17 @@ source env.sh && source versions.env
 
 Namespaces are per chapter (`ch01-gpu`, `ch06-kueue`, …) unless a component has a conventional namespace
 (`gpu-operator`, `kueue-system`, `monitoring`, `kserve`, `karpenter`).
+
+## Validation
+
+Every kustomize overlay and shell script in the repo is checked by
+[`scripts/validate-all.sh`](scripts/validate-all.sh) — the same script CI runs on every PR
+([`.github/workflows/validate.yml`](.github/workflows/validate.yml)). Run it before you push:
+
+```bash
+./scripts/validate-all.sh
+```
+
+It renders every overlay (`kubectl kustomize`), schema-checks the core Kubernetes resources in the
+result (`kubeconform`, CRDs intentionally skipped — see the script's header comment for why), and syntax-
+/lint-checks every shell script. It never touches a live cluster or cloud account.

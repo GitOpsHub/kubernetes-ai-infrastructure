@@ -1,10 +1,18 @@
 # Kubernetes AI Infrastructure
 
+[![validate](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml/badge.svg)](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml)
+
 A hands-on course for DevOps engineers on running AI workloads (GPU scheduling, training, LLM serving,
 autoscaling, cost) on Kubernetes. Every lab has variants for **GKE, EKS and AKS**, and runs on **spot
 capacity** by default.
 
-Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup.
+Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup. Every kustomize
+overlay and shell script in this repo is checked on every PR by
+[`scripts/validate-all.sh`](scripts/validate-all.sh) — run it locally before you push:
+
+```bash
+./scripts/validate-all.sh
+```
 
 ## How to use this repo
 
