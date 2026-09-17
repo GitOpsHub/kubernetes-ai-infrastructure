@@ -1,0 +1,15 @@
+- op: add
+  path: /spec/runtimePatches
+  value:
+    - manager: ch07.lab/cloud-overlay-cpu
+      trainingRuntimeSpec:
+        template:
+          spec:
+            replicatedJobs:
+              - name: node
+                template:
+                  spec:
+                    template:
+                      spec:
+                        nodeSelector:
+                          eks.amazonaws.com/capacityType: SPOT

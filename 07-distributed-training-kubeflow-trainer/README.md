@@ -212,6 +212,25 @@ Watch: the Job's `backoffLimit: 0` fails that Job, the JobSet's `Recreate` polic
 **both** Jobs, and rank 0's resume logic picks up the newest `.done` checkpoint instead of
 restarting from step 0.
 
+### 4.6 No GPU quota yet? Run it on CPU
+
+`cpu-lab/` is a self-contained CPU-only variant of the same lab — same `TrainJob`/
+`TrainingRuntime` shape, same `train_ddp.py` (it already auto-selects the `gloo` backend when
+`torch.cuda.is_available()` is `False`), just no `nvidia.com/gpu` requests and no bucket mount
+(checkpoints go to an `emptyDir`, so a pod recreate genuinely restarts from step 0 — a good
+contrast to see once, then go set up chapter 05's bucket-backed checkpoints for the real thing).
+It runs 2 nodes x 2 procs = 4 ranks on whatever spot CPU pool chapter 00 gave you:
+
+```bash
+kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/gke   # or eks / aks
+kubectl -n ch07-training-cpu get trainjob,jobset,pods -w
+kubectl -n ch07-training-cpu logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f
+```
+
+Do the same 4.5 "simulate a spot reclaim" drill against `ch07-training-cpu` and watch the
+resume logic restart from step 0 (no persistent checkpoint volume) — that's the concrete
+argument for wiring up real storage before you run this on spot GPUs for real.
+
 ## 5. Spot considerations
 
 - **Why gang-recreate, not per-pod restart**: a lone new rank 1 can't rejoin an already-formed
