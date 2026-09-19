@@ -230,12 +230,11 @@ flowchart LR
   OC -->|PrometheusRule| ALERT["ChargebackIdleGPUAllocation<br/>(allocated but <5% util for 30m)"]
 ```
 
-OpenCost's default cost model uses each cloud's **public list pricing** for GPU-hours — accurate
-enough to compare teams' relative spend and catch waste, but not a reconciled invoice; matching your
-actual (often discounted/committed-use) bill needs the optional cloud billing integration in each
-cloud's `values-opencost-<cloud>.yaml` (BigQuery export on GKE, Athena/CUR on EKS, a billing export
-storage account on AKS) — left commented out here since it needs real account-specific billing
-export setup outside this course's scope.
+OpenCost's default cost model uses AWS's **public list pricing** for GPU-hours — accurate enough to
+compare teams' relative spend and catch waste, but not a reconciled invoice; matching your actual
+(often discounted/committed-use) bill needs the optional cloud billing integration in
+`values-opencost-eks.yaml` (AWS Cost and Usage Report via Athena) — left commented out here since it
+needs real account-specific billing export setup outside this course's scope.
 
 ## 4. Lab
 
@@ -300,12 +299,12 @@ What you're about to do: render the currently-pinned and a hypothetical next `GP
 client-side and diff them, entirely locally — this never touches a cluster.
 
 ```bash
-./17-platform-day2-operations/common/scripts/gpu-operator-upgrade-dry-run.sh gke v26.8.0   # or eks / aks; v26.8.0 is illustrative -- use the real next release
+./17-platform-day2-operations/common/scripts/gpu-operator-upgrade-dry-run.sh v26.8.0   # v26.8.0 is illustrative -- use the real next release
 ```
 Expected output (trimmed):
 ```
-Rendering current  (v26.7.0) ClusterPolicy for gke...
-Rendering target   (v26.8.0) ClusterPolicy for gke...
+Rendering current  (v26.7.0) ClusterPolicy for eks...
+Rendering target   (v26.8.0) ClusterPolicy for eks...
 
 == diff (current -> target) ==
 --- .../current.yaml
@@ -367,17 +366,127 @@ have the code-by-code detail.
 
 ### Step 4: Velero — backup and restore
 
-<details>
-<summary><b>GKE</b></summary>
+What you're about to do: create the Velero S3 bucket and an EKS Pod Identity association (no static
+AWS access keys), install Velero pinned to Helm chart `12.2.0` (Velero app `v1.18.2`) with the
+`velero-plugin-for-aws` (`v1.14.2`), then apply this chapter's `Schedule`/`Backup` objects.
 
+Creates the bucket, the IAM role trusted by EKS Pod Identity, and the Pod Identity association for
+the `velero` ServiceAccount — same pattern as `05-model-storage-and-data/eks/setup-s3-iam.sh`, no
+static access keys:
 ```bash
-./17-platform-day2-operations/gke/setup-gcs-iam.sh    # bucket + Workload Identity binding
-./17-platform-day2-operations/gke/install-velero.sh   # Helm chart 12.2.0 (Velero v1.18.2) + velero-plugin-for-gcp v1.14.2
+: "${AWS_REGION:?}" "${EKS_CLUSTER:?}" "${AWS_ACCOUNT_ID:?}"
+BUCKET="${VELERO_S3_BUCKET:-${AWS_ACCOUNT_ID}-ch17-velero}"
+TMP="$(mktemp -d)"
+
+if ! aws s3api head-bucket --bucket "${BUCKET}" 2>/dev/null; then
+  if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+    aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}"
+  else
+    aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}" \
+      --create-bucket-configuration "LocationConstraint=${AWS_REGION}"
+  fi
+  aws s3api put-public-access-block --bucket "${BUCKET}" \
+    --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  aws s3api put-bucket-versioning --bucket "${BUCKET}" --versioning-configuration Status=Enabled
+fi
+
+# eks-pod-identity-agent may already be installed by chapter 05 -- idempotent either way.
+if ! aws eks describe-addon --cluster-name "${EKS_CLUSTER}" --addon-name eks-pod-identity-agent --region "${AWS_REGION}" >/dev/null 2>&1; then
+  aws eks create-addon --cluster-name "${EKS_CLUSTER}" --addon-name eks-pod-identity-agent --region "${AWS_REGION}"
+fi
+
+cat > "${TMP}/trust.json" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "pods.eks.amazonaws.com"},
+    "Action": ["sts:AssumeRole", "sts:TagSession"]
+  }]
+}
+JSON
+
+# Velero's documented least-privilege AWS policy for backup/restore + EBS snapshots.
+cat > "${TMP}/policy.json" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["ec2:DescribeVolumes","ec2:DescribeSnapshots","ec2:CreateTags",
+                 "ec2:CreateVolume","ec2:CreateSnapshot","ec2:DeleteSnapshot"],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject","s3:DeleteObject","s3:PutObject","s3:AbortMultipartUpload","s3:ListMultipartUploadParts"],
+      "Resource": ["arn:aws:s3:::${BUCKET}/*"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::${BUCKET}"]
+    }
+  ]
+}
+JSON
+
+ROLE="ch17-velero-${EKS_CLUSTER}"
+if ! aws iam get-role --role-name "${ROLE}" >/dev/null 2>&1; then
+  aws iam create-role --role-name "${ROLE}" --assume-role-policy-document "file://${TMP}/trust.json"
+fi
+aws iam put-role-policy --role-name "${ROLE}" --policy-name velero-backup --policy-document "file://${TMP}/policy.json"
+ROLE_ARN="$(aws iam get-role --role-name "${ROLE}" --query Role.Arn --output text)"
+
+EXISTING="$(aws eks list-pod-identity-associations --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+  --namespace velero --service-account velero --query 'associations[0].associationId' --output text)"
+if [[ "${EXISTING}" == "None" || -z "${EXISTING}" ]]; then
+  aws eks create-pod-identity-association --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+    --namespace velero --service-account velero --role-arn "${ROLE_ARN}"
+fi
+rm -rf "${TMP}"
+echo "bucket s3://${BUCKET} ready; Pod Identity association ns=velero sa=velero -> ${ROLE_ARN} is in place"
+```
+How to tell this worked: the script prints `bucket s3://<bucket> ready` and the Pod Identity
+association line with no errors. The `velero` namespace/ServiceAccount itself is created by the
+Helm install next.
+
+Install Velero via the official Helm chart, using EKS Pod Instance credentials (no static AWS
+access keys):
+```bash
+: "${AWS_REGION:?}"
+helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts --force-update
+helm repo update vmware-tanzu
+
+helm upgrade --install velero vmware-tanzu/velero \
+  --namespace velero --create-namespace \
+  --version "${VELERO_CHART_VERSION}" \
+  --set-string "configuration.backupStorageLocation[0].name=default" \
+  --set-string "configuration.backupStorageLocation[0].provider=aws" \
+  --set-string "configuration.backupStorageLocation[0].bucket=${BUCKET}" \
+  --set-string "configuration.backupStorageLocation[0].config.region=${AWS_REGION}" \
+  --set-string "configuration.volumeSnapshotLocation[0].name=default" \
+  --set-string "configuration.volumeSnapshotLocation[0].provider=aws" \
+  --set-string "configuration.volumeSnapshotLocation[0].config.region=${AWS_REGION}" \
+  --set "credentials.useSecret=false" \
+  --set-string "initContainers[0].name=velero-plugin-for-aws" \
+  --set-string "initContainers[0].image=velero/velero-plugin-for-aws:${VELERO_AWS_PLUGIN_VERSION}" \
+  --set-string "initContainers[0].volumeMounts[0].mountPath=/target" \
+  --set-string "initContainers[0].volumeMounts[0].name=plugins" \
+  --set "deployNodeAgent=true" \
+  --set-string "serviceAccount.server.name=velero" \
+  --wait --timeout 10m
+
 kubectl apply -k 17-platform-day2-operations/common/velero
 ```
 Expected: `kubectl -n velero get backupstoragelocation default -o jsonpath='{.status.phase}'`
-prints `Available` within ~1 minute. How to tell this worked: `kubectl -n velero get schedule
-platform-daily` shows `LASTBACKUP` populate after the first `0 2 * * *` run — or trigger one now:
+prints `Available` within ~1 minute (Pod Identity association propagation can take ~1-2 min the
+first time). EKS CSI snapshots also need a `VolumeSnapshotClass` labeled
+`velero.io/csi-volumesnapshot-class=true` for the `ebs.csi.aws.com` driver — check for one, create
+it if missing: `kubectl get volumesnapshotclass -l velero.io/csi-volumesnapshot-class=true`.
+
+How to tell this worked: `kubectl -n velero get schedule platform-daily` shows `LASTBACKUP`
+populate after the first `0 2 * * *` run — or trigger one now:
 ```bash
 kubectl -n velero create -f - <<'YAML'
 apiVersion: velero.io/v1
@@ -395,35 +504,6 @@ kubectl -n velero get backup manual-test-backup -o jsonpath='{.status.phase}'; e
 Expected: `Completed`. To see a restore work: `kubectl delete -k 17-platform-day2-operations/common`,
 then `velero restore create --from-backup manual-test-backup` (needs the [Velero CLI](https://velero.io/docs/main/basic-install/#install-the-cli)),
 and confirm `kubectl -n ch17-day2ops get deploy drain-demo` comes back.
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
-```bash
-./17-platform-day2-operations/eks/setup-s3-iam.sh    # bucket + EKS Pod Identity association
-./17-platform-day2-operations/eks/install-velero.sh  # Helm chart 12.2.0 (Velero v1.18.2) + velero-plugin-for-aws v1.14.2
-kubectl apply -k 17-platform-day2-operations/common/velero
-```
-Same expected output/verification as the GKE tab above (`backupstoragelocation default` ->
-`Available`). EKS-specific note: `setup-s3-iam.sh` installs the `eks-pod-identity-agent` add-on if
-it isn't already there — chapter 05 may have already added it, this call is idempotent either way.
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-./17-platform-day2-operations/aks/setup-blob-iam.sh   # storage account/container + Workload Identity federated credential
-./17-platform-day2-operations/aks/install-velero.sh   # Helm chart 12.2.0 (Velero v1.18.2) + velero-plugin-for-microsoft-azure v1.14.2
-kubectl apply -k 17-platform-day2-operations/common/velero
-```
-Same expected output/verification as the GKE tab above. AKS-specific note: `setup-blob-iam.sh`
-assumes `--enable-oidc-issuer --enable-workload-identity` are already on the cluster (chapter 05's
-`create-nodepool.sh` turns these on) — if this is a cluster that skipped chapter 05, run
-`az aks update -g "$AZ_RESOURCE_GROUP" -n "$AKS_CLUSTER" --enable-oidc-issuer --enable-workload-identity`
-first.
-</details>
 
 **cpu-lab (any cluster, no cloud IAM):**
 ```bash
@@ -438,13 +518,34 @@ captured here — only real clouds exercise that part.
 
 ### Step 5: OpenCost — per-team, per-GPU-hour chargeback
 
+What you're about to do: install OpenCost pointed at chapter 04's existing kube-prometheus-stack
+(no second in-cluster Prometheus), using AWS's built-in list pricing for the cost model.
+
 ```bash
-./17-platform-day2-operations/<gke|eks|aks|cpu-lab>/install-opencost.sh
+if ! kubectl -n monitoring get svc kube-prometheus-stack-prometheus >/dev/null 2>&1; then
+  echo "chapter 04's kube-prometheus-stack isn't installed -- run 04-gpu-observability/eks first." >&2
+fi
+
+helm repo add opencost https://opencost.github.io/opencost-helm-chart --force-update
+helm repo update opencost
+
+helm upgrade --install opencost opencost/opencost \
+  --namespace opencost --create-namespace \
+  --version "${OPENCOST_CHART_VERSION}" \
+  -f 17-platform-day2-operations/eks/values-opencost-eks.yaml \
+  --wait --timeout 10m
+
+kubectl apply -k 17-platform-day2-operations/common/opencost
 kubectl -n opencost port-forward svc/opencost 9090:9090 &
 ```
 Expected: `kubectl -n opencost get pods` shows the `opencost` Deployment `Running`; opening
 `http://localhost:9090` shows the OpenCost UI with a per-namespace cost breakdown (numbers reflect
 whatever's actually running — small on a lab cluster).
+
+**cpu-lab (no real cloud billing, any cluster):** `./17-platform-day2-operations/cpu-lab/install-opencost.sh`
+points OpenCost at chapter 04's cpu-lab kube-prometheus-stack instead — useful for learning the
+query shapes below, not for a real chargeback number (no cloud list pricing behind fake/synthetic
+GPU utilization).
 
 **Per-team GPU-hour report** (the allocation API, aggregated by namespace as this course's proxy for
 "team" — every namespace here maps 1:1 to a chapter/team by convention):
@@ -481,8 +582,8 @@ first, exactly as chapter 04's own troubleshooting table teaches.
   mid-drain. That's not a bug in the script; it's the exact distinction section 3.1 draws.
 - **Run Velero's server and OpenCost on the CPU/on-demand pool, never GPU spot** — same reasoning as
   chapter 04's monitoring stack: the moment a GPU node is reclaimed is exactly when you don't want
-  your backup controller or cost exporter to also disappear. Neither this chapter's `install-velero.sh`
-  scripts nor `install-opencost.sh` pin a `nodeSelector` by default (Helm chart defaults schedule
+  your backup controller or cost exporter to also disappear. Neither this chapter's Velero Helm
+  install nor its OpenCost Helm install pins a `nodeSelector` by default (chart defaults schedule
   wherever fits) — if your cluster's default scheduling could land these on a GPU spot node, add one.
 - **CSI volume snapshots have their own spot interaction**: a snapshot request against a PVC whose
   pod just got evicted by a spot reclaim can race the reclaim itself. Velero retries; if backups of
@@ -498,7 +599,7 @@ first, exactly as chapter 04's own troubleshooting table teaches.
 | `kubectl drain` hangs, then times out | PDB's `minAvailable` can't be satisfied with this node removed (e.g. chapter 09's `replicas: 1`, `minAvailable: 1`) | Expected for single-replica workloads — scale up first, or accept the outage and use `--disable-eviction` (bypasses the PDB entirely, only for a true emergency) |
 | `drain-node.sh` exits immediately, "cannot delete Pods... local storage" | A pod uses `emptyDir` and you omitted `--delete-emptydir-data` | The script already sets it — if you're running `kubectl drain` by hand instead, add the flag; understand you're discarding that pod's local/cache data (chapter 09's hf-cache before the PVC component) |
 | `gpu-operator-upgrade-dry-run.sh` fails with "chart version not found" | The target version string doesn't exist in the `nvidia/gpu-operator` Helm repo yet | `helm search repo nvidia/gpu-operator --versions` to see what's actually published; re-check the version against NVIDIA's release notes |
-| Velero `backupstoragelocation` stuck `Unavailable` | IAM binding not propagated yet (Workload Identity/Pod Identity/federated credential can take ~1-2 min), or plugin image tag typo | `kubectl -n velero logs deploy/velero \| grep -i error`; re-check `bucket.env` matches the actual bucket/account created |
+| Velero `backupstoragelocation` stuck `Unavailable` | EKS Pod Identity association not propagated yet (can take ~1-2 min), or plugin image tag typo | `kubectl -n velero logs deploy/velero \| grep -i error`; re-check the `${BUCKET}` passed to the Helm install matches the bucket actually created in step 4 |
 | `Backup` stuck `InProgress` forever | No CSI `VolumeSnapshotClass` labeled `velero.io/csi-volumesnapshot-class=true` but `snapshotVolumes: true` | `kubectl get volumesnapshotclass -l velero.io/csi-volumesnapshot-class=true`; create one for your cloud's CSI driver, or set `snapshotVolumes: false` if you only need object backups |
 | `ChargebackIdleGPUAllocation`/`ChargebackNamespaceBudgetExceeded` never appear in Prometheus rules | Missing `release: kube-prometheus-stack` label, or OpenCost's metric names differ from what's assumed (`# VERIFY` in the manifest) | Same check as chapter 04: `kubectl get prometheusrule -A -l release=kube-prometheus-stack`; `curl localhost:9003/metrics \| grep gpu` against the OpenCost pod directly to confirm the real metric name |
 | OpenCost UI shows `$0.00` for everything | `opencost.prometheus.external.url` unreachable, or wrong Prometheus release name | `kubectl -n opencost logs deploy/opencost \| grep -i prometheus`; confirm `kube-prometheus-stack-prometheus.monitoring.svc` resolves from the `opencost` namespace |
@@ -507,18 +608,33 @@ first, exactly as chapter 04's own troubleshooting table teaches.
 ## 7. Cleanup and cost notes
 
 ```bash
-./17-platform-day2-operations/<gke|eks|aks|cpu-lab>/cleanup.sh
+kubectl delete -k 17-platform-day2-operations/common/opencost --ignore-not-found
+kubectl delete -k 17-platform-day2-operations/common/velero --ignore-not-found
+kubectl delete -k 17-platform-day2-operations/common/kserve-pdb --ignore-not-found
+kubectl delete -k 17-platform-day2-operations/common --ignore-not-found
+
+helm uninstall opencost -n opencost 2>/dev/null || true
+kubectl delete namespace opencost --ignore-not-found
+
+helm uninstall velero -n velero 2>/dev/null || true
+kubectl delete namespace velero --ignore-not-found
 ```
+This deliberately does not delete the S3 bucket or its backup contents — backups should outlive the
+cluster that made them. Delete it explicitly once you no longer need any of these backups (same
+`BUCKET` value used in step 4): `aws s3 rb s3://${BUCKET} --force`.
+
+cpu-lab teardown (also removes the lab-only MinIO Deployment/Service/Secret):
+```bash
+./17-platform-day2-operations/cpu-lab/cleanup.sh
+```
+
 - `drain-demo` (step 1) is three tiny `pause` containers — negligible cost, safe to leave running,
   but it's pointless to keep once you've done the lab.
 - **Velero and OpenCost are small, always-on controllers** — a few hundred mCPU and under 1Gi RAM
   combined, similar footprint to chapter 04's kube-prometheus-stack. The real recurring cost is
-  **backup storage** (the GCS/S3/Blob bucket) and **snapshot storage** (CSI volume snapshots bill
-  like disk space on every cloud) — the 30-day TTL in `schedule-platform-backup.yaml` bounds this,
-  but check actual bucket size periodically on a real platform (a lab cluster's backups are tiny).
-- `cleanup.sh` on every cloud **deliberately does not delete the bucket/storage account** — backups
-  should outlive the cluster that made them; delete it explicitly (each `cleanup.sh` prints the
-  exact command) once you're sure you don't need any backup in it.
+  **backup storage** (the S3 bucket) and **snapshot storage** (EBS CSI volume snapshots bill like
+  disk space) — the 30-day TTL in `schedule-platform-backup.yaml` bounds this, but check actual
+  bucket size periodically on a real platform (a lab cluster's backups are tiny).
 - The `kserve-pdb` (step 1) has no cost of its own — a PDB is a scheduling constraint, not a
   resource.
 
@@ -605,7 +721,7 @@ chapter 04's own `GPULowUtilizationOnDemandNode` alert which is about capacity p
 - Draining: [Safely Drain a Node](https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/), [Disruptions](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/), [PodDisruptionBudget](https://kubernetes.io/docs/tasks/run-application/configure-pdb/)
 - GPU Operator upgrades: [Upgrading the Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/upgrade.html) (same doc chapter 02 links)
 - Velero: [Documentation](https://velero.io/docs/main/), [Basic Install](https://velero.io/docs/main/basic-install/), [Supported Providers / Plugins](https://velero.io/docs/main/supported-providers/), [Backup Reference](https://velero.io/docs/main/backup-reference/), [CSI Snapshot support](https://velero.io/docs/main/csi/)
-  — [velero-plugin-for-gcp](https://github.com/vmware-tanzu/velero-plugin-for-gcp), [velero-plugin-for-aws](https://github.com/vmware-tanzu/velero-plugin-for-aws), [velero-plugin-for-microsoft-azure](https://github.com/vmware-tanzu/velero-plugin-for-microsoft-azure)
+  — [velero-plugin-for-aws](https://github.com/vmware-tanzu/velero-plugin-for-aws)
 - OpenCost: [Documentation](https://opencost.io/docs/), [Helm chart](https://github.com/opencost/opencost-helm-chart), [Allocation API](https://opencost.io/docs/api/), [Cloud billing integrations](https://opencost.io/docs/configuration/cloud-integration)
 - NVIDIA: [Xid Errors](https://docs.nvidia.com/deploy/xid-errors/index.html)
 - Kueue: [ClusterQueue](https://kueue.sigs.k8s.io/docs/concepts/cluster_queue/), [Cohort](https://kueue.sigs.k8s.io/docs/concepts/cohort/)
@@ -616,17 +732,13 @@ chapter 04's own `GPULowUtilizationOnDemandNode` alert which is about capacity p
 | Component | Version | Source |
 |---|---|---|
 | Velero | `v1.18.2` (app), Helm chart `12.2.0` (`vmware-tanzu/helm-charts`, `oci`-free `https://vmware-tanzu.github.io/helm-charts`) | `github.com/vmware-tanzu/velero` latest release |
-| velero-plugin-for-gcp | `v1.14.2` | `github.com/vmware-tanzu/velero-plugin-for-gcp` latest release |
 | velero-plugin-for-aws | `v1.14.2` | `github.com/vmware-tanzu/velero-plugin-for-aws` latest release |
-| velero-plugin-for-microsoft-azure | `v1.14.2` | `github.com/vmware-tanzu/velero-plugin-for-microsoft-azure` latest release |
 | OpenCost | app `v1.121.2`, Helm chart `opencost-2.5.31` (`https://opencost.github.io/opencost-helm-chart`) | `github.com/opencost/opencost-helm-chart` latest release |
 | Kubernetes | 1.35 | matches every other chapter in this course |
 
-`VELERO_VERSION`/`VELERO_*_PLUGIN_VERSION`/`OPENCOST_VERSION` are **not yet in `versions.env`** —
-this chapter's scripts pin them locally (see the version strings at the top of each
-`install-velero.sh`/`install-opencost.sh`) per the repo's scope rules for this pass. Recommend the
-lead add them to `versions.env` alongside every other pinned component so future bumps are tracked
-in one place, same as `GPU_OPERATOR_VERSION`/`KUEUE_VERSION`/etc.
+`VELERO_CHART_VERSION`, `VELERO_AWS_PLUGIN_VERSION`, and `OPENCOST_CHART_VERSION` are pinned in
+[`versions.env`](../versions.env) alongside every other component this course tracks — this
+chapter's EKS lab (step 4/5 above) sources them from there like any other chapter.
 
 **`# VERIFY` items to re-check before relying on this chapter**:
 - `common/opencost/servicemonitor.yaml`: the exact Service port name (`http`) OpenCost's chart

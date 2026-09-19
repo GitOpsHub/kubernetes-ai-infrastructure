@@ -1,9 +1,9 @@
 # 14 · Multi-Tenancy and Security
 
 > Turning a shared GPU cluster into something two competing teams can safely run production
-> workloads on at once: quotas, RBAC, NetworkPolicy, Pod Security Admission, workload identity
-> per cloud, secrets via External Secrets Operator, and model/image supply-chain checks
-> (ValidatingAdmissionPolicy + Kyverno cosign verification) — on **GKE, EKS and AKS**.
+> workloads on at once: quotas, RBAC, NetworkPolicy, Pod Security Admission, workload identity,
+> secrets via External Secrets Operator, and model/image supply-chain checks
+> (ValidatingAdmissionPolicy + Kyverno cosign verification) — on **EKS**.
 
 ---
 
@@ -12,10 +12,10 @@
 This chapter assumes:
 
 - **A working cluster** from [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup)
-  — the `cpu-lab` sections need no GPU quota at all, but Lab B (your cloud) needs a real cloud
-  account with workload identity federation enabled the way chapter 00 sets it up (GKE Workload
-  Identity / EKS OIDC provider for IRSA / AKS Workload Identity — all three are cluster-creation-time
-  settings you can't easily bolt on after the fact).
+  — the `cpu-lab` sections need no GPU quota at all, but Lab B (AWS) needs a real AWS account with
+  the cluster's OIDC provider associated for IRSA the way chapter 00 sets it up
+  (`eksctl utils associate-iam-oidc-provider`) — a cluster-creation-time setting you can't easily
+  bolt on after the fact.
 - **The `team-a`/`team-b` tenant concept from [06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue)**
   — this chapter reuses those names for its namespaces (`ch14-team-a`/`ch14-team-b`) and explains
   in §3.1/checkpoint 6 how its `ResourceQuota` layers on top of (not instead of) chapter 06's
@@ -54,7 +54,7 @@ flowchart TB
         NP[NetworkPolicy<br/>default-deny + allow-list]
     end
     subgraph "What secrets they get"
-        ESO["External Secrets Operator<br/>+ cloud Workload Identity"]
+        ESO["External Secrets Operator<br/>+ IRSA"]
     end
     subgraph "What images they can run"
         KYV["Kyverno<br/>cosign signature verification"]
@@ -79,9 +79,8 @@ By the end you can:
    scrape, and HTTPS egress through — and explain what "default-deny" actually denies.
 4. Write and bind a `ValidatingAdmissionPolicy` using CEL, and explain what it can and can't
    check compared to a Kyverno `ClusterPolicy`.
-5. Wire External Secrets Operator to each cloud's secret manager via that cloud's workload
-   identity mechanism, and explain why RBAC gives tenants read access to `Secret` objects but
-   not create/update.
+5. Wire External Secrets Operator to AWS Secrets Manager via IRSA, and explain why RBAC gives
+   tenants read access to `Secret` objects but not create/update.
 6. Explain the two halves of image supply-chain security in this repo (registry allow-listing
    via VAP, signature verification via Kyverno keyless cosign) and why CEL alone can't do the
    second one.
@@ -90,7 +89,7 @@ By the end you can:
 |---|---|---|
 | Theory | 35 min | §3 concepts, the six-layer model above |
 | Lab A (any cluster) | 60 min | cpu-lab: namespaces, quotas, RBAC, NetworkPolicy, PSA, VAP |
-| Lab B (your cloud) | 60 min | ESO + workload identity + real secret manager, Kyverno |
+| Lab B (AWS) | 60 min | ESO + IRSA + Secrets Manager, Kyverno |
 | Lab C (optional) | 15 min | Break each control on purpose, read the resulting error |
 | Review | 15 min | troubleshooting, checkpoint questions |
 
@@ -168,14 +167,14 @@ genuinely need it, to keep the extra webhook hop to a minimum.
 
 ```mermaid
 sequenceDiagram
-    participant SM as Cloud Secret Manager<br/>(Secret Manager / Secrets Manager / Key Vault)
-    participant ESO as External Secrets Operator<br/>(Workload Identity / IRSA / Azure WI)
+    participant SM as AWS Secrets Manager
+    participant ESO as External Secrets Operator<br/>(IRSA)
     participant CSS as ClusterSecretStore
     participant ES as ExternalSecret (ch14-team-a)
     participant K8S as Secret hf-token (ch14-team-a)
     participant Pod as vLLM / Trainer Pod
 
-    ESO->>SM: authenticate via cloud workload identity (no static key)
+    ESO->>SM: authenticate via IRSA (no static key)
     ES->>CSS: "sync ch14-team-a-hf-token every 1h"
     CSS->>SM: fetch secret value
     SM-->>CSS: value
@@ -185,10 +184,10 @@ sequenceDiagram
 ```
 
 No human or CI job ever holds the raw secret-manager credential — the ESO controller pod
-authenticates via GKE Workload Identity / EKS IRSA / AKS Azure Workload Identity, the same
-mechanism chapter `05` uses for model downloads and storage CSI drivers. Tenants get a
-Kubernetes `Secret` object (which chapters `07`/`09`'s manifests already expect by name,
-`hf-token`) without ever touching Secret Manager/Secrets Manager/Key Vault credentials directly.
+authenticates via EKS IRSA (IAM Roles for Service Accounts), the same mechanism chapter `05`
+uses for model downloads and storage CSI drivers. Tenants get a Kubernetes `Secret` object
+(which chapters `07`/`09`'s manifests already expect by name, `hf-token`) without ever touching
+Secrets Manager credentials directly.
 
 ## 4. Lab
 
@@ -201,9 +200,7 @@ Layout:
 │   ├── rbac/     ClusterRole (platform), Role+RoleBinding+ServiceAccount per tenant
 │   ├── netpol/   default-deny, allow-dns, allow-same-namespace, allow-egress-https, allow-monitoring-scrape
 │   └── policy/   3x ValidatingAdmissionPolicy(+Binding), 1x Kyverno ClusterPolicy (verifyImages)
-├── gke/ eks/ aks/   install-external-secrets.sh, setup-workload-identity.sh (prints commands —
-│                    does not run mutating cloud CLI calls itself), clustersecretstore-<cloud>.yaml,
-│                    externalsecret-example-team-a.yaml, install-kyverno.sh, cleanup.sh
+├── eks/             clustersecretstore-aws.yaml, externalsecret-example-team-a.yaml, kustomization.yaml
 └── cpu-lab/         same common/, ESO backed by a `kubernetes`-provider ClusterSecretStore
                       (backing-secret.yaml stands in for the cloud secret manager) — no cloud IAM
 ```
@@ -296,41 +293,46 @@ error: failed to create deployment: admission webhook denied the request: deploy
 `resources`, so both policies are entitled to reject it; whichever one the API server evaluates
 and reports first is not guaranteed to be the same every time).
 
-### Step 5 (your cloud): External Secrets Operator with real Workload Identity
+### Step 5: External Secrets Operator with real IRSA
 
-What you're about to do: install ESO, print (then run yourself) the IAM commands that let ESO's
-controller pod read your cloud's secret manager via workload identity — no static key — then
-confirm a real secret synced into a Kubernetes `Secret`.
+What you're about to do: install ESO via its Helm chart, annotating its ServiceAccount with the
+IAM role ARN it will assume; then print (and run yourself) the `eksctl` command that creates that
+IRSA role, bound to Secrets Manager; then confirm a real secret synced into a Kubernetes `Secret`.
 
-<details>
-<summary><b>GKE</b></summary>
-
+Install External Secrets Operator, pointing its ServiceAccount at the IAM role IRSA will create
+below (`ch14-eso-secretsmanager`):
 ```bash
-./14-multi-tenancy-and-security/gke/install-external-secrets.sh
-./14-multi-tenancy-and-security/gke/setup-workload-identity.sh   # prints gcloud commands — review, then run them yourself
-kubectl apply -k 14-multi-tenancy-and-security/gke
+: "${ESO_VERSION:=2.10.0}"
+helm repo add external-secrets https://charts.external-secrets.io --force-update
+helm repo update external-secrets
+helm upgrade --install external-secrets external-secrets/external-secrets \
+  --version "${ESO_VERSION}" \
+  --namespace external-secrets --create-namespace \
+  --set installCRDs=true \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="arn:aws:iam::${AWS_ACCOUNT_ID}:role/ch14-eso-secretsmanager"
+kubectl -n external-secrets rollout status deployment/external-secrets --timeout=180s
 ```
-</details>
 
-<details>
-<summary><b>EKS</b></summary>
-
+IRSA (IAM Roles for Service Accounts) is EKS's "no downloaded key" pattern, via the cluster's
+OIDC provider instead of a Workload Identity Federation pool. It requires
+`eksctl utils associate-iam-oidc-provider --cluster "$EKS_CLUSTER" --approve` to already be done
+(chapter 00 sets this up for the whole cluster). Review this command, then run it yourself — it's
+a mutating, account-level IAM change, which this course's scripts never run on your behalf:
 ```bash
-./14-multi-tenancy-and-security/eks/install-external-secrets.sh
-./14-multi-tenancy-and-security/eks/setup-workload-identity.sh   # prints eksctl/aws commands — review, then run them yourself
+eksctl create iamserviceaccount \
+  --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+  --namespace external-secrets --name external-secrets \
+  --role-name ch14-eso-secretsmanager \
+  --attach-policy-arn arn:aws:iam::aws:policy/SecretsManagerReadWrite \
+  --approve --override-existing-serviceaccounts
+```
+Narrower than the managed policy above for anything beyond the lab: scope a custom policy to
+secrets named `ch14-team-*/*` only (resource ARN prefix), not every secret in the account.
+
+Apply the `ClusterSecretStore` and the example `ExternalSecret` for team A:
+```bash
 kubectl apply -k 14-multi-tenancy-and-security/eks
 ```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-./14-multi-tenancy-and-security/aks/install-external-secrets.sh
-./14-multi-tenancy-and-security/aks/setup-workload-identity.sh   # prints az commands — review, then run them yourself
-kubectl apply -k 14-multi-tenancy-and-security/aks
-```
-</details>
 
 ```bash
 kubectl get clustersecretstore
@@ -352,7 +354,16 @@ What you're about to do: install Kyverno, apply a `verifyImages` ClusterPolicy (
 your own org/identity), and confirm an unsigned image gets rejected at admission time.
 
 ```bash
-./14-multi-tenancy-and-security/<gke|eks|aks|cpu-lab>/install-kyverno.sh
+: "${KYVERNO_VERSION:=3.9.1}"
+helm repo add kyverno https://kyverno.github.io/kyverno/ --force-update
+helm repo update kyverno
+helm upgrade --install kyverno kyverno/kyverno \
+  --version "${KYVERNO_VERSION}" \
+  --namespace kyverno --create-namespace \
+  --set admissionController.replicas=1 \
+  --set backgroundController.enabled=true \
+  --set reportsController.enabled=false
+kubectl -n kyverno rollout status deployment/kyverno-admission-controller --timeout=180s
 # Edit common/policy/kyverno-verify-images.yaml first: replace YOUR_ORG/YOUR_REPO with a real
 # GitHub org/repo and the cosign keyless certificate-identity-regexp for your CI pipeline.
 kubectl apply -f 14-multi-tenancy-and-security/common/policy/kyverno-verify-images.yaml
@@ -389,8 +400,8 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
 | `pods "x" is forbidden: violates PodSecurity "restricted:latest"` | Pod sets `privileged`, a Linux capability, `hostPath`, or omits `runAsNonRoot` | Match the securityContext pattern in chapters `07`/`08`/`09`/`11`'s manifests |
 | `ValidatingAdmissionPolicy ... denied request` on a Job/Deployment you expected to pass | Image untagged or `:latest`, missing `resources.limits`, or registry not in the allow-list | Check which of the three `vap-*.yaml` policies fired in the error message |
 | `admission webhook "validate.kyverno.svc-fail" denied the request: failed to verify signature` | Image isn't cosign-signed with the configured keyless identity, or `imageReferences` glob doesn't match | Confirm with `cosign verify --certificate-identity-regexp ... --certificate-oidc-issuer ...` locally first |
-| `ExternalSecret` stuck `SecretSyncedError` | Workload identity binding missing/wrong, or `remoteRef.key` doesn't exist in the secret manager | `kubectl describe externalsecret -n ch14-team-a`; re-check `setup-workload-identity.sh` output was actually applied |
-| `ClusterSecretStore` `READY: False` | `serviceAccountRef` namespace/name mismatch, or controller pod's SA isn't annotated for workload identity | `kubectl -n external-secrets logs deploy/external-secrets`; verify the annotation `install-external-secrets.sh` set |
+| `ExternalSecret` stuck `SecretSyncedError` | IRSA role binding missing/wrong, or `remoteRef.key` doesn't exist in Secrets Manager | `kubectl describe externalsecret -n ch14-team-a`; re-check the `eksctl create iamserviceaccount` command from Step 5 was actually run |
+| `ClusterSecretStore` `READY: False` | `serviceAccountRef` namespace/name mismatch, or controller pod's SA isn't annotated with the IRSA role ARN | `kubectl -n external-secrets logs deploy/external-secrets`; verify the `eks.amazonaws.com/role-arn` annotation the Step 5 Helm install set |
 | `curler` in Step 3 can reach nothing, even DNS | Applied `common/` without `allow-dns` (e.g. via `kubectl apply -f` on one file only) | Always apply the whole `common/netpol` directory, or the cloud overlay that includes it |
 | `kubectl auth can-i` says `yes` for something the Role shouldn't grant | Testing as the wrong identity (default kubeconfig user has cluster-admin) | Use `--as-group=team-a-engineers` (or `--as=system:serviceaccount:ch14-team-a:team-a-ci`), not your own admin credentials |
 | Kyverno webhook times out under spot churn | `webhookConfiguration.timeoutSeconds` too low for a busy admission controller with 1 replica | Raise `admissionController.replicas`, or raise the timeout (trades off fail-open risk if `failurePolicy: Ignore`) |
@@ -398,18 +409,21 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
 ## 7. Cleanup & cost notes
 
 ```bash
-./14-multi-tenancy-and-security/<gke|eks|aks|cpu-lab>/cleanup.sh
+kubectl delete -k 14-multi-tenancy-and-security/eks --ignore-not-found
+helm uninstall external-secrets -n external-secrets --ignore-not-found 2>/dev/null || true
+helm uninstall kyverno -n kyverno --ignore-not-found 2>/dev/null || true
+kubectl delete namespace external-secrets kyverno --ignore-not-found
 ```
+(or, for the `cpu-lab` variant, swap the `kubectl delete -k` target for `14-multi-tenancy-and-security/cpu-lab`.)
 
 - Nothing in this chapter provisions new node pools — it reuses whatever cluster chapter `00`
   created. The only cost is the ESO and Kyverno controller pods (small, a few hundred MB RAM
-  each) plus whatever secret-manager API calls Secret Manager/Secrets Manager/Key Vault bills
-  per request (all three have a free tier well above lab usage).
-- `setup-workload-identity.sh` prints IAM/role commands rather than running them, per this
-  course's "never mutate a live cloud account from a script" rule — `cleanup.sh` correspondingly
-  does **not** remove them. Delete the service account / IAM role / federated credential
-  yourself once you're done (`gcloud iam service-accounts delete`, `eksctl delete
-  iamserviceaccount`, `az identity delete`).
+  each) plus whatever Secrets Manager API calls it makes per request (well within the free tier
+  for lab usage).
+- The `eksctl create iamserviceaccount` command from Step 5 was run by hand, per this course's
+  "never mutate a live cloud account from a script" rule — cleanup above correspondingly does
+  **not** remove it. Delete the IAM role yourself once you're done:
+  `eksctl delete iamserviceaccount --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name external-secrets --namespace external-secrets`.
 
 ## 8. Checkpoint questions
 
@@ -427,8 +441,9 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
    chapter add a per-namespace `ResourceQuota` on top of that instead of relying on Kueue alone?
 7. Your `vap-restrict-registries` policy blocks an image from `ghcr.io/kubeflow/trainer`. What's
    the fix, and why shouldn't the fix be "set `failurePolicy: Ignore`"?
-8. Why does `setup-workload-identity.sh` print commands instead of running them, unlike
-   `install-external-secrets.sh`?
+8. Why does Step 5's `eksctl create iamserviceaccount` command get printed for you to review and
+   run by hand, instead of the Helm install for External Secrets Operator that immediately
+   precedes it in the same step?
 
 <details>
 <summary>Answers</summary>
@@ -436,8 +451,7 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
 1. Read access lets the kubelet/Deployment mount the Secret's current value; write access would
    let a tenant (or anything running as them) overwrite a Secret's contents — e.g. swap in a
    credential another workload trusts, or exfiltrate by replacing a Secret another team
-   references with one they control. ESO (§3.6), authenticated via cloud workload identity, is
-   the only writer.
+   references with one they control. ESO (§3.6), authenticated via IRSA, is the only writer.
 2. The NVIDIA driver/toolkit/device-plugin containers `gpu-operator` runs need to load kernel
    modules and access host device nodes — that requires `privileged` and host access, which
    `restricted` forbids outright. Workload pods (vLLM, Trainer, Ray, KServe) only request the
@@ -449,12 +463,12 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
    Rekor's transparency log or pull a registry's signature/attestation manifest. Kyverno's
    `verifyImages` rule runs as an external admission webhook that *can* make those calls as part
    of handling the request.
-5. ESO's controller pod authenticates to the cloud secret manager using Workload Identity/IRSA/
-   Azure Workload Identity (no static key). The `ExternalSecret` in `ch14-team-a` tells it to
-   sync `ch14-team-a-hf-token` from the `ClusterSecretStore` on a schedule. ESO fetches the
-   value and creates/updates a Kubernetes `Secret` named `hf-token` in `ch14-team-a`. A vLLM
-   pod's manifest (unchanged from chapter `09`) mounts that Secret by name as it always would —
-   it has no idea the value came from a cloud secret manager instead of `kubectl create secret`.
+5. ESO's controller pod authenticates to AWS Secrets Manager using IRSA (no static key). The
+   `ExternalSecret` in `ch14-team-a` tells it to sync `ch14-team-a-hf-token` from the
+   `ClusterSecretStore` on a schedule. ESO fetches the value and creates/updates a Kubernetes
+   `Secret` named `hf-token` in `ch14-team-a`. A vLLM pod's manifest (unchanged from chapter `09`)
+   mounts that Secret by name as it always would — it has no idea the value came from a cloud
+   secret manager instead of `kubectl create secret`.
 6. Kueue's ClusterQueue quota governs *admission of Kueue-managed Workloads* cluster-wide (Jobs,
    TrainJobs, RayJobs with the queue-name label) — it says nothing about Deployments, Services,
    PVC counts, or any object a tenant creates outside Kueue's purview. `ResourceQuota` is the
@@ -465,22 +479,23 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
    weren't). Setting `failurePolicy: Ignore` instead would make the *entire policy* fail open on
    any apiserver/CEL error, silently admitting every image whenever the check itself can't run —
    turning a targeted allow-list gap into "the control doesn't reliably apply."
-8. This course's ground rule is no script may run mutating cloud CLI commands
-   (`gcloud`/`aws`/`az` that create/modify/delete) against a live account — `install-*.sh`
-   scripts only call `helm`/`kubectl`, which act on the cluster you're already authenticated to
-   and are the labs' actual deliverable; IAM/identity bindings are account-level, higher-blast-
-   radius changes the brief deliberately keeps as a human, reviewed action.
+8. This course's ground rule is that nothing may mutate a live cloud account on your behalf
+   (`eksctl`/`aws` calls that create/modify/delete IAM resources) — the `helm`/`kubectl` commands
+   only act on the cluster you're already authenticated to and are the labs' actual deliverable.
+   `eksctl create iamserviceaccount` creates a real IAM role and trust policy, an account-level,
+   higher-blast-radius change the brief deliberately keeps as a human, reviewed action you copy,
+   read, and run yourself.
 
 </details>
 
 ## 9. Further reading
 
 - Kubernetes: [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/), [Resource Quotas](https://kubernetes.io/docs/concepts/policy/resource-quotas/), [Limit Ranges](https://kubernetes.io/docs/concepts/policy/limit-range/), [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/), [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/), [ValidatingAdmissionPolicy](https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/)
-- [External Secrets Operator docs](https://external-secrets.io/latest/) — [GCP Secret Manager provider](https://external-secrets.io/latest/provider/google-secrets-manager/), [AWS Secrets Manager provider](https://external-secrets.io/latest/provider/aws-secrets-manager/), [Azure Key Vault provider](https://external-secrets.io/latest/provider/azure-key-vault/), [Kubernetes provider](https://external-secrets.io/latest/provider/kubernetes/)
+- [External Secrets Operator docs](https://external-secrets.io/latest/) — [AWS Secrets Manager provider](https://external-secrets.io/latest/provider/aws-secrets-manager/), [Kubernetes provider](https://external-secrets.io/latest/provider/kubernetes/)
 - [Kyverno docs](https://kyverno.io/docs/) — [Verify Images / Sigstore](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/sigstore/), [ImageValidatingPolicy (newer CEL form)](https://kyverno.io/docs/policy-types/image-validating-policy/)
 - [sigstore/cosign](https://docs.sigstore.dev/cosign/overview/) — keyless signing
-- Per-cloud identity: [GKE Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity), [EKS IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html), [AKS Workload Identity](https://learn.microsoft.com/azure/aks/workload-identity-overview)
-- Cross-link: `00-prerequisites-and-cluster-setup` (OIDC issuer / Workload Identity federation prerequisites per cloud), `05-model-storage-and-data` (same workload-identity mechanisms used for storage access), `06-batch-jobs-and-kueue` (`team-a`/`team-b` tenants this chapter secures), `04-gpu-observability` (`monitoring` namespace this chapter's NetworkPolicy allow-lists), `15-mlops-gitops-and-pipelines` (Argo CD/Workflows ServiceAccounts this chapter's RBAC pattern extends to), `16-capstone-ai-platform` (assembles this chapter alongside every other one)
+- [EKS IRSA (IAM Roles for Service Accounts)](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html)
+- Cross-link: `00-prerequisites-and-cluster-setup` (OIDC provider / IRSA prerequisites), `05-model-storage-and-data` (same workload-identity mechanisms used for storage access), `06-batch-jobs-and-kueue` (`team-a`/`team-b` tenants this chapter secures), `04-gpu-observability` (`monitoring` namespace this chapter's NetworkPolicy allow-lists), `15-mlops-gitops-and-pipelines` (Argo CD/Workflows ServiceAccounts this chapter's RBAC pattern extends to), `16-capstone-ai-platform` (assembles this chapter alongside every other one)
 
 ## Versions tested
 

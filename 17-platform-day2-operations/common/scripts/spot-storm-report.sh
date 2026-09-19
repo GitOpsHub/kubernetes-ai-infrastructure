@@ -6,7 +6,7 @@
 set -euo pipefail
 
 echo "== Nodes by phase (a storm shows several NotReady/gone within the same few minutes) =="
-kubectl get nodes -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,SPOT:.metadata.labels."cloud\.google\.com/gke-spot",AGE:.metadata.creationTimestamp
+kubectl get nodes -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[-1].type,SPOT:.metadata.labels."eks\.amazonaws\.com/capacityType",AGE:.metadata.creationTimestamp
 
 echo
 echo "== Recent node-related events (Preempted/Deleted/NodeNotReady, clustered timestamps = a storm) =="
@@ -26,8 +26,7 @@ echo "Next steps (README section 5):"
 echo "  1. Confirm this is really a spot-wide event, not one flaky node: multiple nodes across"
 echo "     different instance types/AZs going NotReady within the same few minutes = a storm."
 echo "  2. Check the autoscaler is provisioning the fallback shape, not stuck retrying the same"
-echo "     exhausted spot pool: 'kubectl get nodeclaims' (Karpenter/AKS NAP) or"
-echo "     'kubectl get events --field-selector reason=TriggeredScaleUp' (GKE NAP)."
+echo "     exhausted spot pool: 'kubectl get nodeclaims' (Karpenter, chapter 13's autoscaler)."
 echo "  3. Kueue's waitForPodsReady (06-batch-jobs-and-kueue) should be requeuing half-admitted"
 echo "     Workloads automatically -- if a Workload is stuck Admitted but never Running, that's"
 echo "     the thing to page someone about, not the storm itself."

@@ -1,8 +1,8 @@
 # 04 · GPU Observability
 
-> DCGM exporter, kube-prometheus-stack, a Grafana dashboard, Prometheus alerting rules, and each
-> cloud's managed-observability alternative — so you can see what your GPUs are doing before
-> something expensive goes idle or something hot goes unnoticed.
+> DCGM exporter, kube-prometheus-stack, a Grafana dashboard, Prometheus alerting rules, and EKS's
+> managed-observability alternative — so you can see what your GPUs are doing before something
+> expensive goes idle or something hot goes unnoticed.
 
 ## Before you start
 
@@ -40,10 +40,8 @@ flowchart LR
     GRAF[Grafana] -->|PromQL| PROM
     GRAF -->|sidecar loads ConfigMap| DASH[GPU Fleet dashboard]
   end
-  subgraph Per-cloud managed alternative
-    GMP["GKE: Managed Prometheus<br/>(PodMonitoring)"]
-    AMP["EKS: Amazon Managed<br/>Prometheus + managed collector"]
-    AZMON["AKS: Azure Monitor<br/>managed Prometheus"]
+  subgraph Managed alternative
+    AMP["Amazon Managed<br/>Prometheus + managed collector"]
   end
 ```
 
@@ -55,16 +53,17 @@ By the end you can:
 2. Wire a `ServiceMonitor` and `PrometheusRule` into a kube-prometheus-stack release so GPU
    metrics and alerts are picked up automatically.
 3. Read a GPU fleet Grafana dashboard and know which panel answers which operational question.
-4. Compare self-hosted kube-prometheus-stack vs. each cloud's managed Prometheus for this use case.
+4. Compare self-hosted kube-prometheus-stack vs. Amazon Managed Service for Prometheus (AMP) for
+   this use case.
 5. Practice the whole pipeline — exporter, scrape, alert, dashboard — on a CPU-only cluster.
 
 | Time | Activity |
 |---|---|
 | 0:00–0:25 | Read section 3. Skim `common/alerts/prometheusrule.yaml` and `common/dashboards/dashboard.json` |
 | 0:25–1:00 | `cpu-lab/`: full pipeline against a fake exporter, no GPU quota needed |
-| 1:00–1:40 | Install kube-prometheus-stack on your cloud, wire up the real dcgm-exporter |
+| 1:00–1:40 | Install kube-prometheus-stack on EKS, wire up the real dcgm-exporter |
 | 1:40–2:10 | Grafana walkthrough + trigger an alert on purpose |
-| 2:10–2:40 | Read/skim the managed-observability alternative for your cloud |
+| 2:10–2:40 | Read/skim the AMP managed-observability alternative |
 | 2:40–3:00 | Checkpoint questions, cleanup |
 
 ## 3. Concepts
@@ -104,20 +103,20 @@ only auto-discovers `ServiceMonitor`/`PrometheusRule` objects carrying the label
 true`, the chart default). Every manifest in `common/` is pre-labeled `release: kube-prometheus-stack`
 — **install the chart under that exact release name**, or relabel.
 
-### 3.3 Self-hosted vs. managed, per cloud
+### 3.3 Self-hosted vs. managed (AMP)
 
-| | Self-hosted (this chapter's default) | GKE | EKS | AKS |
-|---|---|---|---|---|
-| What | kube-prometheus-stack (Prometheus Operator + Prometheus + Alertmanager + Grafana) | Google Cloud Managed Service for Prometheus (GMP) | Amazon Managed Service for Prometheus (AMP) + AWS-managed collector | Azure Monitor managed Prometheus + Container Insights |
-| Enabled by | `install-kube-prometheus-stack.sh` on any cloud | **On by default** (Standard ≥1.27, Autopilot ≥1.25) — `gke/gmp/` just adds a `PodMonitoring` for dcgm-exporter | `eks/amp/create-workspace-and-scraper.sh` (creates billed resources — read before running) | `aks/enable-managed-prometheus.sh` (`az aks update --enable-azure-monitor-metrics`, creates billed resources) |
-| Alerting | Alertmanager, in-cluster | Cloud Monitoring alerting policies | Amazon Managed Grafana alerting / CloudWatch alarms on AMP-sourced metrics | Azure Monitor alerts |
-| Dashboards | Grafana, in-cluster, PV-backed | Cloud Console Metrics Explorer, or Grafana against the GMP Prometheus-compatible endpoint | Amazon Managed Grafana (separate resource) | Azure Managed Grafana (separate resource, link to the workspace) |
-| You manage | Prometheus storage, upgrades, HA | Nothing (fully managed collection + storage) | The scraper config; not the collector infra | The scrape config for custom exporters |
-| Best for this course | Consistent GKE/EKS/AKS labs, portable dashboards/alerts as code | Production GKE, want zero ops | Production EKS, want zero ops, already using AMP | Production AKS, want zero ops, already using Azure Monitor |
+| | Self-hosted (this chapter's default) | Amazon Managed Service for Prometheus (AMP) |
+|---|---|---|
+| What | kube-prometheus-stack (Prometheus Operator + Prometheus + Alertmanager + Grafana) | AMP + AWS-managed collector |
+| Enabled by | `install-kube-prometheus-stack.sh` (below) | `create-workspace-and-scraper.sh` steps (below) — creates billed resources, read before running |
+| Alerting | Alertmanager, in-cluster | Amazon Managed Grafana alerting / CloudWatch alarms on AMP-sourced metrics |
+| Dashboards | Grafana, in-cluster, PV-backed | Amazon Managed Grafana (separate resource) |
+| You manage | Prometheus storage, upgrades, HA | The scraper config; not the collector infra |
+| Best for this course | Consistent, portable dashboards/alerts as code | Production EKS, want zero ops, already using AMP |
 
-This course defaults to self-hosted kube-prometheus-stack everywhere so the same `ServiceMonitor`/
-`PrometheusRule`/dashboard work unmodified on all three clouds — the managed options are read-through
-alternatives you'd pick for a real production fleet.
+This course defaults to self-hosted kube-prometheus-stack so the same `ServiceMonitor`/
+`PrometheusRule`/dashboard work as code — AMP is a read-through alternative you'd pick for a real
+production fleet.
 
 ## 4. Lab
 
@@ -146,29 +145,31 @@ seconds every 10 minutes starting at t=300s — watch it in Prometheus → Alert
 **What doesn't carry over:** the numbers are synthetic `sin()` curves, not real GPU telemetry —
 only the scrape/alert/dashboard wiring transfers to a real cluster.
 
-### Step 1: Real dcgm-exporter on your cloud
+### Step 1: Real dcgm-exporter on EKS
 
-<details><summary>GKE</summary>
+What you're about to do: install kube-prometheus-stack (pinned to `${KUBE_PROMETHEUS_STACK_VERSION}`)
+on the CPU spot pool, then wire this chapter's `ServiceMonitor`/`PrometheusRule`/dashboard on top of
+it so it picks up chapter 02's `dcgm-exporter`.
+
+Prereq: the EBS CSI driver add-on (chapter 00's `create-cluster.sh`, or
+`eksctl create addon --name aws-ebs-csi-driver`) — Prometheus/Alertmanager PVCs need it.
 
 ```bash
-./04-gpu-observability/gke/install-kube-prometheus-stack.sh
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
+helm repo update prometheus-community
+
+helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  --version "${KUBE_PROMETHEUS_STACK_VERSION}" \
+  -f 04-gpu-observability/eks/values-kube-prometheus-stack.yaml \
+  --wait --timeout 15m
+
+kubectl apply -k 04-gpu-observability/common/servicemonitor
+kubectl apply -k 04-gpu-observability/common/alerts
+kubectl apply -k 04-gpu-observability/common/dashboards
+
 kubectl -n gpu-operator get svc nvidia-dcgm-exporter   # confirm chapter 02 created it
 ```
-</details>
-
-<details><summary>EKS</summary>
-
-```bash
-./04-gpu-observability/eks/install-kube-prometheus-stack.sh
-```
-</details>
-
-<details><summary>AKS</summary>
-
-```bash
-./04-gpu-observability/aks/install-kube-prometheus-stack.sh
-```
-</details>
 
 Expected:
 ```
@@ -215,13 +216,61 @@ How to tell this worked: the alert shows state `firing` (not just `pending`) in 
 Alertmanager UI or `ALERTS{alertname=~"GPU.*"}` in Prometheus, with the `for:` duration from
 `common/alerts/prometheusrule.yaml` elapsed.
 
-### Step 4: Read the managed alternative for your cloud
+### Step 4: Read the AMP managed alternative
 
-What you're about to do: read (don't necessarily run — these create billed resources) the
-managed-Prometheus path for your cloud, so you can compare it against the self-hosted stack you just
-built. `gke/gmp/podmonitoring.yaml`, `eks/amp/create-workspace-and-scraper.sh`, or
-`aks/enable-managed-prometheus.sh` per section 3.3. How to tell you understood it: you can answer
-checkpoint question 4 without looking at the answer.
+What you're about to do: read (don't necessarily run — this creates billed AWS resources) the
+Amazon Managed Service for Prometheus path, so you can compare it against the self-hosted stack you
+just built (section 3.3). This is not run by the course; run it yourself only if you want the
+managed path instead of, or alongside, kube-prometheus-stack.
+
+ALTERNATIVE to kube-prometheus-stack: AMP, scraped by an AWS-managed collector (no ADOT
+DaemonSet/Deployment to run or upgrade yourself). Trade-off: no bundled Alertmanager/Grafana (pair
+with Amazon Managed Grafana or your own), and the managed collector needs ENIs in your VPC subnets
+(extra IPs/cost) — read the pricing page before fleet use.
+
+```bash
+: "${AWS_REGION:?}" "${EKS_CLUSTER:?}"
+WORKSPACE_ALIAS="${WORKSPACE_ALIAS:-ch04-gpu-observability}"
+
+WORKSPACE_ID=$(aws amp create-workspace --alias "$WORKSPACE_ALIAS" --region "$AWS_REGION" \
+  --query workspaceId --output text)
+echo "AMP workspace: $WORKSPACE_ID"
+```
+
+Minimal scrape config: same target as `common/servicemonitor`, translated to a plain Prometheus
+`scrape_config` (the managed collector doesn't consume `ServiceMonitor` CRs, it consumes this):
+```bash
+cat > /tmp/amp-scrape-config.yaml <<'EOF'
+global:
+  scrape_interval: 30s
+scrape_configs:
+  - job_name: dcgm-exporter
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces: { names: ["gpu-operator"] }
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: nvidia-dcgm-exporter
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: gpu-metrics
+        action: keep
+EOF
+SCRAPE_CONFIG_B64=$(base64 < /tmp/amp-scrape-config.yaml | tr -d '\n')
+```
+
+`# VERIFY`: `--source-eks` requires `clusterArn` + `subnetIds` (private subnets with connectivity to
+the EKS API endpoint and to the pod network) and `securityGroupIds`; get exact current syntax with
+`aws amp create-scraper help` before running — this API is newer than this course's training data
+cutoff and flags may have changed. See [Set up managed collectors](https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-collector-how-to.html).
+```bash
+aws amp create-scraper \
+  --region "$AWS_REGION" \
+  --scrape-configuration "configurationBlob=${SCRAPE_CONFIG_B64}" \
+  --destination "ampConfiguration={workspaceArn=arn:aws:aps:${AWS_REGION}:$(aws sts get-caller-identity --query Account --output text):workspace/${WORKSPACE_ID}}" \
+  --alias "ch04-dcgm-scraper"
+```
+How to tell you understood it: you can answer checkpoint question 4 without looking at the answer.
 
 ## 5. Spot considerations
 
@@ -235,8 +284,8 @@ checkpoint question 4 without looking at the answer.
 - **7-day retention (`prometheus.prometheusSpec.retention`) is deliberately short** for a lab —
   spot nodes churn, cardinality from `gpu`/`Hostname` labels grows with fleet size, and this is a
   learning cluster, not a production one. Size retention/storage for your real fleet.
-- **Managed observability (3.3) removes the "who watches the watcher" question** — GMP/AMP/Azure
-  Monitor storage isn't on a node that can be preempted at all.
+- **Managed observability (3.3) removes the "who watches the watcher" question** — AMP storage
+  isn't on a node that can be preempted at all.
 
 ## 6. Troubleshooting
 
@@ -244,22 +293,30 @@ checkpoint question 4 without looking at the answer.
 |---|---|---|
 | Prometheus target for dcgm-exporter missing entirely | `ServiceMonitor` not labeled `release: kube-prometheus-stack`, or wrong namespace/label match | `kubectl get servicemonitor -A -l release=kube-prometheus-stack`; confirm `kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter` exists first (chapter 02 must be installed) |
 | Target present but `DOWN` | Port name mismatch, or `gpu-operator`'s dcgm-exporter Service uses a different label/port on your GPU Operator version | `kubectl get endpoints -n gpu-operator nvidia-dcgm-exporter`; update `common/servicemonitor/servicemonitor.yaml`'s `selector`/`endpoints.port` to match (see its `# VERIFY` comment) |
-| `GPULowUtilizationOnDemandNode` never fires (or fires on spot nodes too) | `kube_node_labels` doesn't include the cloud's spot label, or your cluster is spot-only | Check `kube-state-metrics.metricLabelsAllowlist` in your cloud's values file includes the right label key; on a spot-only lab cluster this alert legitimately never fires |
-| Grafana dashboard not appearing | Sidecar not watching this namespace, or ConfigMap missing the `grafana_dashboard: "1"` label | `kubectl get cm -A -l grafana_dashboard=1`; confirm `grafana.sidecar.dashboards.searchNamespace: ALL` is set (all three cloud values files set it) |
-| PVC `Pending` for Prometheus/Alertmanager/Grafana | Wrong `storageClassName` for your cluster | `kubectl get storageclass`; update the values file (`standard-rwo`/`gp3`/`managed-csi` are common defaults, not guaranteed) |
+| `GPULowUtilizationOnDemandNode` never fires (or fires on spot nodes too) | `kube_node_labels` doesn't include `eks.amazonaws.com/capacityType`, or your cluster is spot-only | Check `kube-state-metrics.metricLabelsAllowlist` in `eks/values-kube-prometheus-stack.yaml` includes the right label key; on a spot-only lab cluster this alert legitimately never fires |
+| Grafana dashboard not appearing | Sidecar not watching this namespace, or ConfigMap missing the `grafana_dashboard: "1"` label | `kubectl get cm -A -l grafana_dashboard=1`; confirm `grafana.sidecar.dashboards.searchNamespace: ALL` is set (`eks/values-kube-prometheus-stack.yaml` sets it) |
+| PVC `Pending` for Prometheus/Alertmanager/Grafana | Wrong `storageClassName` for your cluster | `kubectl get storageclass`; update the values file (`gp3` is the common EBS CSI driver default, not guaranteed) |
 | `GPUXidError` fires constantly | A real, repeating GPU fault — or (cpu-lab only) the fake exporter's scripted toggle | On a real cluster: drain and inspect the node (`nvidia-smi -q` for Xid detail, correlate with `dmesg`); see [NVIDIA Xid Errors doc](https://docs.nvidia.com/deploy/xid-errors/index.html) |
-| Alerts fire but nothing notifies you | Default Alertmanager has no receiver configured (this lab ships none) | Add `alertmanager.config.receivers` in your cloud's values file (Slack/PagerDuty/email) — deliberately left out here since it's account-specific |
+| Alerts fire but nothing notifies you | Default Alertmanager has no receiver configured (this lab ships none) | Add `alertmanager.config.receivers` in `eks/values-kube-prometheus-stack.yaml` (Slack/PagerDuty/email) — deliberately left out here since it's account-specific |
 
 ## 7. Cleanup and cost notes
 
+What you're about to do: tear down the monitoring stack and this chapter's manifests.
 ```bash
-./04-gpu-observability/gke/cleanup.sh   # or eks / aks / cpu-lab
+kubectl delete -k 04-gpu-observability/common/servicemonitor --ignore-not-found || true
+kubectl delete -k 04-gpu-observability/common/alerts --ignore-not-found || true
+kubectl delete -k 04-gpu-observability/common/dashboards --ignore-not-found || true
+helm uninstall kube-prometheus-stack -n monitoring 2>/dev/null || true
+kubectl delete namespace monitoring --ignore-not-found --wait=false
 ```
+If you ran Step 0's cpu-lab, tear it down the same way with `04-gpu-observability/cpu-lab` in place
+of `common/` and `-n monitoring` (same namespace and release name).
 - kube-prometheus-stack's own footprint is CPU-pool-sized (a few hundred mCPU, ~1–2Gi RAM,
   ~25Gi of disk across Prometheus/Alertmanager/Grafana PVCs) — cheap, but not free; delete the
   `monitoring` namespace when you're done with the chapter.
-- Managed options (GMP/AMP/Azure Monitor) bill per sample/metric ingested — check current pricing
-  before pointing them at a high-cardinality label set (per-pod GPU labels can get expensive fast).
+- AMP bills per sample/metric ingested — check current pricing before pointing it at a
+  high-cardinality label set (per-pod GPU labels can get expensive fast). Delete the workspace/scraper
+  from Step 4 if you created them: `aws amp delete-scraper`/`aws amp delete-workspace`.
 - dcgm-exporter itself is chapter 02's cost, not this chapter's — nothing extra to clean up there.
 
 ## 8. Checkpoint questions
@@ -269,8 +326,8 @@ checkpoint question 4 without looking at the answer.
 2. Which DCGM metric would you check first to decide whether a node needs a bigger GPU sharing
    fan-out (chapter 03), and which to decide whether a spot GPU node pool is oversized (chapter 13)?
 3. Why must Prometheus/Grafana run on the CPU pool, never the GPU pool?
-4. What's the practical trade-off between self-hosted kube-prometheus-stack and a cloud's managed
-   Prometheus for this specific use case?
+4. What's the practical trade-off between self-hosted kube-prometheus-stack and Amazon Managed
+   Service for Prometheus (AMP) for this specific use case?
 5. A `DCGM_FI_DEV_XID_ERRORS` alert fires. What's the first thing you should check, and why is
    "just restart the pod" usually the wrong first move?
 6. Why is the idle-node alert scoped to exclude spot nodes?
@@ -289,10 +346,10 @@ checkpoint question 4 without looking at the answer.
    scale-to-zero (chapter 13).
 3. A GPU node can be preempted (spot) or drained for maintenance; if monitoring lived there, the
    moment you most need visibility (a node about to disappear) is exactly when you'd lose it.
-4. Self-hosted gives you portable, version-controlled dashboards/alerts identical across clouds
-   and full control over retention/rules, at the cost of running and storing Prometheus yourself.
-   Managed removes that operational burden and survives node loss inherently, at the cost of
-   per-sample billing and a cloud-specific alerting/dashboarding surface.
+4. Self-hosted gives you portable, version-controlled dashboards/alerts as code and full control
+   over retention/rules, at the cost of running and storing Prometheus yourself. AMP removes that
+   operational burden and survives node loss inherently, at the cost of per-sample billing and a
+   separate alerting/dashboarding surface (Amazon Managed Grafana).
 5. Check which GPU/node and correlate with `dmesg`/`nvidia-smi -q` for the Xid detail code first —
    many Xid codes indicate a hardware or driver-level fault that a pod restart won't fix and that
    will recur (or corrupt further work) until the node is drained and reset.
@@ -308,28 +365,25 @@ checkpoint question 4 without looking at the answer.
 
 - [NVIDIA DCGM Exporter](https://github.com/NVIDIA/dcgm-exporter), [Configure Prometheus for DCGM Exporter](https://docs.nvidia.com/datacenter/dcgm/latest/learn/getting-started-for-system-administrators/configure-prometheus-for-dcgm-exporter.html), [NVIDIA Xid Errors](https://docs.nvidia.com/deploy/xid-errors/index.html)
 - [kube-prometheus-stack chart](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack), [Prometheus Operator ServiceMonitor/PrometheusRule](https://prometheus-operator.dev/docs/getting-started/design/)
-- GKE: [Managed Service for Prometheus overview](https://docs.cloud.google.com/stackdriver/docs/managed-prometheus), [PodMonitoring reference](https://cloud.google.com/stackdriver/docs/managed-prometheus/setup-managed)
 - EKS: [Amazon Managed Service for Prometheus](https://docs.aws.amazon.com/prometheus/latest/userguide/what-is-Amazon-Managed-Service-for-Prometheus.html), [Set up managed collectors](https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-collector-how-to.html)
-- AKS: [Enable monitoring for AKS clusters](https://learn.microsoft.com/azure/azure-monitor/containers/kubernetes-monitoring-enable), [Customize Prometheus scrape config](https://learn.microsoft.com/azure/azure-monitor/containers/prometheus-metrics-scrape-configuration)
 - Community NVIDIA DCGM Grafana dashboard (import by ID for the full official panel set): [grafana.com dashboard 12239](https://grafana.com/grafana/dashboards/12239-nvidia-dcgm-exporter-dashboard/)
 
 **Versions tested** (2026-09-16): kube-prometheus-stack `${KUBE_PROMETHEUS_STACK_VERSION}` (91.4.1,
 chart's own component versions: Prometheus Operator per chart default), dcgm-exporter image
 `4.6.0-4.8.3-distroless` (matches `${DCGM_EXPORTER_CHART_VERSION}`=4.8.3, installed by chapter 02's
 GPU Operator `${GPU_OPERATOR_VERSION}`=v26.7.0), `python:3.13-slim` (cpu-lab fake exporter),
-Kubernetes 1.35. `values-*.yaml` in this chapter were rendered locally with
-`helm template ... --version 91.4.1 -f values-<cloud>.yaml` against the pinned chart to confirm
-they parse; not applied to a live cluster.
+Kubernetes 1.35. `values-kube-prometheus-stack.yaml` in this chapter was rendered locally with
+`helm template ... --version 91.4.1 -f eks/values-kube-prometheus-stack.yaml` against the pinned
+chart to confirm it parses; not applied to a live cluster.
 
 **`# VERIFY` items to re-check before relying on this chapter**:
-- `common/servicemonitor/servicemonitor.yaml` and `gke/gmp/podmonitoring.yaml`: the exact Service/
-  pod label (`app: nvidia-dcgm-exporter`) and port name (`gpu-metrics`) that the GPU Operator
-  creates — stable across recent releases in community reports, but not documented as a versioned
-  public API; confirm with `kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter -o yaml`.
+- `common/servicemonitor/servicemonitor.yaml`: the exact Service/pod label
+  (`app: nvidia-dcgm-exporter`) and port name (`gpu-metrics`) that the GPU Operator creates —
+  stable across recent releases in community reports, but not documented as a versioned public API;
+  confirm with `kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter -o yaml`.
 - `common/alerts/prometheusrule.yaml`'s `GPULowUtilizationOnDemandNode`: exact `kube_node_labels`
   label keys depend on `kube-state-metrics.metricLabelsAllowlist` and kube-state-metrics version.
-- `eks/amp/create-workspace-and-scraper.sh`: `aws amp create-scraper`'s `--source-eks`/subnet/
-  security-group flags — this API is newer than this course's training data; re-check
-  `aws amp create-scraper help` before running.
-- `gke/gmp`, `eks/amp`, `aks/enable-managed-prometheus.sh` are read-through references, not
-  exercised by `kubectl kustomize`/`helm template` the way the self-hosted path was.
+- Step 4's `aws amp create-scraper`'s `--source-eks`/subnet/security-group flags — this API is
+  newer than this course's training data; re-check `aws amp create-scraper help` before running.
+- Step 4 (AMP) is a read-through reference, not exercised by `kubectl kustomize`/`helm template`
+  the way the self-hosted path was.

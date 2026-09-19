@@ -3,7 +3,7 @@
 > Handing the stack you've built by hand in chapters `00`–`14` over to **Argo CD** (app-of-apps,
 > against your **existing** Argo CD install — this chapter never installs or reconfigures Argo
 > CD itself), orchestrating multi-step training→registration pipelines with **Argo Workflows**,
-> and tracking runs/models in **MLflow** — on **GKE, EKS and AKS**.
+> and tracking runs/models in **MLflow** — on **EKS**.
 
 ---
 
@@ -98,7 +98,7 @@ By the end you can:
 ```mermaid
 flowchart LR
     Human -->|"kubectl apply -f root-app.yaml<br/>(reviewed, once)"| Root["Application:<br/>ch15-app-of-apps"]
-    Root -->|"source.path points at<br/>common/argocd-apps/apps-gke/"| Dir["8 Application manifests<br/>in git"]
+    Root -->|"source.path points at<br/>common/argocd-apps/apps-eks/"| Dir["8 Application manifests<br/>in git"]
     Dir -->|"Argo CD syncs each"| Children["kueue, kserve, vllm, ...<br/>(the actual workloads)"]
 ```
 
@@ -188,10 +188,9 @@ submission once you're pointing at real GPU capacity.
 - **Tracking server** — the API/UI (`MLFLOW_TRACKING_URI`) that experiments and runs log
   metrics/params to (`mlflow.log_metrics`, `mlflow.start_run()`).
 - **Artifact store** — where the actual files (model weights, plots, checkpoints) live. The
-  chart's `artifactRoot.{gcs,s3,azureBlob}` points this at the same kind of object storage
-  chapter `05` uses for model downloads — proxied through the server
-  (`proxiedArtifactStorage: true`) so clients never need direct cloud credentials, consistent
-  with this chapter's workload-identity-only stance.
+  chart's `artifactRoot.s3` points this at the same S3 bucket chapter `05` uses for model
+  downloads — proxied through the server (`proxiedArtifactStorage: true`) so clients never need
+  direct AWS credentials, consistent with this chapter's IRSA-only stance.
 - **Model registry** — a named, versioned pointer (`mlflow.register_model(...)`) on top of
   logged artifacts. "Which model is in production" is a registry stage/alias, not a file path —
   this is what a real KServe `InferenceService` or vLLM rollout would read to decide which
@@ -206,10 +205,10 @@ Layout:
 ├── common/
 │   ├── argocd-apps/
 │   │   ├── project.yaml            AppProject "ai-platform"
-│   │   └── apps-{gke,eks,aks}/     8 child Application manifests + kustomization per cloud
+│   │   └── apps-eks/                8 child Application manifests + kustomization
 │   ├── workflows/                  ch15-pipelines namespace, RBAC, PVC, train-and-register WorkflowTemplate
-│   └── mlflow/                     values-mlflow-{gke,eks,aks,cpu-lab}.yaml (Helm values, not applied directly)
-├── gke/ eks/ aks/                  root-app.yaml (the ONE Application you apply by hand), kustomization.yaml, cleanup.sh
+│   └── mlflow/                     values-mlflow-{eks,cpu-lab}.yaml (Helm values, not applied directly)
+├── eks/                             root-app.yaml (the ONE Application you apply by hand), kustomization.yaml
 └── cpu-lab/                        install-argo-workflows.sh, install-mlflow.sh (plain Helm, no Argo CD needed), kustomization.yaml (workflows), cleanup.sh
 ```
 
@@ -252,32 +251,10 @@ grep -rln "YOUR_" 15-mlops-gitops-and-pipelines/   # find every placeholder befo
 grep -rln "YOUR_" 15-mlops-gitops-and-pipelines/ | xargs sed -i '' 's#YOUR_ORG/kubernetes-ai-infrastructure#<your-fork>#g'   # example; do the rest by hand
 ```
 
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
-kubectl apply -f 15-mlops-gitops-and-pipelines/gke/root-app.yaml
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
 ```bash
 kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
 kubectl apply -f 15-mlops-gitops-and-pipelines/eks/root-app.yaml
 ```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
-kubectl apply -f 15-mlops-gitops-and-pipelines/aks/root-app.yaml
-```
-</details>
 
 ```bash
 argocd app get ch15-app-of-apps
@@ -316,10 +293,10 @@ What you're about to do: extend the app-of-apps with a component this chapter di
 prove the "commit a file, Argo CD creates the Application" mechanic from §3.1 yourself.
 
 ```bash
-cp 15-mlops-gitops-and-pipelines/common/argocd-apps/apps-gke/app-vllm.yaml \
-   15-mlops-gitops-and-pipelines/common/argocd-apps/apps-gke/app-kserve-demo.yaml
-# edit app-kserve-demo.yaml: change metadata.name and spec.source.path to point at 11-kserve/gke
-# add it to apps-gke/kustomization.yaml's resources list
+cp 15-mlops-gitops-and-pipelines/common/argocd-apps/apps-eks/app-vllm.yaml \
+   15-mlops-gitops-and-pipelines/common/argocd-apps/apps-eks/app-kserve-demo.yaml
+# edit app-kserve-demo.yaml: change metadata.name and spec.source.path to point at 11-kserve/eks
+# add it to apps-eks/kustomization.yaml's resources list
 git add -A && git commit -m "ch15: add kserve demo Application" && git push
 argocd app sync ch15-app-of-apps
 argocd app list -l app.kubernetes.io/part-of=ai-platform   # now 9
@@ -355,23 +332,31 @@ purely because it was a file in the directory the root Application's `source.pat
 | `mlflow.exceptions.MlflowException: API request ... Connection refused` in the register step | `MLFLOW_TRACKING_URI` wrong, or MLflow Service not yet `Ready` | `kubectl -n mlflow get pods,svc`; the WorkflowTemplate assumes Service name `mlflow` in namespace `mlflow` |
 | Workflow step stuck `Pending` | `ch15-pipelines` PVC (`ReadWriteOnce`) already mounted by a pod on a different node | Reduce parallelism, or move `pipeline-artifacts` to a `ReadWriteMany` class (Filestore/EFS/Azure Files — chapter `05`) |
 | `argo submit` says `WorkflowTemplate not found` | Applied `cpu-lab/kustomization.yaml` to the wrong namespace, or Argo Workflows `controller.workflowNamespaces` doesn't include `ch15-pipelines` | `kubectl get workflowtemplate -n ch15-pipelines`; check `values-argo-workflows.yaml`'s `controller.workflowNamespaces` |
-| Everything in `apps-gke/*.yaml` shows `OutOfSync` and never changes | Expected — manual sync by default (§3.2). `argocd app sync <name>` each one you've reviewed | n/a |
+| Everything in `apps-eks/*.yaml` shows `OutOfSync` and never changes | Expected — manual sync by default (§3.2). `argocd app sync <name>` each one you've reviewed | n/a |
 | `helm.valueFiles: $values/...` path not found | Multi-source `ref: values` source's `targetRevision`/repo doesn't actually contain that path (e.g. you pushed to a branch other than `main`) | Match `targetRevision` in the Application to the branch you actually pushed |
 
 ## 7. Cleanup & cost notes
 
 ```bash
 ./15-mlops-gitops-and-pipelines/cpu-lab/cleanup.sh
-# or, if you applied the app-of-apps against your own Argo CD:
-./15-mlops-gitops-and-pipelines/<gke|eks|aks>/cleanup.sh   # prints the delete commands — review, then run
 ```
+Or, if you applied the app-of-apps against your own Argo CD, review then run (this prints rather
+than runs the delete, consistent with this course's rule that a chapter never mutates your live
+Argo CD's own install — only the `Application`/`AppProject` objects it created; Argo CD's cascade
+finalizer removes everything a synced child manages too):
+```bash
+kubectl delete -f 15-mlops-gitops-and-pipelines/eks/root-app.yaml
+kubectl delete -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
+```
+(check `kubectl get application -n argocd -l app.kubernetes.io/part-of=ai-platform` first if you
+want to delete children individually instead of cascading.)
 
 - Argo Workflows and MLflow controllers/servers are small (a few hundred MB RAM each); the real
   cost is whatever child Applications you sync (Kueue/kube-prometheus-stack/KServe/vLLM node
   pools — see those chapters' own cost notes).
-- MLflow's object-storage artifact root (GCS/S3/Azure Blob buckets referenced in
-  `values-mlflow-{gke,eks,aks}.yaml`) is **not created by any script in this chapter** — create
-  and delete it yourself; it will happily keep every artifact you ever log until you do.
+- MLflow's object-storage artifact root (an S3 bucket referenced in `values-mlflow-eks.yaml`) is
+  **not created by any script in this chapter** — create and delete it yourself; it will happily
+  keep every artifact you ever log until you do.
 - This chapter never runs `argocd app delete` or touches your live Argo CD's own Helm release —
   only the `Application`/`AppProject` objects it created.
 
@@ -384,13 +369,12 @@ purely because it was a file in the directory the root Application's `source.pat
 3. `app-kueue.yaml` has two entries under `spec.sources`. What does each one contribute, and
    what CLI command would this replace if you weren't using Argo CD?
 4. A commit adds a `ClusterRoleBinding` granting `cluster-admin` inside
-   `14-multi-tenancy-and-security/gke`. What stops that from being synced, assuming
+   `14-multi-tenancy-and-security/eks`. What stops that from being synced, assuming
    `clusterResourceWhitelist` wasn't updated to allow it?
 5. Why is `app-kserve-crd.yaml` sync-wave `0` and `app-kserve.yaml` sync-wave `1`, and what
    would go wrong if they were both wave `0`?
 6. Name the three things MLflow's chart configures separately (backend store, artifact root,
-   registry) and which of the three chapter `05`'s object-storage/Workload-Identity pattern
-   directly reuses.
+   registry) and which of the three chapter `05`'s object-storage/IRSA pattern directly reuses.
 7. The `train-and-register` WorkflowTemplate's training step is a plain container, not a
    `TrainJob`. What would you change to run it as a real distributed training job through
    chapter `07`, and why would you still want Kueue in that path?
@@ -416,8 +400,10 @@ purely because it was a file in the directory the root Application's `source.pat
 3. Source 1 (`repoURL: oci://registry.k8s.io/kueue/charts/kueue`) is the upstream Helm chart
    itself, pinned to `KUEUE_VERSION`. Source 2 (this git repo, `ref: values`) supplies just the
    values file chapter `06` already wrote, referenced as `$values/06-batch-jobs-and-kueue/
-   common/values-kueue.yaml`. Together they replace `06-batch-jobs-and-kueue/gke/
-   install-kueue.sh`'s `helm upgrade --install ... -f values-kueue.yaml` command.
+   common/values-kueue.yaml`. Together they replace chapter `06`'s own
+   `helm install kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}"
+   -f common/values-kueue.yaml --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/
+   capacityType=ON_DEMAND'` command (its `eks/install-kueue.sh`).
 4. The `ai-platform` AppProject's `clusterResourceWhitelist` doesn't include
    `rbac.authorization.k8s.io`/`ClusterRoleBinding` with unrestricted names — Argo CD refuses to
    sync any resource of a kind/group not on that list for the Application's project, independent
@@ -428,11 +414,10 @@ purely because it was a file in the directory the root Application's `source.pat
    were wave `0`, Argo CD could sync them concurrently and the controller's install could fail
    or race against CRDs that aren't registered with the API server yet.
 6. Backend store (experiment/run metadata — SQLite or a managed database), artifact root (the
-   actual files — local disk or cloud object storage), and model registry (versioned pointers
-   on top of logged artifacts, stored in the backend store). Chapter `05`'s Workload
-   Identity/IRSA/Azure Workload Identity pattern is what this chapter's `artifactRoot.{gcs,s3,
-   azureBlob}` config reuses for the artifact store specifically — the backend store and
-   registry don't need cloud object-storage credentials at all.
+   actual files — local disk or object storage), and model registry (versioned pointers on top
+   of logged artifacts, stored in the backend store). Chapter `05`'s IRSA pattern is what this
+   chapter's `artifactRoot.s3` config reuses for the artifact store specifically — the backend
+   store and registry don't need AWS credentials at all.
 7. Replace the `train-step` container with a step that applies/creates a `TrainJob` (chapter
    `07`'s CRD) and polls its status (e.g. via `kubectl` in the step container, or Argo's
    `resource` template type) instead of running Python inline. You'd still want it to carry a

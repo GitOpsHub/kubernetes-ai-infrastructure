@@ -111,32 +111,26 @@ source env.sh && source versions.env
 
 ### Step 1: Install KServe
 
-What you're about to do: install the KServe CRDs + controller via Helm, pinned to
-`${KSERVE_VERSION}`, in RawDeployment mode.
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-./11-kserve/gke/install-kserve.sh
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
+What you're about to do: install the KServe CRDs + controller via the official OCI Helm charts,
+pinned to `${KSERVE_VERSION}`, in Standard (RawDeployment-capable) mode — plain Kubernetes
+Deployments/Services, no Knative or Istio dependency. `LLMInferenceService`'s router still needs
+Gateway API CRDs + an implementation (see chapter 12) for the route/gateway objects to actually
+come up — install those first if you're doing the generative lab.
 
 ```bash
-./11-kserve/eks/install-kserve.sh
-```
-</details>
+helm upgrade --install kserve-crd oci://ghcr.io/kserve/charts/kserve-crd \
+  --version "${KSERVE_VERSION}" \
+  --namespace kserve --create-namespace \
+  --wait
 
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-./11-kserve/aks/install-kserve.sh
+helm upgrade --install kserve oci://ghcr.io/kserve/charts/kserve-resources \
+  --version "${KSERVE_VERSION}" \
+  --namespace kserve \
+  --set kserve.controller.deploymentMode=Standard \
+  --wait --timeout 10m
 ```
-</details>
+`# VERIFY`: chart names/flags against `helm show values oci://ghcr.io/kserve/charts/kserve-resources
+--version ${KSERVE_VERSION}` for your exact pinned version before relying on this in a real setup.
 
 ```bash
 kubectl -n kserve get pods
@@ -151,40 +145,12 @@ Expected: `inferenceservices.serving.kserve.io`, `llminferenceservices.serving.k
 What you're about to do: apply the namespace + sklearn/xgboost `InferenceService`s and hit the V2
 inference API once they're ready.
 
-<details>
-<summary><b>GKE</b></summary>
-
 ```bash
-kubectl apply -k 11-kserve/gke   # namespace + sklearn + xgboost InferenceServices
+kubectl apply -k 11-kserve/eks   # namespace + sklearn + xgboost InferenceServices
 ```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
-```bash
-kubectl apply -k 11-kserve/eks
-```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl apply -k 11-kserve/aks
-```
-</details>
-
-<details>
-<summary><b>No cloud overlay needed: cpu-lab (any cluster)</b></summary>
-
-```bash
-kubectl apply -k 11-kserve/cpu-lab
-```
-
-Identical to the cloud overlays for this step — `cpu-lab/` is `common` + `common/predictive` with
-no cloud-specific patches, since predictive models here need no GPU/spot nodeSelector at all.
-</details>
+No GPU/cloud cluster yet? `kubectl apply -k 11-kserve/cpu-lab` is identical for this step —
+`cpu-lab/` is `common` + `common/predictive` with no cloud-specific patches, since predictive
+models here need no GPU/spot nodeSelector at all.
 
 ```bash
 kubectl -n ch11-kserve get inferenceservice
@@ -206,32 +172,12 @@ array, not an HTTP error.
 
 ### Step 3: Generative model (GPU, needs a spot GPU node pool — see chapter 01/09)
 
-What you're about to do: layer the `generative` component on top of your cloud overlay to deploy
+What you're about to do: layer the `generative` component on top of the EKS overlay to deploy
 the GPU `LLMInferenceService`.
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-kubectl apply -k 11-kserve/gke/generative
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
 
 ```bash
 kubectl apply -k 11-kserve/eks/generative
 ```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl apply -k 11-kserve/aks/generative
-```
-</details>
 
 ```bash
 kubectl -n ch11-kserve get llminferenceservice
@@ -271,8 +217,8 @@ spec:
 ## 5. Spot considerations
 
 - **The `LLMInferenceService` pod requests `nvidia.com/gpu: 1` like every other GPU workload in this
-  course** — same taint/toleration/spot-nodeSelector story as chapter 09, applied per cloud in
-  `<cloud>/generative/patch-spot.yaml`.
+  course** — same taint/toleration/spot-nodeSelector story as chapter 09, applied in
+  `eks/generative/patch-spot.yaml`.
 - **RawDeployment's plain Deployment has no built-in PDB.** Add one (see `09-llm-inference-with-vllm/common/pdb.yaml`
   for the pattern) if you run more than one replica and want voluntary-disruption protection.
 - **Cold start applies here too** — an `LLMInferenceService` pod pays the same weight-download +
@@ -292,12 +238,18 @@ spec:
 
 ## 7. Cleanup and cost notes
 
+What you're about to do: remove the chapter's workloads (and, optionally, the KServe controller
+itself).
+
 ```bash
-./11-kserve/gke/cleanup.sh            # GKE — UNINSTALL_KSERVE=true also removes the controller/CRDs cluster-wide
-./11-kserve/eks/cleanup.sh            # EKS
-./11-kserve/aks/cleanup.sh            # AKS
+kubectl delete -k 11-kserve/eks --ignore-not-found
+kubectl delete -k 11-kserve/eks/generative --ignore-not-found
 kubectl delete -k 11-kserve/common/canary --ignore-not-found
 kubectl delete -k 11-kserve/cpu-lab --ignore-not-found
+if [[ "${UNINSTALL_KSERVE:-false}" == "true" ]]; then
+  helm -n kserve uninstall kserve || true
+  helm -n kserve uninstall kserve-crd || true
+fi
 ```
 - The CPU predictive models are cheap (1 CPU / 2Gi each) — leave them running is fine between
   sessions if you're not GPU-constrained.

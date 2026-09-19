@@ -8,11 +8,11 @@
 
 This chapter assumes:
 
-- **A GPU node pool that can scale to 2 nodes at once** from
-  [01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling) — run its `create-gpu-nodepool.sh`
-  (GKE) / `create-gpu-nodegroup.sh` (EKS) / `create-gpu-nodepool.sh` (AKS) with `MAX_NODES=2` (the
-  multi-node LWS section in 4.5 needs both nodes up simultaneously; single-node section 4.4 only
-  needs 1).
+- **A GPU node group that can scale to 2 nodes at once** from
+  [01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling) — scale the `spot-gpu` nodegroup
+  created there with `eksctl scale nodegroup ... --nodes 2 --nodes-min 0 --nodes-max 2` (step 2
+  below shows the exact command; the multi-node LWS section in 4.6 needs both nodes up
+  simultaneously, single-node section 4.3-4.5 only needs 1).
 - **Chapter 09's vLLM base** ([09-llm-inference-with-vllm](../09-llm-inference-with-vllm)) — this
   chapter's `vllm-pool` imports `09-llm-inference-with-vllm/common` wholesale via kustomize rather
   than re-defining the Deployment/Service/PDB; read 09 first if you haven't, especially its
@@ -57,7 +57,8 @@ By the end you can:
 3. Stand up the InferencePool + EPP and verify inference-aware routing is actually happening.
 4. Explain LeaderWorkerSet's group model (`size`, leader/worker templates, `LWS_LEADER_ADDRESS`)
    and deploy a 2-node tensor-parallel vLLM replica.
-5. Compare each cloud's Gateway implementation options and know what changed across GKE/EKS/AKS.
+5. Explain why NGINX Gateway Fabric is used here instead of a cloud-native Gateway implementation,
+   and what you'd verify before swapping in AWS's own Gateway API path.
 6. Place this chapter's pieces (Gateway, InferencePool, LWS, llm-d) into the broader "serving
    stack" picture.
 
@@ -85,8 +86,8 @@ flowchart LR
   GW -->|proxied request| P1
 ```
 
-- **GatewayClass**: cluster-scoped, provided by an implementation (GKE, NGINX Gateway Fabric,
-  Istio...). You don't create it.
+- **GatewayClass**: cluster-scoped, provided by an implementation (NGINX Gateway Fabric, Istio,
+  a cloud-native controller...). You don't create it.
 - **Gateway**: the listener (port 80/443) you *do* create, referencing a GatewayClass.
 - **HTTPRoute**: path/header matching rules, with a `backendRef`. Normally that's a `Service`;
   here it's an `InferencePool`.
@@ -162,90 +163,47 @@ kubectl get crd inferencepools.inference.networking.k8s.io gateways.gateway.netw
 kubectl -n lws-system get deploy lws-controller-manager   # AVAILABLE 1/1
 ```
 
-### Step 2: Create the GPU node pool and install your cloud's Gateway controller
+### Step 2: Scale the GPU node group to 2 and install the Gateway controller
 
-What you're about to do: bring up (or resize) the spot GPU node pool from chapter 01 to
-`MAX_NODES=2`, then install the Gateway implementation for your cloud (GKE's is built in and just
-needs enabling; EKS/AKS install NGINX Gateway Fabric with GAIE support turned on).
-
-<details>
-<summary><b>GKE</b></summary>
+What you're about to do: scale the `spot-gpu` nodegroup from chapter 01 up to 2 nodes (this
+chapter's multi-node LWS section needs both simultaneously), then install NGINX Gateway Fabric
+with the Gateway API Inference Extension feature turned on.
 
 ```bash
-MAX_NODES=2 ./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh
-./12-inference-gateway-and-multinode-serving/gke/create-gateway.sh
+eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name spot-gpu \
+  --nodes 2 --nodes-min 0 --nodes-max 2
+kubectl get nodes -l eks.amazonaws.com/nodegroup=spot-gpu
+
+NGF_VERSION="${NGF_VERSION:-2.7.0}"   # VERIFY against https://github.com/nginx/nginx-gateway-fabric/releases
+helm upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+  --version "$NGF_VERSION" \
+  --namespace nginx-gateway --create-namespace \
+  --set nginxGateway.gwAPIInferenceExtension.enable=true \
+  --wait --timeout 5m
+kubectl get gatewayclass nginx
 ```
-**Expected output**: `create-gateway.sh` prints `GatewayClasses available on this cluster:`
-followed by a table that includes `gke-l7-regional-external-managed`.
-
-**How to tell this worked**: `kubectl get gatewayclass gke-l7-regional-external-managed` shows
-`ACCEPTED=True`.
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
-```bash
-MAX_NODES=2 ./01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh
-./12-inference-gateway-and-multinode-serving/eks/install-nginx-gateway-fabric.sh
-```
-**Expected output**: `NGINX Gateway Fabric 2.7.0 installed (GatewayClass: nginx)`.
+**Expected output**: two `Ready` nodes in the `spot-gpu` nodegroup; `NGINX Gateway Fabric 2.7.0`
+installed with `GatewayClass: nginx`.
 
 **How to tell this worked**: `kubectl get gatewayclass nginx` shows `ACCEPTED=True`.
-</details>
 
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-MAX_NODES=2 ./01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh
-./12-inference-gateway-and-multinode-serving/aks/install-nginx-gateway-fabric.sh
-```
-**Expected output**: `NGINX Gateway Fabric 2.7.0 installed (GatewayClass: nginx)`.
-
-**How to tell this worked**: `kubectl get gatewayclass nginx` shows `ACCEPTED=True`.
-</details>
-
-Neither AWS nor Azure has a first-party Gateway implementation with **confirmed** Inference
-Extension conformance at the time this was written (AWS's Gateway API GA support for ALB/VPC
-Lattice and Azure's Application Gateway for Containers ALB Controller are both real Gateway API
-implementations, just not verified against GAIE here — `# VERIFY` before swapping either in for
-NGINX Gateway Fabric). NGINX Gateway Fabric is upstream-listed as a conformant Inference Extension
-implementation and installs identically on both clouds behind a `LoadBalancer` Service.
+AWS's own Gateway API paths (ALB Controller's Gateway API GA support, or the VPC Lattice
+controller) are real Gateway API implementations but their Inference Extension (GAIE) conformance
+wasn't verified for this chapter — `# VERIFY` before swapping either in for NGINX Gateway Fabric.
+NGINX Gateway Fabric is upstream-listed as a conformant Inference Extension implementation and
+installs the same way on every cloud, behind a `LoadBalancer` Service.
 
 ### Step 3: Create the HF secret and deploy the chapter's manifests
 
 What you're about to do: create the Hugging Face token Secret vLLM needs to pull
-`Qwen/Qwen3-0.6B`, then apply this chapter's `kubectl kustomize`-rendered manifests for your cloud
-(Gateway, HTTPRoute, InferencePool/EPP, the single-node vLLM pool imported from chapter 09, and
-the multi-node LWS group).
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
-kubectl apply -k 12-inference-gateway-and-multinode-serving/gke
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
+`Qwen/Qwen3-0.6B`, then apply this chapter's `kubectl kustomize`-rendered EKS manifests (Gateway,
+HTTPRoute, InferencePool/EPP, the single-node vLLM pool imported from chapter 09, and the
+multi-node LWS group).
 
 ```bash
 ./09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
 kubectl apply -k 12-inference-gateway-and-multinode-serving/eks
 ```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch12-gateway
-kubectl apply -k 12-inference-gateway-and-multinode-serving/aks
-```
-</details>
 
 **Expected output**: a long list of `namespace/ch12-gateway created`, `gateway.gateway.networking.k8s.io/inference-gateway created`,
 `inferencepool.inference.networking.k8s.io/vllm-pool created`, `deployment.apps/vllm-epp created`,
@@ -389,14 +347,15 @@ to reason about.
   reserve spot for the stateless single-node `vllm-pool` tier instead; chapter 13 covers
   spot-diversification strategies that reduce simultaneous reclaim risk if you do run LWS on spot.
 
-## 6. Per-cloud Gateway implementation notes
+## 6. Gateway implementation notes
 
-| | GKE | EKS | AKS |
-|---|---|---|---|
-| GatewayClass used here | `gke-l7-regional-external-managed` | `nginx` (NGINX Gateway Fabric) | `nginx` (NGINX Gateway Fabric) |
-| Native alternative | GKE Inference Gateway (managed EPP) | AWS LB Controller Gateway API GA / VPC Lattice controller — `# VERIFY` GAIE conformance | Application Gateway for Containers ALB Controller (`azure-alb-external`) — `# VERIFY` GAIE conformance |
-| Install | built in, `gcloud container clusters update --gateway-api=standard` | Helm (`ngf` chart) | Helm (`ngf` chart) |
-| LB type provisioned | Regional external L7 (Google Cloud Load Balancer) | Service `type: LoadBalancer` (cloud LB via CCM) | Service `type: LoadBalancer` (Azure LB) |
+This chapter installs NGINX Gateway Fabric (Helm chart, `GatewayClass: nginx`) rather than a
+cloud-native Gateway. On EKS, the native alternatives are the AWS Load Balancer Controller's
+Gateway API GA support and the VPC Lattice controller — both are real Gateway API
+implementations, but their Gateway API Inference Extension (GAIE) conformance wasn't verified for
+this chapter (`# VERIFY` before swapping either in). NGINX Gateway Fabric is upstream-listed as a
+conformant Inference Extension implementation and provisions a Service `type: LoadBalancer` (an
+AWS ELB/NLB via the cloud controller manager).
 
 ## 7. Troubleshooting
 
@@ -408,19 +367,22 @@ to reason about.
 | Requests succeed but always hit the same Pod | Only 1 replica of `vllm-pool` running, or EPP can't scrape `/metrics` (RBAC/NetworkPolicy) | Scale `vllm` to 2 replicas (needs a 2nd GPU); check EPP logs for scrape errors |
 | LWS leader Pod stuck in `Running` but not Ready | Waiting for the worker to join Ray — worker `Pending` (no 2nd GPU node) | `kubectl get pods -o wide`; confirm your GPU pool has `MAX_NODES=2` and 2 nodes actually scaled up |
 | LWS group restarts in a loop | One Pod crash-looping drags the whole group down (`RecreateGroupOnPodRestart`) | Check the crashing Pod's logs first — usually an HF auth/model-name error, not an LWS problem |
-| `503`/connection refused calling the Gateway | LB still provisioning (GKE regional LBs take a few minutes), or `allowedRoutes.namespaces` mismatch | Wait 2-5 min; confirm HTTPRoute's namespace matches the Gateway's `allowedRoutes` |
+| `503`/connection refused calling the Gateway | LB still provisioning (AWS ELB/NLB takes a few minutes), or `allowedRoutes.namespaces` mismatch | Wait 2-5 min; confirm HTTPRoute's namespace matches the Gateway's `allowedRoutes` |
 
 ## 8. Cleanup and cost notes
 
+What you're about to do: remove the chapter's workloads. Deleting the `Gateway` deletes the
+Service NGF created for the listener; if that Service is `type: LoadBalancer`, confirm in the AWS
+console that the ELB/NLB is actually gone — a dangling ELB bills hourly even when idle. The
+`spot-gpu` node group is shared with chapter 01 and scales to 0 on its own.
+
 ```bash
-gke/cleanup.sh   # or eks/ or aks/
+kubectl delete -k 12-inference-gateway-and-multinode-serving/eks --ignore-not-found
 ```
 
-Deleting the `Gateway` deletes the cloud load balancer it provisioned — **verify in the cloud
-console** (GCP forwarding rules / AWS ELB / Azure Load Balancer) that it's actually gone; a
-dangling regional LB bills hourly even when idle. The 2-node GPU pool from section 4 is the
-expensive part of this chapter (2x spot GPU nodes) — scale it back to `MAX_NODES=1` or delete it
-if you're not immediately doing chapter 13.
+The 2-node GPU pool from section 4 is the expensive part of this chapter (2x spot GPU nodes) —
+scale it back down (`eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION"
+--name spot-gpu --nodes 0 --nodes-min 0`) if you're not immediately doing chapter 13.
 
 ## 9. Checkpoint questions
 
@@ -474,12 +436,15 @@ losing one stateless single-GPU replica.
 </details>
 
 <details>
-<summary>7. What's the practical difference between GKE's built-in Inference Gateway and the self-hosted EPP path used in this lab?</summary>
+<summary>7. Why does this chapter install NGINX Gateway Fabric instead of AWS's own Gateway API path, and what would you need to verify before switching?</summary>
 
-Functionally the same InferencePool/EPP mechanism; GKE's managed path runs and upgrades the EPP
-for you as part of the `gke-l7-*` GatewayClass machinery (no `epp-deployment.yaml` to maintain),
-while the self-hosted path (used here for cross-cloud portability) means you own the EPP
-Deployment, RBAC, and version upgrades yourself.
+Some clouds ship a managed Gateway implementation with GAIE conformance built in (so you don't
+maintain the EPP Deployment/RBAC yourself); AWS's Gateway API options (ALB Controller, VPC
+Lattice) are real Gateway API implementations, but their Inference Extension conformance wasn't
+verified for this chapter, so it uses NGINX Gateway Fabric — upstream-listed as conformant — and
+you own the EPP Deployment, RBAC, and version upgrades yourself. Before switching to a native AWS
+path you'd verify GAIE conformance against the current release, confirm `InferencePool` support,
+and re-test the EPP routing behavior end to end (section 5).
 </details>
 
 <details>
@@ -507,7 +472,6 @@ isn't enough, not a replacement for learning the primitives first.
 - [InferencePool API reference](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/)
 - [LeaderWorkerSet docs](https://lws.sigs.k8s.io/)
 - [vLLM: Deploying with LWS](https://docs.vllm.ai/en/stable/deployment/frameworks/lws/)
-- [GKE Inference Gateway](https://cloud.google.com/kubernetes-engine/docs/how-to/deploy-gke-inference-gateway)
 - [NGINX Gateway Fabric + Inference Extension](https://docs.nginx.com/nginx-gateway-fabric/how-to/gateway-api-inference-extension/)
 - [llm-d](https://llm-d.ai/)
 - Cross-links: [09-llm-inference-with-vllm](../09-llm-inference-with-vllm) (single-node base),
@@ -520,4 +484,4 @@ isn't enough, not a replacement for learning the primitives first.
 
 From `versions.env`: `GATEWAY_API_VERSION=v1.6.2`, `GAIE_VERSION=v1.6.1`, `LWS_VERSION=v0.10.0`,
 `VLLM_VERSION=v0.29.0`. Not in `versions.env` (pinned in this chapter's scripts, report to the
-lead for consolidation): `NGF_VERSION=2.7.0` (NGINX Gateway Fabric, `eks/aks` overlays).
+lead for consolidation): `NGF_VERSION=2.7.0` (NGINX Gateway Fabric).

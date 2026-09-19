@@ -122,38 +122,41 @@ kube-prometheus-stack installed (namespace `monitoring`).
 ### Step 1: Install prometheus-adapter and KEDA, wire the ServiceMonitor
 
 What you're about to do: install prometheus-adapter (exposes vLLM's queue-depth metric as a
-`custom.metrics.k8s.io` series) and KEDA (queries Prometheus directly), then apply the
+`custom.metrics.k8s.io` series, feeding the HPA in `common/hpa`) and KEDA (queries Prometheus
+directly, feeding the `ScaledObject` in `common/keda`) — prereq: chapter `04`'s
+kube-prometheus-stack already running in-cluster (namespace `monitoring`) — then apply the
 `ServiceMonitor` that tells Prometheus to scrape vLLM's `/metrics`.
 
-<details>
-<summary><b>GKE</b></summary>
-
 ```bash
-./10-autoscaling-inference/gke/install-prometheus-adapter.sh
-./10-autoscaling-inference/gke/install-keda.sh
-kubectl apply -k 10-autoscaling-inference/gke   # ServiceMonitor only
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update
+helm repo update prometheus-community
+
+helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
+  --namespace monitoring --create-namespace \
+  --version "${PROMETHEUS_ADAPTER_VERSION}" \
+  -f 10-autoscaling-inference/common/values-prometheus-adapter.yaml \
+  --wait --timeout 5m
+
+kubectl get apiservice v1beta1.custom.metrics.k8s.io
 ```
-</details>
 
-<details>
-<summary><b>EKS</b></summary>
-
+KEDA talks to Prometheus over HTTP directly, so it needs no cloud-specific values:
 ```bash
-./10-autoscaling-inference/eks/install-prometheus-adapter.sh
-./10-autoscaling-inference/eks/install-keda.sh
-kubectl apply -k 10-autoscaling-inference/eks   # ServiceMonitor only
+helm repo add kedacore https://kedacore.github.io/charts --force-update
+helm repo update kedacore
+
+helm upgrade --install keda kedacore/keda \
+  --namespace keda --create-namespace \
+  --version "${KEDA_VERSION}" \
+  --wait --timeout 5m
+
+kubectl -n keda get pods
 ```
-</details>
 
-<details>
-<summary><b>AKS</b></summary>
-
+Apply the `ServiceMonitor` (this overlay's only resource):
 ```bash
-./10-autoscaling-inference/aks/install-prometheus-adapter.sh
-./10-autoscaling-inference/aks/install-keda.sh
-kubectl apply -k 10-autoscaling-inference/aks   # ServiceMonitor only
+kubectl apply -k 10-autoscaling-inference/eks
 ```
-</details>
 
 Verify:
 ```bash
@@ -230,35 +233,38 @@ and the manifest's comments.
 | `kubectl get hpa` shows `<unknown>/5` for TARGET | prometheus-adapter isn't serving the metric yet, or no vLLM traffic has happened so the series doesn't exist | `kubectl get --raw '/apis/custom.metrics.k8s.io/v1beta1/...'`; generate at least one request first |
 | `apiservice v1beta1.custom.metrics.k8s.io` not Available | prometheus-adapter pod not Ready, or wrong `prometheus.url` in values | `kubectl -n monitoring logs deploy/prometheus-adapter`; confirm `kube-prometheus-stack-prometheus` Service name/namespace |
 | KEDA `ScaledObject` stuck, no HPA created | KEDA operator not installed/Ready, or `scaleTargetRef.name` typo | `kubectl -n keda get pods`; `kubectl describe scaledobject vllm -n ch09-vllm` |
-| Scaled-up replica sits `Pending` | Node pool at its max, or spot capacity unavailable in zone | Check `kubectl describe pod`; raise node pool `max-nodes` or fall back to on-demand (chapter 09/01 `ON_DEMAND=true`) |
+| Scaled-up replica sits `Pending` | Node pool at its max, or spot capacity unavailable in zone | Check `kubectl describe pod`; raise the nodegroup's `--nodes-max`, or scale up the on-demand fallback nodegroup from chapter `01` §4 (`INCLUDE=ondemand-gpu`) |
 | Deployment never scales to 0 | Traffic never actually stops (health checks, benchmark job still running), or `activationThreshold` too low | `kubectl -n ch09-vllm top pod`; confirm no leftover load Job |
 | `cpu` trigger in cpu-lab never fires | Ollama pod's `resources.requests.cpu` not set, or load Job undersized | Check `patch-ollama-resources.yaml` applied; scale up `load-job.yaml` iteration count |
 | Everything scales, but requests still time out during scale-up | Expected under a hard load spike — the cold-start budget (3.3) is real time, not a bug | Consider `minReplicaCount: 1` for latency-sensitive traffic |
 
 ## 7. Cleanup and cost notes
 
-Each cloud folder ships a `cleanup.sh` that does the cloud-lab part of the manual commands below in a
-re-runnable way (deletes the ScaledObject/HPA/load generator/ServiceMonitor with `--ignore-not-found`,
-then uninstalls prometheus-adapter and KEDA only if those releases exist). It leaves chapter 09's vLLM
-Deployment and chapter 04's kube-prometheus-stack alone:
-
-```bash
-./10-autoscaling-inference/gke/cleanup.sh   # or eks/ / aks/
-```
-
-The equivalent manual commands (delete the `ScaledObject` **before** uninstalling KEDA — KEDA puts a
-finalizer on it, and with the operator gone the object sits in `Terminating`):
+What you're about to do: remove this chapter's autoscaling objects and the prometheus-adapter/KEDA
+releases. Leaves chapter 09's vLLM Deployment and chapter 04's kube-prometheus-stack in place —
+they belong to those chapters. Delete the `ScaledObject` **before** uninstalling KEDA — KEDA puts a
+finalizer on it, and with the operator gone the object sits in `Terminating`:
 
 ```bash
 kubectl delete -k 10-autoscaling-inference/common/keda --ignore-not-found
 kubectl delete -k 10-autoscaling-inference/common/hpa --ignore-not-found
 kubectl delete -k 10-autoscaling-inference/common/load-generator --ignore-not-found
+kubectl delete -k 10-autoscaling-inference/eks --ignore-not-found   # ServiceMonitor
 # cpu-lab only — NOTE: this overlay includes 09's cpu-lab as a base, so it also deletes the Ollama
 # Deployment from chapter 09's cpu-lab. Re-apply 09-llm-inference-with-vllm/cpu-lab if you still need it.
 kubectl delete -k 10-autoscaling-inference/cpu-lab --ignore-not-found
-helm -n monitoring uninstall prometheus-adapter
-helm -n keda uninstall keda
+
+# Uninstall the Helm releases only if they're present (another chapter may already have removed them):
+if helm status prometheus-adapter -n monitoring > /dev/null 2>&1; then
+  helm uninstall prometheus-adapter -n monitoring
+fi
+if helm status keda -n keda > /dev/null 2>&1; then
+  helm uninstall keda -n keda
+fi
+kubectl delete namespace keda --ignore-not-found
 ```
+EKS does not scale the GPU nodegroup to 0 by itself — if no other chapter needs it, scale it down
+too (chapter `01` §4: `eksctl scale nodegroup ... --nodes 0`).
 - If KEDA had scaled vLLM to 0 when you deleted the `ScaledObject`, the Deployment stays at 0 —
   `kubectl -n ch09-vllm scale deploy vllm --replicas=1` to bring it back for later chapters.
 - prometheus-adapter and KEDA themselves are cheap (small CPU-only pods); the cost driver is however
@@ -349,7 +355,7 @@ before applying the other to keep the scaling decision unambiguous.
 - [prometheus-adapter](https://github.com/kubernetes-sigs/prometheus-adapter), [Helm chart](https://github.com/prometheus-community/helm-charts/tree/main/charts/prometheus-adapter)
 - KEDA: [prometheus scaler](https://keda.sh/docs/2.20/scalers/prometheus/), [cpu scaler](https://keda.sh/docs/2.20/scalers/cpu/), [ScaledObject spec](https://keda.sh/docs/2.20/concepts/scaling-deployments/)
 - vLLM: [Production Metrics](https://docs.vllm.ai/en/latest/usage/metrics.html)
-- Managed Prometheus per cloud (metrics source alternative to in-cluster kube-prometheus-stack — not wired into this chapter's lab, see `common/values-prometheus-adapter.yaml` comment): [Google Managed Prometheus](https://cloud.google.com/stackdriver/docs/managed-prometheus), [Amazon Managed Service for Prometheus](https://docs.aws.amazon.com/prometheus/latest/userguide/what-is-Amazon-Managed-Service-Prometheus.html), [Azure Monitor managed service for Prometheus](https://learn.microsoft.com/azure/azure-monitor/essentials/prometheus-metrics-overview)
+- [Amazon Managed Service for Prometheus](https://docs.aws.amazon.com/prometheus/latest/userguide/what-is-Amazon-Managed-Service-Prometheus.html) (metrics source alternative to in-cluster kube-prometheus-stack — not wired into this chapter's lab, see `common/values-prometheus-adapter.yaml` comment)
 - Cross-link: `04-gpu-observability` (the Prometheus this chapter scrapes into), `09-llm-inference-with-vllm` (the Deployment being scaled), `12-inference-gateway-and-multinode-serving` (InferencePool-aware routing/autoscaling), `13-node-autoscaling-and-cost` (the node-level loop this chapter's pod-level loop depends on)
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `PROMETHEUS_ADAPTER_VERSION=5.3.0`, `KEDA_VERSION=2.20.2`,

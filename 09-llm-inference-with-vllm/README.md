@@ -7,9 +7,9 @@
 
 This chapter assumes:
 
-- A spot GPU node pool from `01-gpu-nodes-and-scheduling` (`gke/create-gpu-nodepool.sh`,
-  `eks/create-gpu-nodegroup.sh` + `install-device-plugin.sh`, or `aks/create-gpu-nodepool.sh` +
-  `install-device-plugin.sh`) — this chapter reuses that pool, it does not create its own.
+- A spot GPU node pool from `01-gpu-nodes-and-scheduling` §4 (creates the `spot-gpu` managed node
+  group and installs the pinned NVIDIA device plugin) — this chapter reuses that pool, it does not
+  create its own.
 - The NVIDIA GPU Operator or device plugin from `01`/`02` already installed on that pool.
 - `env.sh` and `versions.env` sourced.
 - No GPU? Skip straight to Step 5 (`cpu-lab/` with Ollama) — it needs only the base cluster from
@@ -22,8 +22,8 @@ GPU's memory in one allocation (the KV cache), dies ungracefully if you send SIG
 period, and its "ready" signal has nothing to do with the container starting. Get the probes or the
 memory math wrong and you get flapping pods, OOM-killed inference, or silent request drops during a
 spot reclaim. This chapter builds one correct single-GPU deployment first, then scales it out
-(tensor parallel) and stress-tests it (benchmark job), on GKE, EKS and AKS — plus a CPU-only Ollama
-lab so you can learn the request/response shape before you have GPU quota.
+(tensor parallel) and stress-tests it (benchmark job), on EKS — plus a CPU-only Ollama lab so you
+can learn the request/response shape before you have GPU quota.
 
 ## 2. Learning objectives and time plan (~3 h)
 
@@ -84,7 +84,7 @@ flowchart LR
 | `startupProbe` | `/health`, `failureThreshold: 60` × `periodSeconds: 10` = 10 min | Weight download (if not cached) + CUDA graph capture + KV cache allocation can take minutes; **liveness/readiness are suppressed until this passes**, so a slow-but-healthy boot is never killed |
 | `readinessProbe` | `/health`, short interval | Once `/health` returns 200 the engine is serving; a `terminationGracePeriodSeconds`-aware `preStop` sleep gives load balancers time to stop routing before SIGTERM |
 | `livenessProbe` | `/health`, longer `failureThreshold` | A genuinely hung engine (CUDA error, deadlocked scheduler) needs a restart — but do not make this trigger-happy, a busy batch can be slow to answer |
-| `terminationGracePeriodSeconds: 25` + `--shutdown-timeout=10` | Grace period budget | Must be **≤ your cloud's spot notice window** (GKE ~15s hard on regular pods, AKS ~30s, EC2 ~2 min) so vLLM's own graceful drain (`--shutdown-timeout`) finishes inside the grace period, not after the kubelet SIGKILLs it |
+| `terminationGracePeriodSeconds: 25` + `--shutdown-timeout=10` | Grace period budget | Must be **≤ EC2's spot notice window (~2 min)** so vLLM's own graceful drain (`--shutdown-timeout`) finishes inside the grace period, not after the kubelet SIGKILLs it |
 
 ### 3.3 Tensor parallelism
 
@@ -102,9 +102,9 @@ cp env.sh.example env.sh   # if not already done
 source env.sh && source versions.env
 ```
 
-Prerequisite: a spot GPU node pool from `01-gpu-nodes-and-scheduling` (`gke/create-gpu-nodepool.sh`,
-`eks/create-gpu-nodegroup.sh` + `install-device-plugin.sh`, or `aks/create-gpu-nodepool.sh` +
-`install-device-plugin.sh`). This chapter reuses that pool/nodegroup — it does not create its own.
+Prerequisite: a spot GPU node pool from `01-gpu-nodes-and-scheduling` §4 (the `spot-gpu` managed
+node group + the pinned NVIDIA device plugin). This chapter reuses that nodegroup — it does not
+create its own.
 
 ### Step 1: What's in `common/`
 
@@ -123,36 +123,25 @@ Prerequisite: a spot GPU node pool from `01-gpu-nodes-and-scheduling` (`gke/crea
 
 ### Step 2: Deploy (pick your cloud)
 
-What you're about to do: create an optional HF token Secret (avoids anonymous rate limits), then
-apply the cloud overlay and watch the pod come up.
+What you're about to do: create an optional HF token Secret (`Qwen/Qwen3-0.6B` is ungated so this
+is optional for the base lab, but it's required once you swap in a gated model, and it silences
+anonymous-download rate limits either way), then apply the `eks` overlay (1x L4/T4 spot node,
+reusing the `spot-gpu` managed node group from chapter `01` — `nvidia.com/gpu.present=true` is set
+at boot by `nodeadm` on the EKS AL2023 NVIDIA AMI) and watch the pod come up.
 
 ```bash
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch09-vllm   # optional but recommended
+NAMESPACE=ch09-vllm
+: "${HF_TOKEN:?export HF_TOKEN=hf_xxx, or skip — optional for the ungated Qwen3-0.6B}"
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic hf-token \
+  --namespace "$NAMESPACE" \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-kubectl apply -k 09-llm-inference-with-vllm/gke
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
 
 ```bash
 kubectl apply -k 09-llm-inference-with-vllm/eks
 ```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl apply -k 09-llm-inference-with-vllm/aks
-```
-</details>
 
 ```bash
 kubectl -n ch09-vllm get pods -w
@@ -197,15 +186,14 @@ throughput — this is the latency/throughput tradeoff continuous batching makes
 ### Step 4: Tensor parallelism (needs a 2-GPU node)
 
 The reused single-GPU pool from chapter 01 only has 1 GPU per node. To try tensor-parallel-2 you need
-a node with 2 GPUs (e.g. GKE `g2-standard-24` w/ 2×L4, EKS `g6.12xlarge`, AKS `Standard_NC2s_v3`
-equivalent 2-GPU size) — expensive, so this step is **optional/advanced**. Layer the component on
-top of any overlay:
+a node with 2 GPUs (e.g. `g6.12xlarge`) — expensive, so this step is **optional/advanced**. Layer
+the component on top of the overlay:
 ```yaml
-# e.g. 09-llm-inference-with-vllm/gke/kustomization.yaml, temporarily:
+# 09-llm-inference-with-vllm/eks/kustomization.yaml, temporarily:
 components:
 - ../common/components/tensor-parallel-2
 ```
-then `kubectl kustomize gke` to confirm the patch, point the overlay's node selector at your 2-GPU
+then `kubectl kustomize eks` to confirm the patch, point the overlay's node selector at your 2-GPU
 pool, and apply. Compare `vllm bench serve` throughput at concurrency 64 against the single-GPU run.
 
 ### Step 5: CPU lab (no GPU, any cluster)
@@ -227,7 +215,7 @@ llama.cpp's own KV cache, not vLLM's), tensor parallelism, and GPU memory sizing
 
 By default the HF cache is an `emptyDir` — simple, but a rescheduled pod (spot reclaim!) re-downloads
 weights. `components/model-cache-pvc` swaps it for a `ReadWriteOnce` PVC on the cluster's default
-StorageClass, already wired into every `gke/eks/aks` overlay in this chapter. For a cache **shared**
+StorageClass, already wired into the `eks` overlay in this chapter. For a cache **shared**
 across multiple vLLM replicas or nodes (ReadOnlyMany), reuse `05-model-storage-and-data`'s
 GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that PV in place of `hf-cache`.
 
@@ -237,9 +225,9 @@ GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that PV in 
   (10 min) exists *because* weight download + CUDA graph capture takes minutes — a spot reclaim
   mid-serving means the next pod pays that cost again unless the model cache PVC (or an image with
   baked-in weights) survives the reclaim.
-- **`terminationGracePeriodSeconds: 25` is tuned to the tightest cloud's notice window (GKE ~15s on
-  regular Pods).** If you only run on AKS/EKS you can raise it and `--shutdown-timeout` together for
-  a cleaner drain, but the default here works everywhere.
+- **`terminationGracePeriodSeconds: 25` is conservative relative to EC2's ~2 min spot notice
+  window.** You can raise it and `--shutdown-timeout` together for a cleaner drain if you want more
+  margin for in-flight requests to finish.
 - **`replicas: 1` + `strategy: Recreate` means a preemption is a real outage**, not a rolling
   no-op — there's no second replica to absorb traffic. Chapter `10-autoscaling-inference` covers
   scaling replicas with HPA/KEDA; until then, expect single-replica downtime during reclaims.
@@ -261,16 +249,18 @@ GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that PV in 
 
 ## 7. Cleanup and cost notes
 
+What you're about to do: remove this chapter's workloads. EKS does not autoscale to 0 by itself —
+if no other chapter needs the GPU nodegroup, scale it down too (chapter `01` §4: `eksctl scale
+nodegroup ... --nodes 0`).
+
 ```bash
-./09-llm-inference-with-vllm/gke/cleanup.sh    # GKE
-./09-llm-inference-with-vllm/eks/cleanup.sh    # EKS
-./09-llm-inference-with-vllm/aks/cleanup.sh    # AKS
-kubectl delete -k 09-llm-inference-with-vllm/cpu-lab
+kubectl delete -k 09-llm-inference-with-vllm/eks --ignore-not-found
+kubectl delete -k 09-llm-inference-with-vllm/cpu-lab --ignore-not-found
 ```
 - A single L4/T4 spot GPU running vLLM idle-but-loaded still bills for the whole node — this chapter
   does not scale to zero on its own (see `10-autoscaling-inference` for KEDA scale-to-zero).
-- The GPU node pool/nodegroup is shared with chapter `01` — only delete it (`DELETE_POOL=true`
-  there) if you're done with GPU chapters for this session.
+- The GPU node pool/nodegroup is shared with chapter `01` — only scale it to 0 if you're done with
+  GPU chapters for this session.
 - The `hf-cache` PVC persists after `kubectl delete -k` only if you delete the Deployment/Service but
   not the PVC directly — delete it explicitly to stop paying for the disk: `kubectl -n ch09-vllm
   delete pvc hf-cache`.

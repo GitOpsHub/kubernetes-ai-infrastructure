@@ -3,8 +3,7 @@
 [![validate](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml/badge.svg)](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml)
 
 A hands-on course for DevOps engineers on running AI workloads (GPU scheduling, training, LLM serving,
-autoscaling, cost) on Kubernetes. Every lab has variants for **GKE, EKS and AKS**, and runs on **spot
-capacity** by default.
+autoscaling, cost) on Kubernetes. Every lab targets **EKS**, and runs on **spot capacity** by default.
 
 Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup. Every kustomize
 overlay and shell script in this repo is checked on every PR by
@@ -17,14 +16,14 @@ overlay and shell script in this repo is checked on every PR by
 ## How to use this repo
 
 ```bash
-cp env.sh.example env.sh      # fill in your GCP project / AWS account / Azure subscription
+cp env.sh.example env.sh      # fill in your AWS account/region
 source env.sh && source versions.env
 ```
 
-Each chapter folder has a `README.md` (theory + lab) plus `common/`, `gke/`, `eks/`, `aks/` and, where
-possible, a `cpu-lab/` so you can learn the mechanics before you have GPU quota. The one exception is
-chapter 18, which is Terraform instead of kustomize — see its README for why. Chapter 19 is AWS/EKS-first
-(GKE/AKS overlays at parity for the Kubernetes objects) and also carries Python sources under
+Each chapter folder has a `README.md` (theory + lab, fully copy-pasteable — no separate script files
+to open) plus `common/`, `eks/` and, where possible, a `cpu-lab/` so you can learn the mechanics before
+you have GPU quota. The one exception is chapter 18, whose `eks/` folder is a Terraform module instead
+of a kustomize overlay — see its README for why. Chapter 19 also carries Python sources under
 `common/src/` (built into an image or mounted via ConfigMap).
 
 > **Request GPU quota on day 1** (chapter 00). Spot GPU quota approval can take days, and default quota
@@ -60,7 +59,7 @@ flowchart LR
 
 | # | Chapter | Core question it answers | Days @3h |
 |---|---|---|---|
-| 00 | [Prerequisites & cluster setup](00-prerequisites-and-cluster-setup/) | How do I get a spot CPU+GPU cluster on each cloud without surprise bills? | 1 |
+| 00 | [Prerequisites & cluster setup](00-prerequisites-and-cluster-setup/) | How do I get a spot CPU+GPU EKS cluster without surprise bills? | 1 |
 | 01 | [GPU nodes & scheduling](01-gpu-nodes-and-scheduling/) | How does a GPU actually get into a pod? | 1 |
 | 02 | [NVIDIA GPU Operator](02-nvidia-gpu-operator/) | When should I manage the GPU software stack myself? | 1 |
 | 03 | [GPU sharing & DRA](03-gpu-sharing-and-dra/) | How do I avoid wasting a whole GPU on a small workload? | 1–2 |
@@ -88,17 +87,14 @@ flowchart LR
 | Block | Time | What |
 |---|---|---|
 | Theory | 45 min | Read the chapter "Why" + "Concepts"; sketch the diagram yourself |
-| Lab | 1 h 45 min | Do the lab on your primary cloud; skim the other two clouds' diffs |
+| Lab | 1 h 45 min | Do the EKS lab |
 | Review | 30 min | Answer checkpoint questions without peeking, run cleanup, write notes |
-
-Pick **one primary cloud** (GKE if you're starting from an existing GKE cluster) for full labs, and read
-the EKS/AKS overlays to learn the differences. Do the full labs on the other clouds when you revisit.
 
 ## Cost safety
 
-- Spot GPU node pools are created with **min nodes = 0**, so they only cost money while a GPU pod is pending or running.
-- Every chapter has `cleanup.sh` scripts. Run them at the end of each session.
-- Set budget alerts (chapter 00) on all three clouds before creating GPU pools.
+- Spot GPU node groups are created with **min nodes = 0**, so they only cost money while a GPU pod is pending or running.
+- Every chapter's README ends with a Cleanup section. Run it at the end of each session.
+- Set a budget alert (chapter 00) on your AWS account before creating GPU node groups.
 
 ## Versions
 

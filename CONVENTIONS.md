@@ -2,59 +2,56 @@
 
 How every chapter in this repo is laid out. Read it once before starting; it makes every chapter feel the same.
 
-## Cloud targets: GKE, EKS, AKS — spot first
+## Cloud target: EKS — spot first
 
-Every hands-on resource has a variant for **GKE**, **EKS** and **AKS**. All compute examples use
-**spot / preemptible capacity by default** (GKE Spot VMs, EC2 Spot, Azure Spot VMs), with on-demand
-shown only as the fallback. Because spot nodes can be reclaimed at any time, chapters explain what that
-means for the workload (checkpointing, PodDisruptionBudgets, retries, graceful shutdown).
+Every hands-on resource targets **EKS**. All compute examples use **spot capacity by default** (EC2
+Spot), with on-demand shown only as the fallback. Because spot nodes can be reclaimed at any time,
+chapters explain what that means for the workload (checkpointing, PodDisruptionBudgets, retries,
+graceful shutdown).
 
-| | GKE | EKS | AKS |
-|---|---|---|---|
-| Spot node label | `cloud.google.com/gke-spot: "true"` | `eks.amazonaws.com/capacityType: SPOT` (managed node groups) / `karpenter.sh/capacity-type: spot` | `kubernetes.azure.com/scalesetpriority: spot` |
-| Spot taint (added automatically?) | No by default (add `cloud.google.com/gke-spot=true:NoSchedule` yourself if wanted) | No (add yourself) | **Yes**: `kubernetes.azure.com/scalesetpriority=spot:NoSchedule` |
-| CLI | `gcloud` | `eksctl` + `aws` | `az` |
+| | EKS |
+|---|---|
+| Spot node label | `eks.amazonaws.com/capacityType: SPOT` (managed node groups) / `karpenter.sh/capacity-type: spot` |
+| Spot taint (added automatically?) | No (add yourself) |
+| CLI | `eksctl` + `aws` |
 
-> Chapter READMEs are the source of truth for exact labels/flags per resource — verify against the cloud docs linked there.
+> Chapter READMEs are the source of truth for exact labels/flags per resource — verify against the AWS docs linked there.
 
 ## Chapter layout
 
 ```
 NN-chapter-slug/
-├── README.md          # theory + lab walkthrough (start here)
+├── README.md          # theory + lab walkthrough (start here) — every command is inlined, copy-pasteable
 ├── common/            # cloud-agnostic Kubernetes manifests (kustomize base)
 │   └── kustomization.yaml
-├── gke/               # GKE: cluster/nodepool scripts, kustomize overlay, Helm values
-│   ├── kustomization.yaml
-│   └── *.sh / values-*.yaml
-├── eks/               # EKS: eksctl configs, kustomize overlay, Helm values
-├── aks/               # AKS: az scripts, kustomize overlay, Helm values
+├── eks/               # EKS: kustomize overlay, Helm values, eksctl/patch YAML referenced by the README
 └── cpu-lab/           # (optional) no-GPU variant so you can learn before GPU quota arrives
 ```
 
-- Apply a chapter's workloads with `kubectl apply -k NN-slug/gke` (or `eks` / `aks`). The overlay adds
-  cloud-specific node selectors, tolerations, storage classes, annotations.
-- Helm installs are scripted in `install.sh` per cloud folder, always with `--version` pinned from
-  [`versions.env`](versions.env).
-- Every chapter ships a `cleanup.sh` (per cloud) — **GPU and spot nodes cost money; tear down when done.**
-  (Chapter 18's is a guarded `terraform destroy` wrapper, since its cloud folders are Terraform modules.)
+- Apply a chapter's workloads with `kubectl apply -k NN-slug/eks`. The overlay adds node selectors,
+  tolerations, storage classes, annotations.
+- Helm/eksctl/kubectl operations are inlined directly in each README's Lab section as copy-pasteable
+  bash blocks, always with `--version` pinned from [`versions.env`](versions.env) — there are no
+  separate `install.sh`/`create-*.sh` script files to open.
+- Every chapter's README ends with a Cleanup section — **GPU and spot nodes cost money; tear down when
+  done.** (Chapter 18's `eks/cleanup.sh` stays a script: it's a guarded `terraform destroy` wrapper with
+  real safety logic, since its `eks/` folder is a Terraform module.)
 - A chapter that needs application code (chapter 19) keeps it under `common/src/`: code built into an
-  image by a per-cloud build script, and/or scripts mounted into pods via `configMapGenerator`. It lives
-  inside `common/` because kustomize can't reference files outside the kustomization root. Python there
-  is run with [uv](https://docs.astral.sh/uv/) (`uv run` / `uv pip`), never pip, with every dependency
-  pinned.
+  image by a build step, and/or scripts mounted into pods via `configMapGenerator`. It lives inside
+  `common/` because kustomize can't reference files outside the kustomization root. Python there is run
+  with [uv](https://docs.astral.sh/uv/) (`uv run` / `uv pip`), never pip, with every dependency pinned.
 
 ## Each README contains
 
-0. **Before you start** — which earlier chapters' output this one assumes (cluster, node pool, CRDs,
+0. **Before you start** — which earlier chapters' output this one assumes (cluster, node group, CRDs,
    storage) and any optional prerequisites, so you know what to go back and do first
 1. **Why this matters** — the problem, in DevOps terms
 2. **Learning objectives** and a **~3 hour time plan** (theory / lab / review)
 3. **Concepts** with diagrams (Mermaid or ASCII)
-4. **Lab** — numbered, independently copy-pasteable steps under GKE / EKS / AKS `<details>` tabs. Every
-   step says what it does and why *before* the command, and gives an **expected output** snippet plus a
-   one-line **"how to tell this worked"** *after* it — you should never have to type a command blind or
-   guess whether it succeeded.
+4. **Lab** — numbered, independently copy-pasteable EKS steps. Every step says what it does and why
+   *before* the command, and gives an **expected output** snippet plus a one-line **"how to tell this
+   worked"** *after* it — you should never have to type a command blind, open a script file to see what
+   it runs, or guess whether it succeeded.
 5. **Spot considerations** for this topic
 6. **Troubleshooting** — the failures you will actually hit
 7. **Cleanup** and **cost notes**
@@ -64,7 +61,7 @@ NN-chapter-slug/
 ## Environment
 
 ```bash
-cp env.sh.example env.sh   # fill in project/account/subscription values
+cp env.sh.example env.sh   # fill in your AWS account/region
 source env.sh && source versions.env
 ```
 

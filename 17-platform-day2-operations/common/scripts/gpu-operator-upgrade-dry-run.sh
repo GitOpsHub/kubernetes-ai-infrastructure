@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # GPU driver / GPU Operator upgrade runbook, step 0: render the CURRENT and TARGET
 # ${GPU_OPERATOR_VERSION} ClusterPolicy client-side and diff them, before touching a real cluster.
-# Reuses 02-nvidia-gpu-operator's own values-<cloud>.yaml so the diff reflects this course's actual
-# per-cloud toggles (driver/toolkit disabled on GKE/EKS, full stack on AKS -- see
-# 02-nvidia-gpu-operator/README.md section 3.3), not a generic chart diff.
+# Reuses 02-nvidia-gpu-operator's own eks/values-eks.yaml so the diff reflects this course's actual
+# EKS toggles (see 02-nvidia-gpu-operator/README.md section 3.3), not a generic chart diff.
 #
-# Usage: ./gpu-operator-upgrade-dry-run.sh <cloud: gke|eks|aks> <target-version, e.g. v26.8.0>
+# Usage: ./gpu-operator-upgrade-dry-run.sh <target-version, e.g. v26.8.0>
 set -euo pipefail
 
-CLOUD="${1:?usage: gpu-operator-upgrade-dry-run.sh <gke|eks|aks> <target-version>}"
-TARGET_VERSION="${2:?target GPU_OPERATOR_VERSION, e.g. v26.8.0}"
+TARGET_VERSION="${1:?target GPU_OPERATOR_VERSION, e.g. v26.8.0}"
+CLOUD="eks"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 CH02="${ROOT}/02-nvidia-gpu-operator"
@@ -19,7 +18,7 @@ CURRENT_VERSION="${GPU_OPERATOR_VERSION}"
 VALUES="${CH02}/${CLOUD}/values-${CLOUD}.yaml"
 
 if [[ ! -f "${VALUES}" ]]; then
-  echo "no values file at ${VALUES} -- CLOUD must be gke, eks or aks" >&2
+  echo "no values file at ${VALUES} -- has 02-nvidia-gpu-operator's eks/ layout changed?" >&2
   exit 1
 fi
 

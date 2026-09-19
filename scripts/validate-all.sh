@@ -9,7 +9,7 @@
 #      cached schema would be worse than not checking it at all. Cross-check those by hand
 #      against the pinned version's CRD source when you touch them (see CLAUDE.md).
 #   3. every shell script passes `bash -n` (syntax) and, if shellcheck is installed, a lint pass
-#   4. every Terraform module (18-infrastructure-as-code/{gke,eks,aks}) passes `terraform fmt
+#   4. the Terraform module (18-infrastructure-as-code/eks) passes `terraform fmt
 #      -check` and `terraform validate` (init with -backend=false -- no real backend/credentials)
 #
 # Usage: ./scripts/validate-all.sh   (run from anywhere; paths are repo-relative)
@@ -88,7 +88,7 @@ fi
 echo
 echo "== 4/4 terraform (18-infrastructure-as-code) =="
 if command -v terraform > /dev/null; then
-  for tfdir in 18-infrastructure-as-code/gke 18-infrastructure-as-code/eks 18-infrastructure-as-code/aks; do
+  for tfdir in 18-infrastructure-as-code/eks; do
     [ -d "$tfdir" ] || continue
     if ! terraform -chdir="$tfdir" fmt -check -recursive > /tmp/tf-fmt-err 2>&1; then
       echo "FAIL  $tfdir (terraform fmt -- run 'terraform fmt' to fix)"

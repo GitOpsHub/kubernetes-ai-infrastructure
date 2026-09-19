@@ -1,8 +1,7 @@
 # 13 · Node Autoscaling and Cost
 
-> Making the NODE layer elastic under your GPU workloads: GKE Node Auto-Provisioning +
-> ComputeClasses + DWS flex-start, Karpenter on EKS, AKS Node Auto Provisioning (Karpenter-based),
-> spot diversification, image streaming, and how to actually see what any of this costs.
+> Making the NODE layer elastic under your GPU workloads: Karpenter on EKS, spot diversification,
+> image streaming, and how to actually see what any of this costs.
 
 ## Before you start
 
@@ -11,19 +10,14 @@ This chapter assumes:
 - **A working cluster with GPU quota** from
   [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) and the GPU Operator
   from [02-gpu-operator-and-drivers](../02-gpu-operator-and-drivers) — you don't reuse chapter 01's
-  *fixed* node pool directly (this chapter replaces it with elastic auto-provisioning), but the
+  *fixed* node group directly (this chapter replaces it with elastic auto-provisioning), but the
   driver/quota prerequisites it depends on still need to be satisfied on the cluster.
-- **`env.sh` and `versions.env` sourced** (`cp env.sh.example env.sh`, fill in your
-  project/account/subscription, then `source env.sh && source versions.env`) — needed for
-  `PROJECT_ID`/`GKE_CLUSTER`/`ZONE` (GKE), `EKS_CLUSTER`/`AWS_REGION`/`AWS_ACCOUNT_ID` (EKS), or
-  `AZ_RESOURCE_GROUP`/`AKS_CLUSTER` (AKS).
-- **EKS only**: a Karpenter IAM role/instance profile and SQS interruption queue already
-  provisioned (out of scope here — see `eks/install-karpenter.sh`'s comments and the Karpenter EKS
-  getting-started guide in Further Reading), and `karpenter.sh/discovery=<cluster-name>` tags on
-  your subnets/security groups (chapter 01/00's eksctl cluster sets these for you on the standard
-  VPC).
-- **AKS only**: Azure CLI >= 2.76.0 and a cluster using a Standard Load Balancer (NAP is
-  incompatible with Basic Load Balancer, Windows node pools, and IPv6 clusters).
+- **`env.sh` and `versions.env` sourced** (`cp env.sh.example env.sh`, fill in your AWS account,
+  then `source env.sh && source versions.env`) — needed for `EKS_CLUSTER`/`AWS_REGION`/`AWS_ACCOUNT_ID`.
+- A Karpenter IAM role/instance profile and SQS interruption queue already provisioned (out of
+  scope here — see step 1's comments and the Karpenter EKS getting-started guide in Further
+  Reading), and `karpenter.sh/discovery=<cluster-name>` tags on your subnets/security groups
+  (chapter 01/00's eksctl cluster sets these for you on the standard VPC).
 - Not required but useful context: chapter 10's autoscaling-inference cold-start math (section 3.3
   there) assumes this chapter's node provisioning time as an input, and chapter 12's multi-node
   LWS groups are what section 5 here means by "consolidation can disrupt a stateful group."
@@ -45,21 +39,20 @@ node images that don't spend 5 of your 10 GPU-minutes pulling a 20 GiB container
 By the end you can:
 
 1. Explain the difference between the (older) Cluster Autoscaler model — fixed node pools it
-   scales up/down — and the newer node-auto-provisioning model (GKE NAP/ComputeClasses, Karpenter,
-   AKS NAP) that creates the RIGHT shape node from scratch per pending Pod.
-2. Configure spot-first-with-fallback as a ranked preference (GKE ComputeClass `priorities`,
-   Karpenter `NodePool` weight) instead of two node pools you manage by hand.
+   scales up/down — and Karpenter's node-auto-provisioning model, which creates the RIGHT shape
+   node from scratch per pending Pod.
+2. Configure spot-first-with-fallback as a ranked preference (Karpenter `NodePool` weight) instead
+   of two node groups you manage by hand.
 3. Explain what "spot diversification" buys you and configure it (multiple instance types/families
-   in one NodePool/ComputeClass).
-4. Explain GKE's DWS flex-start and when it's useful even for on-demand-priced capacity.
-5. Explain image streaming/preloading and why cold-start time matters as much as node price.
-6. Read `kubectl get events`/cost-visibility tooling to answer "why is this Pod Pending" and
+   in one `NodePool`).
+4. Explain image streaming/preloading and why cold-start time matters as much as node price.
+5. Read `kubectl get events`/cost-visibility tooling to answer "why is this Pod Pending" and
    "what did this GPU-hour cost."
 
 | Time | Activity |
 |---|---|
-| 0:00–0:35 | Read section 3. Compare `gke/computeclass.yaml` vs `eks/nodepool.yaml` vs `aks/nodepool.yaml` side by side |
-| 0:35–1:15 | Install your cloud's provisioner. Deploy `common/`, scale `scale-demo` up, time the Pending→Running gap |
+| 0:00–0:35 | Read section 3. Read `eks/nodepool.yaml` and `eks/ec2nodeclass.yaml` |
+| 0:35–1:15 | Install Karpenter. Deploy `common/`, scale `scale-demo` up, time the Pending→Running gap |
 | 1:15–1:45 | Force a spot-exhausted scenario (limit instance types to 1, request more GPUs than available) and watch fallback |
 | 1:45–2:15 | Image streaming/preloading (section 6): compare cold-start with/without |
 | 2:15–2:45 | Cost visibility tour (section 7): label-based cost allocation, the tools each cloud gives you |
@@ -83,28 +76,16 @@ flowchart TD
   Node -.idle N minutes.-> Consolidate[Provisioner removes/consolidates node]
 ```
 
-- **GKE**: Node Auto-Provisioning (NAP) + **ComputeClass** — a ranked `priorities` list a Pod
-  opts into via `nodeSelector: cloud.google.com/compute-class: <name>`. NAP creates
-  (and later removes) whatever node pool shape satisfies the highest-priority entry with capacity.
-- **EKS**: **Karpenter** — no managed node groups at all for autoscaled capacity. A `NodePool`
-  (scheduling constraints: capacity-type, instance-type, taints) + `EC2NodeClass` (AMI, IAM role,
-  subnets/SGs, disk) pair replaces eksctl `managedNodeGroups` for elastic capacity. Multiple
-  `NodePool`s with different `weight` implement fallback ordering.
-- **AKS**: **Node Auto Provisioning (NAP)** — literally the Azure port of Karpenter
-  (`karpenter-provider-azure`), same `karpenter.sh/v1` `NodePool` API as EKS, with an
-  Azure-specific `AKSNodeClass` (`karpenter.azure.com/v1beta1`) instead of `EC2NodeClass`.
-  Enabled via `az aks update --node-provisioning-mode Auto`.
+**Karpenter** — no managed node groups at all for autoscaled capacity. A `NodePool`
+(scheduling constraints: capacity-type, instance-type, taints) + `EC2NodeClass` (AMI, IAM role,
+subnets/SGs, disk) pair replaces eksctl `managedNodeGroups` for elastic capacity. Multiple
+`NodePool`s with different `weight` implement fallback ordering — this chapter's `gpu-spot`
+(weight 10) is tried before `gpu-ondemand` (weight 1).
 
 ### 3.2 Spot-first, ranked, with real fallback
 
-All three approaches express the same idea — try spot, try another spot shape, fall back
-on-demand — just with different syntax:
-
-| | Mechanism |
-|---|---|
-| GKE ComputeClass | ordered `spec.priorities` list, first match with capacity wins |
-| Karpenter NodePool | separate `NodePool`s, higher `weight` tried first, each with its own `requirements`/`limits` |
-| AKS NAP | same as Karpenter (it IS Karpenter) |
+Karpenter expresses "try spot, try another spot shape, fall back on-demand" as separate
+`NodePool`s: the higher-`weight` pool is tried first, and each has its own `requirements`/`limits`.
 
 **Spot diversification**: listing several instance types (`g6.xlarge` AND `g4dn.xlarge`; or
 several GPU families) in one spot-seeking pool matters because spot capacity pools are
@@ -112,29 +93,18 @@ per-instance-type-per-AZ. If you only ever ask for `g6.xlarge` spot and that spe
 tight, you get nothing even if `g4dn.xlarge` spot is wide open next door. More eligible shapes =
 lower chance of a stockout forcing an expensive fallback (or a `Pending` Pod).
 
-### 3.3 DWS flex-start (GKE) — a third option, not just spot vs on-demand
-
-Dynamic Workload Scheduler's **flex-start** mode queues a capacity request (GPUs, in particular)
-for up to a bounded wait instead of failing immediately when on-demand capacity isn't available
-right now — at a meaningful discount versus a standing reservation. It's neither "spot" (can be
-reclaimed) nor "always-on on-demand" (always available, priciest): it trades a short wait for
-better GPU availability + price than plain on-demand, which matters a lot for scarce SKUs (A100/H100).
-The schema is `priorities[].flexStart.enabled: true` (verified against GKE's DWS flex-start docs);
-`# VERIFY` current wait-time guarantees against GKE docs before depending on it for a real SLA —
-those are operational numbers Google tunes independently of the API shape.
-
-### 3.4 Image streaming and preloading
+### 3.3 Image streaming and preloading
 
 A cold GPU node pulling `vllm/vllm-openai:v0.29.0-cu129` (several GB) before a single Pod can
 start is often the SLOWEST part of an autoscale event — slower than the node boot itself. Two
-fixes, same idea both clouds support in different forms:
-- **Streaming** (GKE image streaming / containerd lazy-pulling): start the container as soon as
-  enough of the image is available, stream the rest in the background.
-- **Preloading**: bake the image into the node's boot disk (GKE secondary boot disk, custom AMI
-  on EKS, custom AKS node image) so there's no pull at all on a fresh node.
+fixes:
+- **Streaming** (containerd lazy-pulling / Seekable OCI-style streaming): start the container as
+  soon as enough of the image is available, stream the rest in the background.
+- **Preloading**: bake the image into the node's boot disk (a custom AMI on EKS) so there's no
+  pull at all on a fresh node.
 
-Chapter 05's `secondary-boot-disk.sh` (GKE) already demonstrates preloading for model weights;
-the same mechanism applies to container images.
+Chapter 05's storage-preloading pattern for model weights applies the same idea to container
+images: bake it into the AMI instead of pulling it every cold start.
 
 ## 4. Lab
 
@@ -143,79 +113,45 @@ cp env.sh.example env.sh   # repo root, if not already done
 source env.sh && source versions.env
 ```
 
-### Step 1: Enable your cloud's node auto-provisioner
+### Step 1: Install Karpenter and apply the NodePool/EC2NodeClass pair
 
-What you're about to do: turn on GKE NAP / install Karpenter / turn on AKS NAP, then apply this
-chapter's ComputeClass or NodePool+NodeClass pair (spot-first, on-demand fallback) so pending Pods
-have somewhere to provision capacity from.
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-./13-node-autoscaling-and-cost/gke/enable-nap.sh
-kubectl apply -k 13-node-autoscaling-and-cost/gke
-```
-**Expected output**: `enable-nap.sh` prints `NAP enabled. ...`; the `kubectl apply -k` prints
-`computeclass.cloud.google.com/gpu-spot-first created` plus the namespace/Deployment.
-
-**How to tell this worked**: `kubectl get computeclass gpu-spot-first` returns the object (no
-`NotFound`).
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
+What you're about to do: install the Karpenter controller via Helm (pinned from `versions.env`),
+then apply the `EC2NodeClass`/`NodePool` pair — cluster-scoped, so applied directly here rather
+than via `kubectl apply -k`, after `envsubst` fills in `${EKS_CLUSTER}`. This assumes the
+Karpenter IAM role/instance profile + SQS interruption queue already exist (out of scope for a
+manifests-only chapter; see the Karpenter EKS getting-started guide in Further Reading for
+`eksctl create iamserviceaccount` / CloudFormation prerequisites, or use
+`karpenter-provider-aws`'s `cloudformation.yaml` template) and that the role is named
+`KarpenterNodeRole-${EKS_CLUSTER}` (matches `ec2nodeclass.yaml`).
 
 ```bash
-./13-node-autoscaling-and-cost/eks/install-karpenter.sh
+helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
+  --version "$KARPENTER_VERSION" \
+  --namespace kube-system \
+  --set settings.clusterName="$EKS_CLUSTER" \
+  --set settings.interruptionQueue="$EKS_CLUSTER" \
+  --set controller.resources.requests.cpu=1 \
+  --set controller.resources.requests.memory=1Gi \
+  --wait --timeout 5m
+
+envsubst < 13-node-autoscaling-and-cost/eks/ec2nodeclass.yaml | kubectl apply --server-side -f -
+envsubst < 13-node-autoscaling-and-cost/eks/nodepool.yaml     | kubectl apply --server-side -f -
 kubectl apply -k 13-node-autoscaling-and-cost/eks
+
+kubectl get nodepools.karpenter.sh
 ```
-**Expected output**: `install-karpenter.sh` ends with
-`Karpenter 1.14.1 installed with gpu-spot (weight 10) + gpu-ondemand (weight 1).` and a
-`kubectl get nodepools.karpenter.sh` table showing both.
+**Expected output**: Karpenter `${KARPENTER_VERSION}` installed; a `kubectl get nodepools.karpenter.sh`
+table showing `gpu-spot` (weight 10) and `gpu-ondemand` (weight 1).
 
 **How to tell this worked**: `kubectl get nodepools.karpenter.sh` lists `gpu-spot` and
 `gpu-ondemand`; `kubectl -n kube-system get pods -l app.kubernetes.io/name=karpenter` shows the
 controller `Running`.
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-./13-node-autoscaling-and-cost/aks/enable-nap.sh
-kubectl apply -k 13-node-autoscaling-and-cost/aks
-```
-**Expected output**: `enable-nap.sh` ends with
-`NAP enabled with gpu-spot (weight 10) + gpu-ondemand (weight 1) NodePools.`
-
-**How to tell this worked**: `kubectl get nodepools.karpenter.sh` lists `gpu-spot` and
-`gpu-ondemand`; `kubectl get aksnodeclass gpu` returns the object.
-</details>
 
 ### Step 2: Scale up and time the Pending → Running gap
 
 What you're about to do: scale the idle `scale-demo` Deployment from 0 to 2 replicas and watch a
-brand-new GPU node get provisioned from scratch — this is the number section 3.4 and chapter 10's
+brand-new GPU node get provisioned from scratch — this is the number section 3.3 and chapter 10's
 cold-start math build on.
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-date; kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
-kubectl get pods,nodes -n ch13-autoscale -o wide --watch   # Ctrl-C once both Pods are Running
-```
-**Expected output**: `scale-demo` Pods `Pending` for roughly 1-3 minutes (NAP creating a new node
-pool from scratch is slower than Cluster Autoscaler scaling an existing one), then `Running` once
-a node joins.
-
-**How to tell this worked**: `kubectl get nodes -l cloud.google.com/gke-spot=true` shows a new
-node, and `kubectl get pods -n ch13-autoscale` shows both `scale-demo` Pods `2/2 Running`.
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
 
 ```bash
 date; kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
@@ -227,20 +163,6 @@ than a fresh managed node group would).
 
 **How to tell this worked**: `kubectl get nodepools.karpenter.sh gpu-spot -o wide` shows its node
 count go from 0 to 1-2, and `kubectl get pods -n ch13-autoscale` shows both Pods `Running`.
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-date; kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
-kubectl get nodeclaims --watch   # Ctrl-C once status shows Initialized
-```
-**Expected output**: same `NodeClaim` transition as EKS (AKS NAP runs the same Karpenter core).
-
-**How to tell this worked**: `kubectl get nodepools.karpenter.sh gpu-spot -o wide` shows its node
-count go from 0 to 1-2, and `kubectl get pods -n ch13-autoscale` shows both Pods `Running`.
-</details>
 
 ### Step 3: Force the fallback path
 
@@ -250,52 +172,24 @@ the fallback ordering actually works, not just the happy path.
 
 ```bash
 kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=0   # reset first
-```
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-kubectl patch computeclass gpu-spot-first --type=json \
-  -p='[{"op":"replace","path":"/spec/priorities/0/gpu/type","value":"nvidia-nonexistent-gpu"}]'
-kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
-kubectl get pods -n ch13-autoscale -o wide --watch
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
-```bash
 kubectl patch nodepool gpu-spot --type=json \
   -p='[{"op":"replace","path":"/spec/template/spec/requirements/1/values","value":["g6.48xlarge"]}]'
 kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
 kubectl get pods -n ch13-autoscale -o wide --watch
 ```
-</details>
 
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl patch nodepool gpu-spot --type=json \
-  -p='[{"op":"replace","path":"/spec/template/spec/requirements/1/values","value":["Standard_ND96amsr_A100_v4"]}]'
-kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
-kubectl get pods -n ch13-autoscale -o wide --watch
-```
-</details>
-
-**Expected output**: the spot pool now can't be satisfied (the instance type/GPU you patched in
-has no spot capacity), so after the provisioner gives up on it, the Pods still reach `Running` —
-just on a node from `gpu-ondemand` instead.
+**Expected output**: the spot pool now can't be satisfied (`g6.48xlarge` has no spot capacity), so
+after the provisioner gives up on it, the Pods still reach `Running` — just on a node from
+`gpu-ondemand` instead.
 
 **How to tell this worked**:
 ```bash
 kubectl get pods -n ch13-autoscale -o wide   # note the NODE column
 kubectl get nodes <node-from-above> -o jsonpath='{.metadata.labels.karpenter\.sh/capacity-type}{"\n"}'
-# GKE equivalent: kubectl get nodes <node-from-above> -o jsonpath='{.metadata.labels.cloud\.google\.com/gke-spot}{"\n"}'
 ```
-prints `on-demand` (or empty/`false` on GKE) instead of `spot` — confirming the fallback fired.
-Revert the patch (`kubectl apply -k <cloud>`) before continuing.
+prints `on-demand` instead of `spot` — confirming the fallback fired. Revert the patch
+(`envsubst < 13-node-autoscaling-and-cost/eks/nodepool.yaml | kubectl apply --server-side -f -`)
+before continuing.
 
 ### Step 4: CPU lab (no GPU quota, no provisioner install)
 
@@ -343,57 +237,47 @@ for the workloads running on top of it:
    actually being portable across that memory/compute jump — chapter 09's `--gpu-memory-utilization`
    and TP settings are tuned per-GPU-type.
 
-## 6. Per-cloud comparison
-
-| | GKE | EKS | AKS |
-|---|---|---|---|
-| Mechanism | Node Auto-Provisioning + ComputeClass | Karpenter | Node Auto Provisioning (Karpenter) |
-| Spot-first syntax | `ComputeClass.spec.priorities[]`, ordered | `NodePool.spec.weight`, higher tried first | same as EKS (`karpenter.sh/v1`) |
-| NodeClass CRD | N/A (ComputeClass covers both) | `EC2NodeClass` (`karpenter.k8s.aws/v1`) | `AKSNodeClass` (`karpenter.azure.com/v1beta1`) |
-| Unique capability | DWS flex-start (queued on-demand-ish) | mature multi-instance-type diversification, `consolidateAfter` tuning | inherits OSS Karpenter's exact API — least AKS-specific lock-in |
-| Enable | `gcloud container clusters update --enable-autoprovisioning` | Helm install + IAM prereqs | `az aks update --node-provisioning-mode Auto` (CLI >= 2.76.0) |
-
-## 7. Cost visibility
+## 6. Cost visibility
 
 - **Label-based allocation**: every workload in this repo carries
-  `app.kubernetes.io/part-of: chNN-...` — feed that into your cloud's cost tool
-  (GKE Cost Allocation / AWS Cost Explorer with Kubernetes cost allocation tags / AKS Cost
-  Analysis) to see spend per chapter/team, not just per cluster.
-- **GKE**: enable [GKE cost allocation](https://cloud.google.com/kubernetes-engine/docs/how-to/cost-allocations)
-  (BigQuery export of per-namespace/label spend).
-- **EKS**: [Kubecost](https://www.kubecost.com/) or native
-  [AWS Cost Explorer + Kubernetes cost allocation tags](https://docs.aws.amazon.com/cur/latest/userguide/env-eks.html);
+  `app.kubernetes.io/part-of: chNN-...` — feed that into
+  [AWS Cost Explorer with Kubernetes cost allocation tags](https://docs.aws.amazon.com/cur/latest/userguide/env-eks.html)
+  or [Kubecost](https://www.kubecost.com/) to see spend per chapter/team, not just per cluster.
   Karpenter's own `NodePool` `limits` are your hard cost ceiling per pool.
-- **AKS**: [AKS Cost Analysis add-on](https://learn.microsoft.com/en-us/azure/aks/cost-analysis)
-  (built on the same open-source [OpenCost](https://www.opencost.io/) project Kubecost is based on).
-- Cheapest thing you can do in every cloud: **`limits` on every autoscaled NodePool/ComputeClass**
-  (this chapter's manifests all set one) — a runaway scale-up (bad HPA config, bug in a batch job
-  fan-out) hits a hard ceiling instead of your bill.
+- Cheapest thing you can do: **`limits` on every autoscaled NodePool** (this chapter's manifests
+  all set one) — a runaway scale-up (bad HPA config, bug in a batch job fan-out) hits a hard
+  ceiling instead of your bill.
 
-## 8. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Pod stays `Pending`, no node appears | Provisioner not installed/enabled, or NodePool/ComputeClass `requirements` don't match the Pod's taints/nodeSelector/resources | `kubectl describe pod`; check the provisioner's own logs (`kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter`, or Cloud Logging for GKE NAP) |
-| Node appears but Pod still `Pending` | Taint without matching toleration (very common — every overlay here needs `nvidia.com/gpu` + the cloud's spot taint) | `kubectl describe node`; compare taints to the Pod's `tolerations` |
+| Pod stays `Pending`, no node appears | Karpenter not installed, or NodePool `requirements` don't match the Pod's taints/nodeSelector/resources | `kubectl describe pod`; check `kubectl logs -n kube-system -l app.kubernetes.io/name=karpenter` |
+| Node appears but Pod still `Pending` | Taint without matching toleration (every overlay here needs `nvidia.com/gpu` + the spot taint) | `kubectl describe node`; compare taints to the Pod's `tolerations` |
 | Karpenter NodeClaim stuck `Launching` | IAM role/instance profile missing or misnamed, subnet/SG discovery tags absent | Confirm `EC2NodeClass.spec.role` matches an existing IAM role; confirm `karpenter.sh/discovery` tags on subnets/SGs |
-| AKS `az aks update --node-provisioning-mode Auto` fails | Basic Load Balancer, Windows node pools, or IPv6 cluster (all unsupported by NAP) | Recreate on Standard Load Balancer, or use manual Cluster Autoscaler node pools instead |
-| Fallback (on-demand) NodePool never used even when spot is exhausted | `weight`/`priorities` ordering wrong, or the fallback pool's own `requirements` also can't be satisfied | Check `limits` aren't already exhausted on the fallback pool; verify weight ordering |
-| Node created but takes minutes before Pod starts | No image streaming/preloading — full image pull on a cold node | See section 3.4; compare with a preloaded/streamed image |
+| Fallback (on-demand) NodePool never used even when spot is exhausted | `weight` ordering wrong, or the fallback pool's own `requirements` also can't be satisfied | Check `limits` aren't already exhausted on the fallback pool; verify weight ordering |
+| Node created but takes minutes before Pod starts | No image streaming/preloading — full image pull on a cold node | See section 3.3; compare with a preloaded/streamed image |
 | Node never scales back down | PodDisruptionBudget blocking eviction, or `consolidateAfter` too long, or a DaemonSet-only node looking "non-empty" | `kubectl get pdb`; lower `consolidateAfter` for testing; DaemonSet Pods don't block consolidation by default but confirm none of yours pin the node another way |
 
-## 9. Cleanup and cost notes
+## 8. Cleanup and cost notes
+
+What you're about to do: scale `scale-demo` to 0 first so Karpenter's `consolidateAfter` fires and
+terminates the EC2 instances (Karpenter nodes are NOT part of any eksctl-managed ASG — they
+disappear when Karpenter decides to, not when a node group is deleted), then remove the chapter's
+workloads and the `NodePool`.
 
 ```bash
-gke/cleanup.sh   # or eks/ or aks/
+kubectl -n ch13-autoscale scale deploy/scale-demo --replicas=0
+kubectl delete -k 13-node-autoscaling-and-cost/eks --ignore-not-found
+kubectl delete -f 13-node-autoscaling-and-cost/eks/nodepool.yaml --ignore-not-found
 ```
 
 **GPU nodes from an autoscaler disappear on their own** once `scale-demo` is scaled to 0 and
 `consolidateAfter` elapses — but always run `kubectl get nodes` a few minutes after cleanup and
-check the cloud console if you're stepping away; a stuck PDB or a leftover DaemonSet Pod can pin
-a node indefinitely and you'll pay for it overnight.
+check the EC2 console if you're stepping away; a stuck PDB or a leftover DaemonSet Pod can pin a
+node indefinitely and you'll pay for it overnight.
 
-## 10. Checkpoint questions
+## 9. Checkpoint questions
 
 <details>
 <summary>1. What's the core behavioral difference between the old "Cluster Autoscaler scales a fixed node pool" model and GKE NAP / Karpenter / AKS NAP?</summary>

@@ -3,8 +3,8 @@
 > Wire the whole loop on Kubernetes: pull a **pinned** Hugging Face model and dataset into a bucket
 > once, LoRA-fine-tune it on **one spot GPU** in a pipeline that survives preemption, gate it on an
 > evaluation, serve it with vLLM, and put a **LangChain** RAG API and a batch-inference pipeline in
-> front of it. **EKS is the primary, fully worked cloud**; the GKE and AKS overlays deploy the same
-> Kubernetes objects, and a `cpu-lab/` runs the pipeline mechanics on kind or minikube.
+> front of it. Everything below runs on **EKS**; a `cpu-lab/` runs the pipeline mechanics on kind or
+> minikube for anyone without GPU quota yet.
 
 ---
 
@@ -372,10 +372,9 @@ Layout:
 │       ├── hf_pull.py                PEP 723 script (huggingface_hub==1.32.0), run with uv in the uv image
 │       ├── trainer/                  Dockerfile, requirements.txt, store.py, finetune.py, evaluate.py, publish_hf.py
 │       └── langchain_app/            rag_chain.py, rag_api.py, batch_infer.py, docs/*.md, prompts.jsonl
-├── eks/    (primary)                 install.sh, nodegroup-ch19.yaml, setup-s3-iam.sh, build-push-ecr.sh, pv-pvc-mountpoint.yaml,
-│                                     bucket.env, images.env, serving.env, patch-*.yaml, cleanup.sh
-├── gke/                              install.sh, setup-gcs-iam.sh, build-push-artifact-registry.sh, pv-pvc-gcsfuse.yaml, ...
-├── aks/                              install.sh, setup-blob-iam.sh, build-push-acr.sh, pv-pvc-blob.yaml, ...
+├── eks/                               nodegroup-ch19.yaml, pv-pvc-mountpoint.yaml, bucket.env, images.env, serving.env,
+│                                     patch-*.yaml, cleanup.sh (install.sh / setup-s3-iam.sh / build-push-ecr.sh are inlined
+│                                     into the lab steps below, not scripts in this directory)
 └── cpu-lab/                          install.sh, build-load-kind.sh, params.env (SmolLM2), pvc.yaml, patch-*.yaml, cleanup.sh
 ```
 
