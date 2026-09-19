@@ -11,7 +11,9 @@ scripts that call `gcloud` / `eksctl` / `az` directly. **This chapter is the one
 `eks/` and `aks/` here each hold a **Terraform module**, not a kustomize overlay, and there is no
 `common/` (there's no Kubernetes manifest to be cloud-agnostic about — this chapter provisions the
 cluster itself, before anything is applied to it) or `cpu-lab/` (nothing here needs a GPU to run; the
-whole point is that `terraform validate` never touches a cloud account).
+whole point is that `terraform validate` never touches a cloud account). Each module folder does still
+ship a `cleanup.sh`, as every chapter does — here it's a guarded wrapper around `terraform destroy`
+(see §7), only relevant if you went beyond the lab and ran a real `apply`.
 
 **Why this is the one chapter that gets IaC instead of a script**, and the other 17 don't: a shell
 script calling `gcloud container clusters create` is fine for a one-off lab cluster you'll delete in
@@ -88,7 +90,7 @@ By the end you can:
 | 0:40–1:10 | Lab step 3: `terraform validate` on all three, read the plan-equivalent reasoning in §4.4 |
 | 1:10–1:30 | Lab step 4: wire up a remote state backend block (no real bucket needed to read it) |
 | 1:30–1:50 | §6 troubleshooting + §8 checkpoint questions |
-| 1:50–2:00 | §7 "next step up" — skim what Crossplane/ArgoCD change |
+| 1:50–2:00 | "Next step up" section — skim what Crossplane/ArgoCD change |
 
 ## 3. Concepts
 
@@ -302,7 +304,44 @@ migrate state into it.
 | Real `terraform apply` (outside this chapter's read-only lab) fails with a quota error | Same GPU/spot quotas as chapter 00 §3.2 | Do chapter 00 Step 2 (quota requests) first — Terraform doesn't bypass cloud quota, it just applies the same API calls the CLI does |
 | Real `terraform apply` on GKE fails to destroy later | `deletion_protection` defaults to `true` on provider ≥ 5.0; this chapter's module sets it `false` deliberately for a disposable lab cluster | Set `deletion_protection = true` once this is infrastructure you don't want destroyed by accident, and unset it deliberately (a reviewed PR) before tearing down |
 
-## 7. Next step up: Crossplane / ArgoCD-managed infra
+## 7. Cleanup and cost notes
+
+**The lab itself creates nothing, so there is nothing to clean up.** `fmt -check`, `init
+-backend=false` and `validate` touch no cloud account; the only local leftovers are each module's
+`.terraform/` directory and `.terraform.lock.hcl` (both gitignored / safe to keep — delete `.terraform/`
+if you want the disk space back). Cost of this chapter as written: $0.
+
+**If you did run a real `terraform apply`** from one of these modules, tear it down with Terraform
+(not the chapter 00 CLI scripts — deleting Terraform-managed resources out-of-band leaves state that
+still thinks they exist):
+
+```bash
+# Preview what would be destroyed (read-only):
+terraform -chdir=18-infrastructure-as-code/gke plan -destroy   # or eks / aks
+# Destroy — the wrapper refuses without CONFIRM=yes, refuses on empty state, and still shows
+# Terraform's own plan + confirmation prompt (it never passes -auto-approve):
+CONFIRM=yes ./18-infrastructure-as-code/gke/cleanup.sh          # or eks / aks
+```
+
+- **Run the other chapters' `cleanup.sh` first.** Anything Kubernetes created on your behalf —
+  load balancers from `LoadBalancer` Services, disks/volumes from PVCs — is not in Terraform state. On
+  EKS especially, an orphaned load balancer's ENIs block the VPC/subnet deletion and `destroy` hangs
+  and then fails.
+- **GKE `deletion_protection`.** This module sets it to `false` so `destroy` works on a disposable lab
+  cluster. If you flipped it to `true`, change it back and `terraform apply` that change first (a
+  reviewed PR in a real setup) — otherwise `destroy` deletes the node pools and then fails on the
+  cluster.
+- **Remote state storage is not destroyed.** If you uncommented a `backend` block (§3.3 / Step 4), the
+  GCS bucket / S3 bucket / Azure storage account holding the state was created outside these modules
+  and survives `terraform destroy`, along with every versioned copy of the state file. It costs cents
+  a month, but delete it once you no longer need the history — note the state can contain sensitive
+  values (cluster endpoints, CA certs).
+- **Cost while it exists** is the same as chapter 00's clusters (the modules reproduce them exactly):
+  control-plane fees (EKS $0.10/h; GKE/AKS depend on tier), the always-on CPU nodes (GKE/EKS spot CPU
+  pool min 1 by default; AKS's on-demand system pool min 1, its spot CPU pool can go to 0), and on EKS
+  the NAT gateway — GPU pools sit at 0 nodes until something requests a GPU.
+
+## Next step up: Crossplane / ArgoCD-managed infra
 
 This chapter's Terraform modules still need an engineer (or a CI pipeline with cloud credentials) to
 run `terraform apply`. The next step up for a platform team wanting **self-service** infra — a team

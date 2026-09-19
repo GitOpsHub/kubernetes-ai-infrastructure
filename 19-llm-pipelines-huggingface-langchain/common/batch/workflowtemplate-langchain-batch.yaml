@@ -1,0 +1,165 @@
+# Offline / batch LLM inference with LangChain: run every prompt in a JSONL file through the same
+# RAG chain the online rag-api uses, against the in-cluster OpenAI-compatible endpoint (vLLM, or
+# Ollama in cpu-lab), and write the answers back to the bucket.
+#
+#   seed-prompts ─> wait-for-llm ─> batch-infer
+#
+# Template indices (overlays reference them): 0 main | 1 seed-prompts | 2 wait-for-llm | 3 batch-infer
+# All steps are CPU-only: the GPU work happens inside the vLLM Deployment this workflow calls.
+#
+# Submit:  argo submit -n ch19-pipelines --from workflowtemplate/langchain-batch-inference --watch
+# Output:  /mnt/store/batch/<workflow name>/results.jsonl + _COMPLETE. _COMPLETE is JSON and its
+#          "results_file" key is authoritative: if a stale results.jsonl from an interrupted attempt
+#          is already there (FUSE mounts can't overwrite), batch_infer.py writes
+#          results-<UTC timestamp>.jsonl instead. A retry after _COMPLETE exists is a no-op (exit 0).
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: langchain-batch-inference
+  namespace: ch19-pipelines
+spec:
+  entrypoint: main
+  serviceAccountName: pipeline-runner
+  arguments:
+    parameters:
+    - name: use-rag                       # "false" = plain LLM, no retrieval (compare the answers!)
+      value: "true"
+    - name: concurrency                   # max in-flight requests (LangChain max_concurrency)
+      value: "8"
+    - name: openai-base-url               # overwritten from params.env (common/kustomization.yaml)
+      value: REPLACED_FROM_PARAMS
+    - name: chat-model                    # vLLM --served-model-name / Ollama model tag
+      value: REPLACED_FROM_PARAMS
+  activeDeadlineSeconds: 7200
+  ttlStrategy:
+    secondsAfterSuccess: 86400
+    secondsAfterFailure: 259200
+  podGC:
+    strategy: OnPodSuccess
+  podMetadata:
+    labels:
+      app.kubernetes.io/part-of: ch19-pipelines
+      ch19/pipeline: langchain-batch
+  volumes:
+  - name: model-store
+    persistentVolumeClaim:
+      claimName: model-store
+  templates:
+  # ---------------------------------------------------------------- [0] main
+  - name: main
+    steps:
+    - - name: seed-prompts
+        template: seed-prompts
+    - - name: wait-for-llm
+        template: wait-for-llm
+    - - name: batch-infer
+        template: batch-infer
+
+  # ---------------------------------------------------------------- [1] seed-prompts
+  # Copy the sample prompts from the ch19-prompts ConfigMap into the bucket once. After that the
+  # bucket copy is the input: drop your own prompts.jsonl there (a NEW file name, or delete the old
+  # object with the cloud CLI first -- FUSE mounts can't overwrite) and point INPUT_PATH at it.
+  - name: seed-prompts
+    retryStrategy:
+      limit: "3"
+      retryPolicy: Always
+    container:
+      image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+      command: ["/bin/sh", "-c"]
+      args:
+      - |
+        set -eu
+        DEST=/mnt/store/batch/inputs
+        if [ -f "${DEST}/prompts.jsonl" ]; then
+          echo "prompts already seeded: ${DEST}/prompts.jsonl"; exit 0
+        fi
+        mkdir -p "${DEST}"
+        # A bucket object only becomes visible when the copy closes the file, so an interrupted
+        # copy never leaves a half-written prompts.jsonl behind.
+        cp /opt/prompts/prompts.jsonl "${DEST}/prompts.jsonl"
+        echo "seeded $(wc -l < "${DEST}/prompts.jsonl") prompts into ${DEST}"
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 128Mi}
+      volumeMounts:
+      - {name: model-store, mountPath: /mnt/store}
+      - {name: prompts, mountPath: /opt/prompts, readOnly: true}
+    volumes:
+    - name: prompts
+      configMap:
+        name: ch19-prompts
+
+  # ---------------------------------------------------------------- [2] wait-for-llm
+  # vLLM on a fresh spot GPU node can take minutes (node boot + image pull + weight load). Fail
+  # this cheap CPU step after a bounded wait instead of failing 1000 requests in batch-infer.
+  # Python's urllib instead of curl: the uv image already ships Python, no extra image to pull.
+  - name: wait-for-llm
+    activeDeadlineSeconds: 1200
+    container:
+      image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+      command: ["python3", "-c"]
+      args:
+      - |
+        import os, sys, time, urllib.request
+        url = os.environ["OPENAI_BASE_URL"].rstrip("/") + "/models"
+        for attempt in range(1, 91):                       # 90 x 10s = 15 min max
+            try:
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    if r.status == 200:
+                        print(f"LLM endpoint ready: {url}"); sys.exit(0)
+            except Exception as e:
+                print(f"[{attempt}/90] {url} not ready: {e}", flush=True)
+            time.sleep(10)
+        sys.exit(f"gave up waiting for {url}")
+      env:
+      - {name: OPENAI_BASE_URL, value: "{{workflow.parameters.openai-base-url}}"}
+      resources:
+        requests: {cpu: 50m, memory: 64Mi}
+        limits: {memory: 128Mi}
+
+  # ---------------------------------------------------------------- [3] batch-infer
+  - name: batch-infer
+    retryStrategy:
+      limit: "2"
+      retryPolicy: Always
+      backoff:
+        duration: "30s"
+        factor: "2"
+    activeDeadlineSeconds: 3600
+    container:
+      image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+      command: ["uv", "run", "/opt/app/batch_infer.py"]
+      envFrom:
+      - configMapRef: {name: pipeline-params}   # EMBEDDINGS_URL, DISABLE_THINKING
+      env:
+      - {name: OPENAI_BASE_URL, value: "{{workflow.parameters.openai-base-url}}"}
+      - {name: OPENAI_API_KEY, value: not-needed}
+      - {name: CHAT_MODEL, value: "{{workflow.parameters.chat-model}}"}
+      - {name: USE_RAG, value: "{{workflow.parameters.use-rag}}"}
+      - {name: CONCURRENCY, value: "{{workflow.parameters.concurrency}}"}
+      - {name: INPUT_PATH, value: /mnt/store/batch/inputs/prompts.jsonl}
+      - {name: OUTPUT_DIR, value: "/mnt/store/batch/{{workflow.name}}"}
+      - {name: DOCS_DIR, value: /opt/rag-docs}
+      - {name: UV_CACHE_DIR, value: /scratch/uv-cache}
+      - {name: HF_HOME, value: /scratch/hf-home}
+      resources:
+        requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 2Gi}
+        limits: {memory: 2Gi, ephemeral-storage: 4Gi}
+      volumeMounts:
+      - {name: model-store, mountPath: /mnt/store}
+      - {name: scratch, mountPath: /scratch}
+      # rag_chain.py sits next to batch_infer.py: uv puts the script's directory on sys.path.
+      - {name: langchain-app, mountPath: /opt/app, readOnly: true}
+      # Separate mount point (not /opt/app/docs): nesting a volume inside a read-only ConfigMap
+      # volume needs the kubelet to create a directory in it, which fails on some runtimes.
+      - {name: rag-docs, mountPath: /opt/rag-docs, readOnly: true}
+    volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 4Gi
+    - name: langchain-app
+      configMap:
+        name: ch19-langchain-app
+    - name: rag-docs
+      configMap:
+        name: ch19-rag-docs

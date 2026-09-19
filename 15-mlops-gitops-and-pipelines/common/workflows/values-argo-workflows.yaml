@@ -1,7 +1,7 @@
-# Argo Workflows 2.0.6 (chart) / v4.1.3 (app) — helm show values oci://... isn't available for
+# Argo Workflows 2.0.6 (chart, = ARGO_WORKFLOWS_VERSION in versions.env) / v4.1.3 (app) — helm show values oci://... isn't available for
 # this HTTPS-repo chart the way OCI charts are locally without a full add+update cycle; values
 # below were verified against https://github.com/argoproj/argo-helm/blob/main/charts/argo-workflows/values.yaml
-# at the pinned chart tag. # VERIFY if you bump ARGO_WORKFLOWS_CHART_VERSION.
+# at the pinned chart tag. # VERIFY if you bump ARGO_WORKFLOWS_VERSION.
 controller:
   # Pin the controller off spot for the same reason chapter 06 pins Kueue's controller off
   # spot: it's cluster-wide orchestration, not a per-tenant workload.
@@ -13,6 +13,8 @@ controller:
     - ch08-ray
     - ch14-team-a
     - ch14-team-b
+    - ch15-pipelines   # this chapter's train pipeline (common/workflows/workflowtemplate-train-pipeline.yaml)
+    - ch19-pipelines   # chapter 19's HF fine-tune + LangChain batch pipelines (19-llm-pipelines-huggingface-langchain)
   # Argo Workflows' own Workflow/WorkflowTemplate CRDs are queued through Kueue too when a step
   # pod carries `kueue.x-k8s.io/queue-name` — same admission model as chapter 06/07/08.
 server:

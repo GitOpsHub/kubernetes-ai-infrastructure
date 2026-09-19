@@ -12,7 +12,7 @@ spec:
   sources:
     - repoURL: "https://argoproj.github.io/argo-helm"
       chart: argo-workflows
-      targetRevision: "2.0.6"   # ARGO_WORKFLOWS_CHART_VERSION (app v4.1.3) — not in versions.env, see README
+      targetRevision: "2.0.6"   # = ARGO_WORKFLOWS_VERSION in versions.env (app v4.1.3) — Argo CD can't read it, keep in sync by hand
       helm:
         valueFiles:
           - $values/15-mlops-gitops-and-pipelines/common/workflows/values-argo-workflows.yaml

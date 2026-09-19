@@ -237,14 +237,30 @@ and the manifest's comments.
 
 ## 7. Cleanup and cost notes
 
+Each cloud folder ships a `cleanup.sh` that does the cloud-lab part of the manual commands below in a
+re-runnable way (deletes the ScaledObject/HPA/load generator/ServiceMonitor with `--ignore-not-found`,
+then uninstalls prometheus-adapter and KEDA only if those releases exist). It leaves chapter 09's vLLM
+Deployment and chapter 04's kube-prometheus-stack alone:
+
 ```bash
-kubectl delete -k 10-autoscaling-inference/common/hpa --ignore-not-found
+./10-autoscaling-inference/gke/cleanup.sh   # or eks/ / aks/
+```
+
+The equivalent manual commands (delete the `ScaledObject` **before** uninstalling KEDA — KEDA puts a
+finalizer on it, and with the operator gone the object sits in `Terminating`):
+
+```bash
 kubectl delete -k 10-autoscaling-inference/common/keda --ignore-not-found
+kubectl delete -k 10-autoscaling-inference/common/hpa --ignore-not-found
 kubectl delete -k 10-autoscaling-inference/common/load-generator --ignore-not-found
+# cpu-lab only — NOTE: this overlay includes 09's cpu-lab as a base, so it also deletes the Ollama
+# Deployment from chapter 09's cpu-lab. Re-apply 09-llm-inference-with-vllm/cpu-lab if you still need it.
 kubectl delete -k 10-autoscaling-inference/cpu-lab --ignore-not-found
 helm -n monitoring uninstall prometheus-adapter
 helm -n keda uninstall keda
 ```
+- If KEDA had scaled vLLM to 0 when you deleted the `ScaledObject`, the Deployment stays at 0 —
+  `kubectl -n ch09-vllm scale deploy vllm --replicas=1` to bring it back for later chapters.
 - prometheus-adapter and KEDA themselves are cheap (small CPU-only pods); the cost driver is however
   many GPU replicas autoscaling brings up — `maxReplicaCount`/`maxReplicas: 4` here is a safety cap,
   lower it if you're cost-conscious.

@@ -465,7 +465,7 @@ purely because it was a file in the directory the root Application's `source.pat
 | Component | Version |
 |---|---|
 | Argo CD (assumed already running — this chapter does not install it) | `10.4.0` chart, namespace `argocd` (per this course's live cluster) |
-| Argo Workflows (Helm chart `argo/argo-workflows`) | `2.0.6`, app `v4.1.3` *(not in versions.env — verified via Artifact Hub, 2026-09-16)* |
-| MLflow (Helm chart `community-charts/mlflow`) | `1.11.7`, app `3.16.0` *(not in versions.env — verified via Artifact Hub, 2026-09-16)* |
+| Argo Workflows (Helm chart `argo/argo-workflows`) | `2.0.6`, app `v4.1.3` (`ARGO_WORKFLOWS_VERSION` in versions.env; verified via Artifact Hub, 2026-09-16) |
+| MLflow (Helm chart `community-charts/mlflow`) | `1.11.7`, app `3.16.0` (`MLFLOW_CHART_VERSION` in versions.env; verified via Artifact Hub, 2026-09-16) |
 | MLflow Python client (pipeline register step image) | `ghcr.io/mlflow/mlflow:v3.4.0` — `# VERIFY:` pin to a client version compatible with your deployed server's app version |
 | Kueue / kube-prometheus-stack / KServe / vLLM chart-versions referenced by child Applications | same as `versions.env` (`KUEUE_VERSION`, `KUBE_PROMETHEUS_STACK_VERSION`, `KSERVE_VERSION`) — kept in sync by hand since Argo CD `Application` YAML can't `${env}`-expand |

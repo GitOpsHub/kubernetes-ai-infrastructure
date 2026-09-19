@@ -1,0 +1,34 @@
+# Index-based JSON6902 (2 = finetune, 3 = evaluate), guarded by `test` ops -- see the header of
+# common/training/workflowtemplate-hf-finetune.yaml.
+# Argo: a template's own tolerations REPLACE the workflow-level list, so the GPU steps (which
+# already carry nvidia.com/gpu from common) must get the AKS spot toleration appended here too.
+- op: test
+  path: /spec/templates/2/name
+  value: finetune
+- op: add
+  path: /spec/templates/2/nodeSelector
+  value:
+    kubernetes.azure.com/scalesetpriority: spot
+    nvidia.com/gpu.present: "true"      # label 01's gpuspot pool is created with
+- op: add
+  path: /spec/templates/2/tolerations/-
+  value:
+    key: kubernetes.azure.com/scalesetpriority
+    operator: Equal
+    value: spot
+    effect: NoSchedule
+- op: test
+  path: /spec/templates/3/name
+  value: evaluate
+- op: add
+  path: /spec/templates/3/nodeSelector
+  value:
+    kubernetes.azure.com/scalesetpriority: spot
+    nvidia.com/gpu.present: "true"
+- op: add
+  path: /spec/templates/3/tolerations/-
+  value:
+    key: kubernetes.azure.com/scalesetpriority
+    operator: Equal
+    value: spot
+    effect: NoSchedule

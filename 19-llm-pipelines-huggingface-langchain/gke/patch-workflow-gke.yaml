@@ -1,0 +1,20 @@
+- op: add
+  path: /spec/nodeSelector
+  value:
+    cloud.google.com/gke-spot: "true"
+# Same annotations as chapter 05's patch-gcsfuse-pod.yaml. Applied to EVERY step pod, including
+# the few that don't mount model-store (wait-for-llm): the webhook still injects an idle sidecar
+# there -- harmless, a few MiB. On GKE >= 1.29.3-gke.1093000 the webhook injects it as a native
+# sidecar (initContainer, restartPolicy: Always), so Kubernetes stops it when the step's main and
+# Argo wait containers exit and the step pod completes. Older versions inject a regular container
+# that GKE documents as terminating automatically in restartPolicy: Never pods (Argo's default).
+# https://github.com/GoogleCloudPlatform/gcs-fuse-csi-driver/blob/main/docs/known-issues.md
+- op: add
+  path: /spec/podMetadata/annotations
+  value:
+    gke-gcsfuse/volumes: "true"
+    # "0" = no limit on the injected sidecar (Standard clusters only; Autopilot needs explicit values).
+    gke-gcsfuse/cpu-limit: "0"
+    gke-gcsfuse/memory-limit: "0"
+    # gcsfuse stages writes (checkpoints, the merged model) on node ephemeral storage before upload.
+    gke-gcsfuse/ephemeral-storage-limit: "0"

@@ -6,10 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A hands-on course teaching Kubernetes for AI workloads (GPU scheduling, training, LLM serving,
 autoscaling, cost) to a DevOps audience. It is not an application — there is no build/lint/test suite.
-The "product" is a sequence of 19 numbered chapters (`00-prerequisites-and-cluster-setup` through
-`18-infrastructure-as-code`), each a self-contained lab with Kubernetes manifests, Helm values, and shell
-scripts for **GKE, EKS, and AKS**. Chapter 18 is the one exception — Terraform instead of kustomize,
-see its README for why. Read [README.md](README.md) for the course map and
+The "product" is a sequence of 20 numbered chapters (`00-prerequisites-and-cluster-setup` through
+`19-llm-pipelines-huggingface-langchain`), each a self-contained lab with Kubernetes manifests, Helm values,
+and shell scripts for **GKE, EKS, and AKS**. Chapter 18 is the one exception — Terraform instead of
+kustomize, see its README for why. Chapter 19 is **AWS/EKS-first** (EKS is the fully-worked cloud; GKE/AKS
+overlays are at parity for the Kubernetes objects) and is the only chapter that carries Python sources:
+`common/src/` holds the trainer code (built into an image by a per-cloud build script) and PEP 723
+`uv run` scripts (mounted into pods via kustomize `configMapGenerator`, which is why they live inside the
+chapter's `common/` kustomization root). Read [README.md](README.md) for the course map and
 [CONVENTIONS.md](CONVENTIONS.md) for the full chapter layout contract before adding or editing a chapter.
 
 ## Environment setup

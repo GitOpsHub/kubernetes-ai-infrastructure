@@ -1,0 +1,105 @@
+# LangChain RAG API (FastAPI). No custom image: the stock uv image runs rag_api.py, a PEP 723
+# script whose inline metadata pins its dependencies -- uv resolves and installs them on first
+# start (hence the generous startupProbe), cached in an emptyDir for container restarts.
+# Trade-off: fast iteration for a lab; for production bake the deps into an image instead
+# (cold starts, PyPI availability and supply-chain pinning all argue for it).
+#   POST /ask  {"question": "..."}  -> {"answer": ..., "sources": [...]}   (RAG)
+#   POST /chat {"message": "..."}   -> plain LLM, no retrieval
+# Code changes: ConfigMaps are generated without a hash suffix (Argo references them by name too),
+# so after editing src/ run: kubectl -n ch19-pipelines rollout restart deploy/rag-api
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-api
+  labels:
+    app.kubernetes.io/name: rag-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rag-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rag-api
+    spec:
+      serviceAccountName: rag-api
+      terminationGracePeriodSeconds: 20
+      containers:
+      - name: rag-api
+        image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+        command: ["uv", "run", "/opt/app/rag_api.py"]
+        env:
+        - name: OPENAI_BASE_URL
+          valueFrom:
+            configMapKeyRef: {name: pipeline-params, key: OPENAI_BASE_URL}
+        - name: CHAT_MODEL
+          valueFrom:
+            configMapKeyRef: {name: pipeline-params, key: CHAT_MODEL}
+        - name: EMBEDDINGS_URL
+          valueFrom:
+            configMapKeyRef: {name: pipeline-params, key: EMBEDDINGS_URL}
+        - name: DISABLE_THINKING
+          valueFrom:
+            configMapKeyRef: {name: pipeline-params, key: DISABLE_THINKING}
+        - {name: OPENAI_API_KEY, value: not-needed}
+        - {name: DOCS_DIR, value: /opt/rag-docs}
+        - {name: TOP_K, value: "4"}
+        - {name: MAX_TOKENS, value: "512"}
+        - {name: REQUEST_TIMEOUT, value: "120"}         # seconds per LLM call
+        # How long startup waits for TEI before /healthz turns 503 (-> liveness restarts the pod).
+        - {name: EMBEDDINGS_WAIT_SECONDS, value: "600"}
+        - {name: UV_CACHE_DIR, value: /cache/uv}
+        - {name: HF_HOME, value: /cache/hf-home}
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits: {memory: 1Gi}
+        # Budget = uv dependency install on first start (a few min) + up to EMBEDDINGS_WAIT_SECONDS
+        # for TEI to come up and the docs to be embedded: 90 x 10s = 15 min.
+        startupProbe:
+          httpGet: {path: /healthz, port: http}
+          periodSeconds: 10
+          failureThreshold: 90
+        # Ready only once the vector index is built (TEI reachable + docs embedded).
+        readinessProbe:
+          httpGet: {path: /readyz, port: http}
+          periodSeconds: 10
+          failureThreshold: 3
+        # /healthz answers 200 while the process is up and 503 once TEI has been unreachable for
+        # longer than EMBEDDINGS_WAIT_SECONDS -- a restart is the right fix then.
+        livenessProbe:
+          httpGet: {path: /healthz, port: http}
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - {name: app, mountPath: /opt/app, readOnly: true}
+        - {name: rag-docs, mountPath: /opt/rag-docs, readOnly: true}
+        - {name: cache, mountPath: /cache}
+      volumes:
+      - name: app
+        configMap:
+          name: ch19-langchain-app
+      - name: rag-docs
+        configMap:
+          name: ch19-rag-docs
+      - name: cache
+        emptyDir:
+          sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-api
+  labels:
+    app.kubernetes.io/name: rag-api
+spec:
+  selector:
+    app.kubernetes.io/name: rag-api
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

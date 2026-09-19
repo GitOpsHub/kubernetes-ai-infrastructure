@@ -37,6 +37,12 @@ NN-chapter-slug/
 - Helm installs are scripted in `install.sh` per cloud folder, always with `--version` pinned from
   [`versions.env`](versions.env).
 - Every chapter ships a `cleanup.sh` (per cloud) — **GPU and spot nodes cost money; tear down when done.**
+  (Chapter 18's is a guarded `terraform destroy` wrapper, since its cloud folders are Terraform modules.)
+- A chapter that needs application code (chapter 19) keeps it under `common/src/`: code built into an
+  image by a per-cloud build script, and/or scripts mounted into pods via `configMapGenerator`. It lives
+  inside `common/` because kustomize can't reference files outside the kustomization root. Python there
+  is run with [uv](https://docs.astral.sh/uv/) (`uv run` / `uv pip`), never pip, with every dependency
+  pinned.
 
 ## Each README contains
 

@@ -1,0 +1,12 @@
+# Workflow-level defaults for every step without its own (the CPU steps).
+- op: add
+  path: /spec/nodeSelector
+  value:
+    kubernetes.azure.com/scalesetpriority: spot
+- op: add
+  path: /spec/tolerations
+  value:
+    - key: kubernetes.azure.com/scalesetpriority
+      operator: Equal
+      value: spot
+      effect: NoSchedule

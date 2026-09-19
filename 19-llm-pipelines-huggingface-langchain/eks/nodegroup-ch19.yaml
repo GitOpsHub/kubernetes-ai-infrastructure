@@ -1,0 +1,33 @@
+# CPU spot managed node group for the chapter's CPU work: Argo pull/publish/batch steps, TEI and
+# rag-api. GPU steps use 01-gpu-nodes-and-scheduling's "spot-gpu" group.
+# install.sh envsubsts ${EKS_CLUSTER} and ${AWS_REGION} and runs `eksctl create nodegroup`.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${EKS_CLUSTER}
+  region: ${AWS_REGION}
+managedNodeGroups:
+  # Diversified instance types = more spot pools to draw from = fewer interruptions.
+  - name: ch19-cpu-spot
+    amiFamily: AmazonLinux2023
+    spot: true
+    instanceTypes: ["m7i.xlarge", "m6i.xlarge", "m6a.xlarge", "m5.xlarge"]
+    minSize: 0
+    desiredCapacity: 1
+    maxSize: 3
+    volumeSize: 100                # hf-pull scratch + uv caches live on node ephemeral storage
+    labels:
+      ai-lab/chapter: "19"
+    propagateASGTags: true
+  # On-demand fallback: created with INCLUDE=ch19-cpu-ondemand, scale it up only if spot is dry.
+  # Pods select eks.amazonaws.com/capacityType: SPOT -- drop that selector from the patches too.
+  - name: ch19-cpu-ondemand
+    amiFamily: AmazonLinux2023
+    instanceType: m7i.xlarge
+    minSize: 0
+    desiredCapacity: 0
+    maxSize: 2
+    volumeSize: 100
+    labels:
+      ai-lab/chapter: "19"
+    propagateASGTags: true

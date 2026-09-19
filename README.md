@@ -23,7 +23,9 @@ source env.sh && source versions.env
 
 Each chapter folder has a `README.md` (theory + lab) plus `common/`, `gke/`, `eks/`, `aks/` and, where
 possible, a `cpu-lab/` so you can learn the mechanics before you have GPU quota. The one exception is
-chapter 18, which is Terraform instead of kustomize — see its README for why.
+chapter 18, which is Terraform instead of kustomize — see its README for why. Chapter 19 is AWS/EKS-first
+(GKE/AKS overlays at parity for the Kubernetes objects) and also carries Python sources under
+`common/src/` (built into an image or mounted via ConfigMap).
 
 > **Request GPU quota on day 1** (chapter 00). Spot GPU quota approval can take days, and default quota
 > for L4/T4 in most regions is 0.
@@ -50,7 +52,10 @@ flowchart LR
   subgraph O[Operate]
     C17[17 Day-2 operations] --> C18[18 Infrastructure as Code]
   end
-  F --> D --> T --> S --> P --> O
+  subgraph A[Apps]
+    C19[19 LLM pipelines: HF + LangChain]
+  end
+  F --> D --> T --> S --> P --> O --> A
 ```
 
 | # | Chapter | Core question it answers | Days @3h |
@@ -74,8 +79,9 @@ flowchart LR
 | 16 | [Capstone AI platform](16-capstone-ai-platform/) | Can I build and operate the whole thing? | 3 |
 | 17 | [Platform day-2 operations](17-platform-day2-operations/) | How do I keep this running: drains, upgrades, incidents, backup/DR, chargeback? | 2 |
 | 18 | [Infrastructure as Code](18-infrastructure-as-code/) | How would a platform team actually provision these clusters (Terraform, not CLI scripts)? | 1–2 |
+| 19 | [LLM pipelines on EKS: Hugging Face + LangChain](19-llm-pipelines-huggingface-langchain/) | How do I wire a Hugging Face model → fine-tune → serve → LangChain app pipeline on AWS? | 2 |
 
-**About 28–34 days at 3 hours/day** (roughly 6–7 weeks at 5 days/week).
+**About 30–36 days at 3 hours/day** (roughly 6–7 weeks at 5 days/week).
 
 ## Suggested daily rhythm (3 hours)
 
@@ -96,4 +102,4 @@ the EKS/AKS overlays to learn the differences. Do the full labs on the other clo
 
 ## Versions
 
-All pinned in [versions.env](versions.env) (verified 2026-09-16/17, Kubernetes 1.35).
+All pinned in [versions.env](versions.env) (verified 2026-09-16/18, Kubernetes 1.35).

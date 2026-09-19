@@ -1,0 +1,39 @@
+# Static PV for the chapter bucket (Mountpoint for Amazon S3 CSI driver v2). One PV/PVC for every
+# pod: WHO may write is decided by the pod's ServiceAccount (authenticationSource: pod), not by the
+# volume -- pipeline-runner's role can PutObject, model-reader's role can only GetObject.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ch19-model-store-s3
+spec:
+  accessModes: ["ReadWriteMany"]
+  capacity:
+    storage: 256Gi                 # ignored by the driver, required by Kubernetes
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: ch19-pipelines
+    name: model-store
+  mountOptions:
+    # Mountpoint defaults: create NEW files (sequential writes), no overwrite, no rename, no delete.
+    # Every step in this chapter is written for exactly that: copy new files, _COMPLETE last.
+    - allow-other                  # let any container user read the mount
+    # region is discovered from the bucket; add "region <region>" to skip the lookup
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: ch19-model-store       # must be unique per PV in the cluster
+    volumeAttributes:
+      bucketName: REPLACED_BY_KUSTOMIZE  # bucket.env -> storage-params -> here
+      authenticationSource: pod
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-store
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: ""
+  volumeName: ch19-model-store-s3
+  resources:
+    requests:
+      storage: 256Gi

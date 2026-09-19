@@ -12,7 +12,7 @@ spec:
   sources:
     - repoURL: "https://community-charts.github.io/helm-charts"
       chart: mlflow
-      targetRevision: "1.11.7"   # MLFLOW_CHART_VERSION (app 3.16.0) — not in versions.env, see README
+      targetRevision: "1.11.7"   # = MLFLOW_CHART_VERSION in versions.env (app 3.16.0) — Argo CD can't read it, keep in sync by hand
       helm:
         valueFiles:
           - $values/15-mlops-gitops-and-pipelines/common/mlflow/values-mlflow-eks.yaml

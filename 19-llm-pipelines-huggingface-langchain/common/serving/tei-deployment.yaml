@@ -1,0 +1,72 @@
+# Text Embeddings Inference (CPU build) serving BAAI/bge-small-en-v1.5 (33M params, 384 dims) for
+# the RAG retriever. Small enough that CPU is the right call: no GPU spend for embeddings.
+# The LangChain app calls it through a small TEI client in rag_chain.py (huggingface_hub
+# InferenceClient -> POST <url>/), batching 32 inputs per request = TEI's default
+# --max-client-batch-size, so don't lower that flag here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tei
+  labels:
+    app.kubernetes.io/name: tei
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tei
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tei
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+      - name: tei
+        image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4   # TEI_VERSION in versions.env
+        # Entrypoint is text-embeddings-router. Revision pinned to a commit SHA like every other model.
+        args:
+        - --model-id=BAAI/bge-small-en-v1.5
+        - --revision=5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+        - --port=8080
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests: {cpu: "1", memory: 1Gi}
+          limits: {memory: 2Gi}
+        startupProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 5
+          failureThreshold: 60            # 5 min: model download + warmup
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - {name: data, mountPath: /data}  # TEI's default HF cache dir
+      volumes:
+      - name: data
+        emptyDir:
+          sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tei
+  labels:
+    app.kubernetes.io/name: tei
+spec:
+  selector:
+    app.kubernetes.io/name: tei
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

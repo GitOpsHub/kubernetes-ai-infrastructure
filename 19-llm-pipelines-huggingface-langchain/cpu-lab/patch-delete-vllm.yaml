@@ -1,0 +1,12 @@
+# No GPU -> no vLLM. Chapter 09's cpu-lab Ollama serves the OpenAI-compatible API instead.
+$patch: delete
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+---
+$patch: delete
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm

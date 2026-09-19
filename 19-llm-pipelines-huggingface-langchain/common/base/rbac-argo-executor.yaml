@@ -1,0 +1,31 @@
+# Minimum RBAC for the Argo Workflows (v4.x) emissary executor running as pipeline-runner.
+# Since v3.4 the "wait" sidecar reports step outputs/results by writing WorkflowTaskResult objects
+# instead of patching its own pod, so the documented minimum is exactly create + patch on
+# workflowtaskresults -- no pod permissions:
+#   https://github.com/argoproj/argo-workflows/blob/v4.1.3/docs/workflow-rbac.md
+#   https://github.com/argoproj/argo-workflows/blob/v4.1.3/manifests/quick-start/base/executor/emissary/executor-role.yaml
+# Missing this Role = every step "succeeds" but output parameters (e.g. pull-model's dest path) never
+# arrive and the DAG hangs / fails with "failed to create WorkflowTaskResult ... forbidden".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-executor
+  namespace: ch19-pipelines
+rules:
+- apiGroups: ["argoproj.io"]
+  resources: ["workflowtaskresults"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-runner-argo-executor
+  namespace: ch19-pipelines
+subjects:
+- kind: ServiceAccount
+  name: pipeline-runner
+  namespace: ch19-pipelines
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-executor

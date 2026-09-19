@@ -1,0 +1,10 @@
+# Trainer image Python deps (chapter 19). torch is NOT listed here: the Dockerfile
+# installs it first from the PyTorch index for the chosen CUDA/CPU variant and pins
+# it with a constraint, so nothing below can swap in a different torch build.
+# Keep in sync with versions.env (HF_HUB_VERSION, TRL_VERSION) and the chapter README.
+transformers==5.17.0
+peft==0.21.0
+trl==1.13.0
+datasets==5.0.1
+accelerate==1.15.0
+huggingface_hub==1.32.0

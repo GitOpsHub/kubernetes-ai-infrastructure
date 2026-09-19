@@ -1,0 +1,5 @@
+- op: add
+  path: /spec/template/spec/nodeSelector
+  value:
+    eks.amazonaws.com/capacityType: SPOT
+    nvidia.com/gpu.present: "true"

@@ -1,0 +1,136 @@
+# vLLM serving either the base model straight from the Hub or the model the pipeline fine-tuned,
+# read from the bucket. Which one is decided by MODEL_PATH in ConfigMap serving-params
+# (serving.env): change it, `kubectl apply -k` again, and the ConfigMap's hash suffix changes, which
+# rolls this Deployment automatically.
+#   MODEL_PATH=Qwen/Qwen3-0.6B                          -> download from the Hub (day 1)
+#   MODEL_PATH=/mnt/store/runs/<run-id>/model           -> fine-tuned, from the bucket (read-only)
+# Same shape as chapter 09 (Recreate, probes, preStop, 25s grace) -- see its README for the why.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  labels:
+    app.kubernetes.io/name: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate                        # 1 GPU: free it before the new pod needs it
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+    spec:
+      serviceAccountName: model-reader    # bucket READ-ONLY
+      terminationGracePeriodSeconds: 25
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      initContainers:
+      # Refuse to start on a half-copied model: a bucket path must have its _COMPLETE marker.
+      # A Hub id (no leading "/") passes straight through.
+      - name: wait-for-model
+        image: busybox:1.37
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          case "${MODEL_PATH}" in
+            /*) until [ -f "${MODEL_PATH}/_COMPLETE" ]; do
+                  echo "waiting for ${MODEL_PATH}/_COMPLETE"; sleep 10
+                done ;;
+            *)  echo "serving Hub model ${MODEL_PATH}" ;;
+          esac
+        env:
+        - name: MODEL_PATH
+          valueFrom:
+            configMapKeyRef: {name: serving-params, key: MODEL_PATH}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 32Mi}
+        volumeMounts:
+        - {name: model-store, mountPath: /mnt/store, readOnly: true}
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:v0.29.0-cu129   # -cu129: runs on pre-580 drivers (see ch09)
+        # Image entrypoint is ["vllm", "serve"]; $(MODEL_PATH) is expanded by the kubelet from env.
+        args:
+        - $(MODEL_PATH)
+        # Stable name for clients (rag-api, batch pipeline) no matter which weights are loaded.
+        - --served-model-name=ch19-model
+        - --host=0.0.0.0
+        - --port=8000
+        - --max-model-len=8192
+        - --gpu-memory-utilization=0.90
+        - --max-num-seqs=64
+        - --enable-prefix-caching         # RAG prompts share a long system prefix
+        - --shutdown-timeout=10
+        env:
+        - name: MODEL_PATH
+          valueFrom:
+            configMapKeyRef: {name: serving-params, key: MODEL_PATH}
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+            nvidia.com/gpu: "1"
+          limits:
+            memory: 12Gi
+            nvidia.com/gpu: "1"
+        startupProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+          failureThreshold: 60            # 10 min: weights from Hub or bucket + CUDA graph capture
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 4
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
+        volumeMounts:
+        - {name: model-store, mountPath: /mnt/store, readOnly: true}
+        - {name: hf-cache, mountPath: /root/.cache/huggingface}
+        - {name: dshm, mountPath: /dev/shm}
+      volumes:
+      - name: model-store
+        persistentVolumeClaim:
+          claimName: model-store
+          readOnly: true
+      - name: hf-cache                    # only used when MODEL_PATH is a Hub id
+        emptyDir:
+          sizeLimit: 20Gi
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  labels:
+    app.kubernetes.io/name: vllm
+spec:
+  selector:
+    app.kubernetes.io/name: vllm
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http

@@ -1,0 +1,343 @@
+# Hugging Face fine-tuning pipeline: pull model + dataset from the Hub into the bucket, LoRA SFT on
+# one spot GPU with bucket checkpoints, evaluate against a loss gate, optionally publish to the Hub.
+#
+#   pull-model ──┐
+#                ├─> finetune (GPU, spot, retried) ─> evaluate (GPU, gate) ─> publish (CPU, optional)
+#   pull-dataset ┘
+#
+# !! TEMPLATE ORDER IS A CONTRACT !! Cloud overlays patch GPU scheduling with index-based JSON6902
+# patches (kustomize cannot select list items by name in a JSON patch). Each patch starts with a
+# `test` op on the template name, so reordering fails the build loudly instead of silently
+# patching a neighbour. Indices:  0 pipeline | 1 hf-pull | 2 finetune | 3 evaluate | 4 publish
+#
+# Every step writes to the bucket-backed PVC "model-store" (/mnt/store). Bucket FUSE mounts
+# (Mountpoint for S3, Cloud Storage FUSE) can't rename or overwrite files, so every step works in a
+# local /scratch emptyDir, copies NEW files into the bucket and writes a _COMPLETE marker LAST.
+# That is what makes each step safely re-runnable after a spot preemption.
+#
+# Submit (Argo CLI):  argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline \
+#                       -p run-id=qwen3-sft-001 --watch
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: hf-finetune-pipeline
+  namespace: ch19-pipelines
+spec:
+  entrypoint: pipeline
+  serviceAccountName: pipeline-runner     # bucket read/write + Argo executor RBAC (common/base)
+  arguments:
+    parameters:
+    # Defaults below are overwritten at build time from params.env (replacements in common/kustomization.yaml);
+    # the literal values here only document the shape.
+    - name: model-id
+      value: REPLACED_FROM_PARAMS
+    - name: model-revision
+      value: REPLACED_FROM_PARAMS
+    - name: dataset-id
+      value: REPLACED_FROM_PARAMS
+    - name: dataset-revision
+      value: REPLACED_FROM_PARAMS
+    # Checkpoints + final model live under /mnt/store/runs/<run-id>/. Re-submitting with the SAME
+    # run-id resumes from its last complete checkpoint (or is a no-op if the model is complete).
+    # VERIFY: a global parameter whose value is itself a tag ("{{workflow.name}}") relies on Argo
+    # substituting the result a second time; if you see a literal "{{workflow.name}}" directory in
+    # the bucket, always pass -p run-id=<name> explicitly.
+    - name: run-id
+      value: "{{workflow.name}}"
+    - name: max-steps
+      value: REPLACED_FROM_PARAMS
+    - name: max-eval-loss
+      value: REPLACED_FROM_PARAMS
+    # "" = skip the publish step. Set to e.g. your-user/ch19-qwen3-0.6b-sft (needs a WRITE token
+    # in Secret hf-token).
+    - name: hf-push-repo
+      value: ""
+  # Hard ceiling for the whole run, retries and spot interruptions included.
+  activeDeadlineSeconds: 21600            # 6h
+  # Keep finished Workflow objects around long enough to read logs/outputs, then let Argo clean up.
+  ttlStrategy:
+    secondsAfterSuccess: 86400            # 1 day
+    secondsAfterFailure: 259200           # 3 days: failed runs are the ones you want to debug
+  # Delete pods of successful steps (they hold nothing: all state is in the bucket); keep failed
+  # pods so `kubectl logs` still works.
+  podGC:
+    strategy: OnPodSuccess
+  # Applied to every step pod. The GKE overlay adds the gke-gcsfuse/* annotations here.
+  podMetadata:
+    labels:
+      app.kubernetes.io/part-of: ch19-pipelines
+      ch19/pipeline: hf-finetune
+  volumes:
+  - name: model-store
+    persistentVolumeClaim:
+      claimName: model-store
+  - name: ch19-scripts
+    configMap:
+      name: ch19-scripts
+  templates:
+  # ---------------------------------------------------------------- [0] pipeline (DAG)
+  - name: pipeline
+    dag:
+      tasks:
+      - name: pull-model
+        template: hf-pull
+        arguments:
+          parameters:
+          - {name: repo-id, value: "{{workflow.parameters.model-id}}"}
+          - {name: repo-type, value: model}
+          - {name: revision, value: "{{workflow.parameters.model-revision}}"}
+      - name: pull-dataset
+        template: hf-pull
+        arguments:
+          parameters:
+          - {name: repo-id, value: "{{workflow.parameters.dataset-id}}"}
+          - {name: repo-type, value: dataset}
+          - {name: revision, value: "{{workflow.parameters.dataset-revision}}"}
+      - name: finetune
+        depends: "pull-model && pull-dataset"
+        template: finetune
+        arguments:
+          parameters:
+          - {name: base-model-path, value: "{{tasks.pull-model.outputs.parameters.dest}}"}
+          - {name: dataset-path, value: "{{tasks.pull-dataset.outputs.parameters.dest}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+          - {name: max-steps, value: "{{workflow.parameters.max-steps}}"}
+      - name: evaluate
+        depends: finetune
+        template: evaluate
+        arguments:
+          parameters:
+          - {name: model-path, value: "{{tasks.finetune.outputs.parameters.model-path}}"}
+          - {name: dataset-path, value: "{{tasks.pull-dataset.outputs.parameters.dest}}"}
+          - {name: run-id, value: "{{workflow.parameters.run-id}}"}
+          - {name: max-eval-loss, value: "{{workflow.parameters.max-eval-loss}}"}
+      - name: publish
+        depends: evaluate                 # only a model that passed the gate is ever published
+        when: "'{{workflow.parameters.hf-push-repo}}' != ''"
+        template: publish
+        arguments:
+          parameters:
+          - {name: model-path, value: "{{tasks.finetune.outputs.parameters.model-path}}"}
+          - {name: hf-push-repo, value: "{{workflow.parameters.hf-push-repo}}"}
+
+  # ---------------------------------------------------------------- [1] hf-pull (CPU)
+  # Download one pinned repo revision to /scratch, copy it into the bucket, _COMPLETE last.
+  # Idempotent: exits 0 immediately if the revision is already complete in the bucket, so the
+  # second run of the pipeline (or a retry) costs nothing.
+  - name: hf-pull
+    inputs:
+      parameters:
+      - name: repo-id
+      - name: repo-type
+      - name: revision
+    outputs:
+      parameters:
+      - name: dest                        # e.g. /mnt/store/hf/models/Qwen/Qwen3-0.6B/<sha>
+        valueFrom:
+          path: /tmp/dest.txt
+    retryStrategy:
+      limit: "3"
+      retryPolicy: Always                 # spot reclaim / Hub hiccup: just run again
+      backoff:
+        duration: "20s"
+        factor: "2"
+        cap: "5m"
+    activeDeadlineSeconds: 3600           # per attempt
+    container:
+      image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+      # PEP 723 script: uv reads the inline dependency block and builds a throwaway env.
+      command: ["uv", "run", "/opt/ch19/hf_pull.py"]
+      env:
+      - {name: REPO_ID, value: "{{inputs.parameters.repo-id}}"}
+      - {name: REPO_TYPE, value: "{{inputs.parameters.repo-type}}"}
+      - {name: REVISION, value: "{{inputs.parameters.revision}}"}
+      - {name: STORE_ROOT, value: /mnt/store}
+      - {name: SCRATCH, value: /scratch}
+      - {name: HF_HOME, value: /scratch/hf-home}
+      - {name: UV_CACHE_DIR, value: /scratch/uv-cache}
+      - name: HF_TOKEN                    # optional: all repos here are ungated
+        valueFrom:
+          secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+      resources:
+        requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 8Gi}
+        limits: {memory: 4Gi, ephemeral-storage: 16Gi}
+      volumeMounts:
+      - {name: model-store, mountPath: /mnt/store}
+      - {name: scratch, mountPath: /scratch}
+      - {name: ch19-scripts, mountPath: /opt/ch19, readOnly: true}
+    volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 16Gi
+
+  # ---------------------------------------------------------------- [2] finetune (GPU)
+  - name: finetune
+    inputs:
+      parameters:
+      - name: base-model-path
+      - name: dataset-path
+      - name: run-id
+      - name: max-steps
+    outputs:
+      parameters:
+      # globalName exports it as workflow.outputs.parameters.model-path (shown by `argo get`) --
+      # this is the value you paste into <cloud>/serving.env to serve the fine-tuned model.
+      - name: model-path
+        globalName: model-path
+        valueFrom:
+          path: /tmp/model-path.txt
+    # Spot: a reclaimed node kills the pod; Argo starts a new one, finetune.py finds the newest
+    # checkpoint-N/_COMPLETE under runs/<run-id>/checkpoints and resumes from it. At most
+    # SAVE_STEPS steps of work are lost per interruption.
+    # Exit code 1 (a Python exception: bad config, CUDA OOM, ...) is deterministic -- retrying
+    # would only burn GPU hours, so the expression stops it. Anything else (SIGTERM 143, SIGKILL
+    # 137, pod deleted = -1) is treated as an interruption and retried.
+    retryStrategy:
+      limit: "10"
+      retryPolicy: Always
+      expression: 'lastRetry.exitCode != "1"'
+      backoff:
+        duration: "30s"                   # time for the node group / autoscaler to bring a new node
+        factor: "2"
+        cap: "10m"
+    activeDeadlineSeconds: 14400          # per attempt (4h)
+    # EC2 gives 2 min of spot notice, AKS ~30s, GKE ~30s. 110s lets the SIGTERM handler finish the
+    # in-flight step and push a checkpoint where the notice allows it; the periodic SAVE_STEPS
+    # checkpoints are the real safety net everywhere.
+    podSpecPatch: '{"terminationGracePeriodSeconds": 110}'
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    container:
+      image: ch19-trainer:REPLACED_BY_OVERLAY
+      # Write the output parameter first, then exec: python becomes the process argoexec signals
+      # directly (a plain `sh -c "python ..."` would swallow SIGTERM and lose the graceful save).
+      command: ["/bin/sh", "-c"]
+      args:
+      - printf '%s' "${RUN_DIR}/model" > /tmp/model-path.txt && exec python /app/finetune.py
+      envFrom:
+      - configMapRef: {name: pipeline-params}   # SAVE_STEPS, LEARNING_RATE, LORA_R, TRAIN_SAMPLES, ...
+      env:
+      - {name: BASE_MODEL_PATH, value: "{{inputs.parameters.base-model-path}}"}
+      - {name: DATASET_PATH, value: "{{inputs.parameters.dataset-path}}"}
+      - {name: RUN_DIR, value: "/mnt/store/runs/{{inputs.parameters.run-id}}"}
+      - {name: MAX_STEPS, value: "{{inputs.parameters.max-steps}}"}
+      - {name: SCRATCH, value: /scratch}
+      - {name: HF_HOME, value: /scratch/hf-home}
+      - {name: UV_CACHE_DIR, value: /scratch/uv-cache}
+      - {name: HF_HUB_OFFLINE, value: "1"}   # everything is loaded from the bucket copies
+      resources:
+        # Sized for a 4 vCPU / 16 GiB GPU node (g6.xlarge / g4dn.xlarge / Standard_NC4as_T4_v3 /
+        # g2-standard-4, ~3.9 allocatable vCPU) with room left for DaemonSets, Argo's wait container
+        # and, on GKE, the gcsfuse sidecar.
+        requests: {cpu: "2", memory: 10Gi, ephemeral-storage: 20Gi, nvidia.com/gpu: "1"}
+        limits: {memory: 13Gi, ephemeral-storage: 40Gi, nvidia.com/gpu: "1"}
+      volumeMounts:
+      - {name: model-store, mountPath: /mnt/store}
+      - {name: scratch, mountPath: /scratch}
+      - {name: dshm, mountPath: /dev/shm}
+    volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 40Gi                   # local checkpoints + merged model before copy-out
+    # PyTorch DataLoader workers share tensors through /dev/shm (64Mi by default in containers).
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
+
+  # ---------------------------------------------------------------- [3] evaluate (GPU, quality gate)
+  - name: evaluate
+    inputs:
+      parameters:
+      - name: model-path
+      - name: dataset-path
+      - name: run-id
+      - name: max-eval-loss
+    outputs:
+      parameters:
+      - name: eval-loss
+        globalName: eval-loss
+        valueFrom:
+          path: /tmp/eval_loss.txt
+    # Exit 1 = the gate said "model not good enough" -> final, do NOT retry. Only interruptions retry.
+    retryStrategy:
+      limit: "5"
+      retryPolicy: Always
+      expression: 'lastRetry.exitCode != "1"'
+      backoff:
+        duration: "30s"
+        factor: "2"
+        cap: "5m"
+    activeDeadlineSeconds: 3600
+    podSpecPatch: '{"terminationGracePeriodSeconds": 30}'
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    container:
+      image: ch19-trainer:REPLACED_BY_OVERLAY
+      command: ["python", "/app/evaluate.py"]
+      envFrom:
+      - configMapRef: {name: pipeline-params}   # EVAL_SAMPLES, MAX_LENGTH
+      env:
+      - {name: MODEL_PATH, value: "{{inputs.parameters.model-path}}"}
+      - {name: DATASET_PATH, value: "{{inputs.parameters.dataset-path}}"}
+      - {name: RUN_DIR, value: "/mnt/store/runs/{{inputs.parameters.run-id}}"}
+      - {name: MAX_EVAL_LOSS, value: "{{inputs.parameters.max-eval-loss}}"}
+      - {name: SCRATCH, value: /scratch}
+      - {name: HF_HOME, value: /scratch/hf-home}
+      - {name: UV_CACHE_DIR, value: /scratch/uv-cache}
+      - {name: HF_HUB_OFFLINE, value: "1"}
+      resources:
+        requests: {cpu: "2", memory: 10Gi, ephemeral-storage: 4Gi, nvidia.com/gpu: "1"}
+        limits: {memory: 13Gi, ephemeral-storage: 8Gi, nvidia.com/gpu: "1"}
+      volumeMounts:
+      - {name: model-store, mountPath: /mnt/store}
+      - {name: scratch, mountPath: /scratch}
+      - {name: dshm, mountPath: /dev/shm}
+    volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 8Gi
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
+
+  # ---------------------------------------------------------------- [4] publish (CPU, optional)
+  - name: publish
+    inputs:
+      parameters:
+      - name: model-path
+      - name: hf-push-repo
+    retryStrategy:
+      limit: "3"
+      retryPolicy: Always
+      backoff:
+        duration: "20s"
+        factor: "2"
+        cap: "5m"
+    activeDeadlineSeconds: 3600
+    container:
+      image: ch19-trainer:REPLACED_BY_OVERLAY
+      command: ["python", "/app/publish_hf.py"]
+      env:
+      - {name: MODEL_PATH, value: "{{inputs.parameters.model-path}}"}
+      - {name: HF_PUSH_REPO, value: "{{inputs.parameters.hf-push-repo}}"}
+      - {name: HF_PRIVATE, value: "true"}  # never make a lab model public by accident
+      - {name: HF_HOME, value: /scratch/hf-home}
+      - name: HF_TOKEN                    # must be a WRITE token for this step
+        valueFrom:
+          secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+      resources:
+        requests: {cpu: 500m, memory: 1Gi, ephemeral-storage: 1Gi}
+        limits: {memory: 2Gi, ephemeral-storage: 2Gi}
+      volumeMounts:
+      - {name: model-store, mountPath: /mnt/store, readOnly: true}
+      - {name: scratch, mountPath: /scratch}
+    volumes:
+    - name: scratch
+      emptyDir:
+        sizeLimit: 2Gi

@@ -1,0 +1,49 @@
+# Strip the GPU bits from finetune (templates[2]) and evaluate (templates[3]): no nvidia.com/gpu
+# request, no GPU toleration, no /dev/shm memory volume, laptop-sized CPU/memory.
+# Index-based JSON6902; every `test` op fails the build if common/training changes the order of
+# templates, volumeMounts or volumes instead of silently removing the wrong entry.
+# finetune: volumeMounts = [model-store, scratch, dshm], volumes = [scratch, dshm]
+- op: test
+  path: /spec/templates/2/name
+  value: finetune
+- op: remove
+  path: /spec/templates/2/tolerations
+- op: replace
+  path: /spec/templates/2/container/resources
+  value:
+    requests: {cpu: "1", memory: 3Gi, ephemeral-storage: 4Gi}
+    limits: {memory: 6Gi, ephemeral-storage: 10Gi}
+- op: test
+  path: /spec/templates/2/container/volumeMounts/2/name
+  value: dshm
+- op: remove
+  path: /spec/templates/2/container/volumeMounts/2
+- op: test
+  path: /spec/templates/2/volumes/1/name
+  value: dshm
+- op: remove
+  path: /spec/templates/2/volumes/1
+- op: replace
+  path: /spec/templates/2/volumes/0/emptyDir/sizeLimit
+  value: 10Gi
+# evaluate: same layout
+- op: test
+  path: /spec/templates/3/name
+  value: evaluate
+- op: remove
+  path: /spec/templates/3/tolerations
+- op: replace
+  path: /spec/templates/3/container/resources
+  value:
+    requests: {cpu: "1", memory: 2Gi, ephemeral-storage: 2Gi}
+    limits: {memory: 4Gi, ephemeral-storage: 4Gi}
+- op: test
+  path: /spec/templates/3/container/volumeMounts/2/name
+  value: dshm
+- op: remove
+  path: /spec/templates/3/container/volumeMounts/2
+- op: test
+  path: /spec/templates/3/volumes/1/name
+  value: dshm
+- op: remove
+  path: /spec/templates/3/volumes/1

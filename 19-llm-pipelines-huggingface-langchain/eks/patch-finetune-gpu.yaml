@@ -1,0 +1,19 @@
+# Index-based on purpose (JSON6902 can't select list items by name). The `test` ops make the build
+# FAIL if common/training reorders its templates, instead of silently patching the wrong step.
+# Indices: 2 = finetune, 3 = evaluate. The nvidia.com/gpu toleration is already in common.
+- op: test
+  path: /spec/templates/2/name
+  value: finetune
+- op: add
+  path: /spec/templates/2/nodeSelector
+  value:
+    eks.amazonaws.com/capacityType: SPOT
+    nvidia.com/gpu.present: "true"      # set at boot by nodeadm on the EKS AL2023 NVIDIA AMI (ch01)
+- op: test
+  path: /spec/templates/3/name
+  value: evaluate
+- op: add
+  path: /spec/templates/3/nodeSelector
+  value:
+    eks.amazonaws.com/capacityType: SPOT
+    nvidia.com/gpu.present: "true"
