@@ -64,13 +64,13 @@ By the end you can:
 4. Set up an AWS Budget alert.
 5. Scale the GPU node group up from zero and confirm a real GPU node joins the cluster.
 
-| Time | Activity |
-|---|---|
-| 0:00–0:30 | Read sections 3–4. Install and verify tools (Step 1) |
-| 0:30–1:00 | Quota check + request (do this first; it takes time to approve) |
-| 1:00–1:15 | Budget (Step 3) |
+| Time      | Activity                                                                  |
+| --------- | ------------------------------------------------------------------------- |
+| 0:00–0:30 | Read sections 3–4. Install and verify tools (Step 1)                      |
+| 0:30–1:00 | Quota check + request (do this first; it takes time to approve)           |
+| 1:00–1:15 | Budget (Step 3)                                                           |
 | 1:15–2:15 | Create the cluster, spot smoke test, scale the GPU group up and back down |
-| 2:15–2:30 | Checkpoint questions, cleanup |
+| 2:15–2:30 | Checkpoint questions, cleanup                                             |
 
 ## 3. Concepts
 
@@ -155,13 +155,13 @@ Reading this diagram box by box, for anyone who hasn't seen one of these before:
   installs an autoscaler (Karpenter) that automates this arrow — until then, if the GPU group is at 0
   nodes, GPU Pods just sit in `Pending` state forever, waiting for you to scale the group up by hand.
 
-| | EKS (eksctl managed node groups) |
-|---|---|
-| CPU node group | `spot-cpu`, 6 instance types, `spot: true`, 1–4 |
-| GPU node group | `spot-gpu`, `g4dn.xlarge`, `spot: true`, **0–1** |
-| Scale-from-zero | **No autoscaler by default**: scale manually or use Karpenter (`13-node-autoscaling-and-cost`) |
-| Spot taint added automatically | No (we add `nvidia.com/gpu` taint on the GPU group ourselves) |
-| GPU taint added automatically | No (set in `cluster.yaml`) |
+|                                | EKS (eksctl managed node groups)                                                               |
+| ------------------------------ | ---------------------------------------------------------------------------------------------- |
+| CPU node group                 | `spot-cpu`, 6 instance types, `spot: true`, 1–4                                                |
+| GPU node group                 | `spot-gpu`, `g4dn.xlarge`, `spot: true`, **0–1**                                               |
+| Scale-from-zero                | **No autoscaler by default**: scale manually or use Karpenter (`13-node-autoscaling-and-cost`) |
+| Spot taint added automatically | No (we add `nvidia.com/gpu` taint on the GPU group ourselves)                                  |
+| GPU taint added automatically  | No (set in `cluster.yaml`)                                                                     |
 
 ### 3.2 Quotas that block spot GPUs
 
@@ -172,8 +172,8 @@ typically start with the **spot GPU quota at zero**, which means `eksctl create 
 create the *node group configuration*, but AWS will refuse to actually launch any GPU instances into
 it until the quota is raised.
 
-| Quota you need for **spot** GPUs | Unit | Also check |
-|---|---|---|
+| Quota you need for **spot** GPUs                       | Unit  | Also check                                                                    |
+| ------------------------------------------------------ | ----- | ----------------------------------------------------------------------------- |
 | **All G and VT Spot Instance Requests** (`L-3819A6DF`) | vCPUs | `L-DB2E81BA` on-demand G/VT (fallback), `L-34B43A08` standard spot (CPU pool) |
 
 A `g4dn.xlarge` is **4 vCPUs**, so a spot vCPU quota of 4 gives you exactly one GPU node.
@@ -468,13 +468,13 @@ two of the instance terminating.
 
 ## 6. Troubleshooting
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| Nodegroup `CREATE_FAILED` `MaxSpotInstanceCountExceeded` / `VcpuLimitExceeded` | Your account's `L-3819A6DF` spot G/VT vCPU quota (section 3.2) is lower than what the GPU node group is trying to launch — most commonly it's still the default `0`. | Request an increase (Step 2); meanwhile keep GPU group at 0 so cluster creation itself still succeeds |
-| Spot group stuck `desired 1 / 0 running`, `InsufficientInstanceCapacity` | Quota is fine, but AWS currently has no spare spot capacity for those instance types in your AZs — this is a supply problem, not a permissions problem, and can resolve itself minutes later or persist for hours. | Add more instance types (`g6.2xlarge`, `g5.xlarge`), try other AZs/regions, or fall back to on-demand (section 5) |
-| `eksctl scale nodegroup` for `spot-gpu` succeeds but no node appears | Quota or spot-capacity problem — see the troubleshooting rows above; a scale command can return immediately even though the underlying ASG can't actually launch an instance. | `eksctl get nodegroup --cluster "$EKS_CLUSTER" --name spot-gpu` and check the ASG's activity history in the EC2 console for the real error |
-| `eksctl create cluster` fails with an IAM/permissions error | The AWS identity you're using doesn't have enough IAM permission to create the VPC/IAM roles/EKS resources eksctl needs. | Use an admin/owner role, or ask whoever manages the account for the missing permissions; re-run once granted (eksctl is safe to re-run — it picks up where CloudFormation left off) |
-| `kubectl` commands hang or say "Unable to connect to the server" | Your local kubeconfig (section 3.0) doesn't point at this cluster, or your AWS credentials used to authenticate have expired. | Re-run `aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"`, and re-authenticate (`aws configure sso login` or re-run `aws configure`) if your session token expired |
+| Symptom                                                                        | Cause                                                                                                                                                                                                              | Fix                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nodegroup `CREATE_FAILED` `MaxSpotInstanceCountExceeded` / `VcpuLimitExceeded` | Your account's `L-3819A6DF` spot G/VT vCPU quota (section 3.2) is lower than what the GPU node group is trying to launch — most commonly it's still the default `0`.                                               | Request an increase (Step 2); meanwhile keep GPU group at 0 so cluster creation itself still succeeds                                                                                    |
+| Spot group stuck `desired 1 / 0 running`, `InsufficientInstanceCapacity`       | Quota is fine, but AWS currently has no spare spot capacity for those instance types in your AZs — this is a supply problem, not a permissions problem, and can resolve itself minutes later or persist for hours. | Add more instance types (`g6.2xlarge`, `g5.xlarge`), try other AZs/regions, or fall back to on-demand (section 5)                                                                        |
+| `eksctl scale nodegroup` for `spot-gpu` succeeds but no node appears           | Quota or spot-capacity problem — see the troubleshooting rows above; a scale command can return immediately even though the underlying ASG can't actually launch an instance.                                      | `eksctl get nodegroup --cluster "$EKS_CLUSTER" --name spot-gpu` and check the ASG's activity history in the EC2 console for the real error                                               |
+| `eksctl create cluster` fails with an IAM/permissions error                    | The AWS identity you're using doesn't have enough IAM permission to create the VPC/IAM roles/EKS resources eksctl needs.                                                                                           | Use an admin/owner role, or ask whoever manages the account for the missing permissions; re-run once granted (eksctl is safe to re-run — it picks up where CloudFormation left off)      |
+| `kubectl` commands hang or say "Unable to connect to the server"               | Your local kubeconfig (section 3.0) doesn't point at this cluster, or your AWS credentials used to authenticate have expired.                                                                                      | Re-run `aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"`, and re-authenticate (`aws configure sso login` or re-run `aws configure`) if your session token expired |
 
 ## 7. Cleanup and cost notes
 

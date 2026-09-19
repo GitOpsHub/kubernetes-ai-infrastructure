@@ -132,13 +132,13 @@ By the end you can:
 7. Explain AWS EFA hardware acceleration (OS bypass, SRD, GPUDirect RDMA) and configure critical
    production NCCL environment variables for Kubernetes.
 
-| Block | Time | What |
-|---|---|---|
-| Theory | 35 min | §3 concepts, TrainJob/runtime/JobSet object model |
-| Lab A | 60 min | Install Trainer, GPU node pool, storage, run the 2-node DDP TrainJob on your cloud |
-| Lab B | 45 min | Kill a node / simulate spot reclaim, watch gang recreate + checkpoint resume |
-| Lab C (optional) | 20 min | Layer `kueue/<cloud>`, watch Kueue admit/suspend the TrainJob |
-| Review | 20 min | Troubleshooting, checkpoint questions, cleanup |
+| Block            | Time   | What                                                                               |
+| ---------------- | ------ | ---------------------------------------------------------------------------------- |
+| Theory           | 35 min | §3 concepts, TrainJob/runtime/JobSet object model                                  |
+| Lab A            | 60 min | Install Trainer, GPU node pool, storage, run the 2-node DDP TrainJob on your cloud |
+| Lab B            | 45 min | Kill a node / simulate spot reclaim, watch gang recreate + checkpoint resume       |
+| Lab C (optional) | 20 min | Layer `kueue/<cloud>`, watch Kueue admit/suspend the TrainJob                      |
+| Review           | 20 min | Troubleshooting, checkpoint questions, cleanup                                     |
 
 ## 3. Concepts
 
@@ -222,13 +222,13 @@ carries its own `spec.runtimePatches[]` entry (a strategic-merge patch the Train
 applies to the runtime's JobSet template at admission time) with the spot/GPU `nodeSelector` +
 `tolerations` for this cloud.
 
-| | EKS |
-|---|---|
-| GPU | 1x T4 (`g4dn.xlarge`) |
-| Spot nodeSelector | `eks.amazonaws.com/capacityType: SPOT` |
-| GPU taint added by | this chapter's node-group create (§4.3), `nvidia.com/gpu` |
-| Spot taint added by | nobody (opt-in) |
-| Checkpoint bucket | S3 via Mountpoint CSI (IRSA) |
+|                     | EKS                                                       |
+| ------------------- | --------------------------------------------------------- |
+| GPU                 | 1x T4 (`g4dn.xlarge`)                                     |
+| Spot nodeSelector   | `eks.amazonaws.com/capacityType: SPOT`                    |
+| GPU taint added by  | this chapter's node-group create (§4.3), `nvidia.com/gpu` |
+| Spot taint added by | nobody (opt-in)                                           |
+| Checkpoint bucket   | S3 via Mountpoint CSI (IRSA)                              |
 
 Apply the full lab with plain `kubectl apply -f` against the files under `eks/` — see §4.4 for the
 explicit command sequence.
@@ -295,12 +295,12 @@ DeepSpeed (by Microsoft) pioneered this sharding hierarchy:
 - **ZeRO-Stage 3**: Shards optimizer states + gradients + model parameters (linear memory reduction with world size; introduces ~50% communication overhead due to all-gather in forward/backward passes).
 - **ZeRO-Offload**: Offloads optimizer states or model parameters to host system CPU RAM or node-local NVMe SSDs via PCIe. This enables fine-tuning a 13B model on a single 24 GB consumer/L4 GPU.
 
-| Paradigm | Model Weights | Gradients | Optimizer States | Extra Communication | Max Model on 8x 24GB GPUs |
-|---|---|---|---|---|---|
-| **DDP** | Replicated | Replicated | Replicated | None (standard all-reduce) | ~1.5B params |
-| **FSDP / ZeRO-2** | Replicated | Sharded | Sharded | None | ~3B params |
-| **FSDP / ZeRO-3** | Sharded | Sharded | Sharded | +50% (all-gather layers) | ~14B–20B params |
-| **ZeRO-3 + Offload** | Sharded (CPU/NVMe) | Sharded | Sharded (CPU/NVMe) | High (PCIe transfer) | ~30B+ params |
+| Paradigm             | Model Weights      | Gradients  | Optimizer States   | Extra Communication        | Max Model on 8x 24GB GPUs |
+| -------------------- | ------------------ | ---------- | ------------------ | -------------------------- | ------------------------- |
+| **DDP**              | Replicated         | Replicated | Replicated         | None (standard all-reduce) | ~1.5B params              |
+| **FSDP / ZeRO-2**    | Replicated         | Sharded    | Sharded            | None                       | ~3B params                |
+| **FSDP / ZeRO-3**    | Sharded            | Sharded    | Sharded            | +50% (all-gather layers)   | ~14B–20B params           |
+| **ZeRO-3 + Offload** | Sharded (CPU/NVMe) | Sharded    | Sharded (CPU/NVMe) | High (PCIe transfer)       | ~30B+ params              |
 
 In Kubeflow Trainer v2, you can switch from plain DDP to FSDP or DeepSpeed by configuring the PyTorch plugin in your `TrainingRuntime` or specifying an `accelerate_config.yaml` with `plugin: fsdp`.
 
@@ -661,14 +661,14 @@ they did on spot — just at 2-4x the hourly cost (§7), so switch back to spot 
 
 ## 6. Troubleshooting
 
-| Symptom | Likely cause | Why this happens | Fix |
-|---|---|---|---|
-| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied the §3.4 Kueue steps) | Kueue's admission webhook suspends every TrainJob labeled with a `queue-name` until its `LocalQueue`/`ClusterQueue` has quota to admit it — if the ClusterQueue's ResourceFlavors don't map to any real, schedulable nodes (e.g. the GPU node group in §4.3 was never created), the TrainJob waits forever with no error, because from Kueue's perspective it's correctly waiting for capacity that simply never shows up | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
-| Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node group scaled to 0 and nothing has scaled it up yet, or GPU quota exhausted | Kubernetes' scheduler can only place a pod on a node that already exists with the requested resource; a node group at `desiredCapacity: 0` (§4.3) has no such node until something (Cluster Autoscaler, or your own `eksctl scale nodegroup`) provisions one, and even then AWS itself will refuse to launch the instance if your account's EC2 GPU quota (§4.1) is exhausted | `kubectl get nodes -l ...`, check the EC2 quota console |
-| `clustertrainingruntimes` empty after install | Post-install hook Job hasn't finished | The Helm chart doesn't create the built-in runtime object directly in its templates — it runs a Kubernetes Job (a Helm post-install hook) that applies the runtime manifests after the controller is up, so there's a real (usually short) window where the CRDs exist but no runtime object does yet | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
-| Rank 0 hangs on `all_reduce` after a delete | Deleted rank 0 itself, or `Recreate` hasn't fired yet | Deleting rank 0 removes the peer every other rank's `PET_MASTER_ADDR` points at, so nobody can complete rendezvous until the JobSet notices the failure and recreates the whole gang (§3.2) — if you're watching immediately after the delete, you're just seeing the (expected) gap before `Recreate` kicks in, not a stuck state | `kubectl -n ch07-training get jobs` — both Jobs should show a new generation |
-| Checkpoint dir empty after resume | `.done` marker never written (grace period too short, or write raced eviction) | The `.pt` payload and `.done` marker (§3.2) are two separate writes; if the pod is killed between them — because `terminationGracePeriodSeconds` was too short for the upload to finish — the reader on restart correctly ignores the incomplete step and falls back to the last step that *did* get a `.done` marker, which can look like "the checkpoint vanished" if you were watching the newest one | Check pod logs for `SIGTERM received`; increase `terminationGracePeriodSeconds` |
-| Mountpoint S3 mount `permission denied` | IRSA binding from §4.3's storage setup didn't propagate yet, or SA name mismatch | IRSA works by federating a Kubernetes ServiceAccount's OIDC token to an IAM role via a trust policy; if the ServiceAccount name/namespace in the trust policy doesn't exactly match what the pod actually uses, or the CSI driver's pod started before the IAM role propagated through AWS's eventually-consistent IAM, the mount will be denied even though the setup commands "succeeded" | Re-run the storage setup commands; confirm `serviceAccountName: trainer` matches the binding's subject |
+| Symptom                                             | Likely cause                                                                           | Why this happens                                                                                                                                                                                                                                                                                                                                                                                                          | Fix                                                                                                       |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| TrainJob stuck `Pending`/`Suspended` forever        | No `kueue-system` ClusterQueue admitting it (only if you applied the §3.4 Kueue steps) | Kueue's admission webhook suspends every TrainJob labeled with a `queue-name` until its `LocalQueue`/`ClusterQueue` has quota to admit it — if the ClusterQueue's ResourceFlavors don't map to any real, schedulable nodes (e.g. the GPU node group in §4.3 was never created), the TrainJob waits forever with no error, because from Kueue's perspective it's correctly waiting for capacity that simply never shows up | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes    |
+| Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node group scaled to 0 and nothing has scaled it up yet, or GPU quota exhausted    | Kubernetes' scheduler can only place a pod on a node that already exists with the requested resource; a node group at `desiredCapacity: 0` (§4.3) has no such node until something (Cluster Autoscaler, or your own `eksctl scale nodegroup`) provisions one, and even then AWS itself will refuse to launch the instance if your account's EC2 GPU quota (§4.1) is exhausted                                             | `kubectl get nodes -l ...`, check the EC2 quota console                                                   |
+| `clustertrainingruntimes` empty after install       | Post-install hook Job hasn't finished                                                  | The Helm chart doesn't create the built-in runtime object directly in its templates — it runs a Kubernetes Job (a Helm post-install hook) that applies the runtime manifests after the controller is up, so there's a real (usually short) window where the CRDs exist but no runtime object does yet                                                                                                                     | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
+| Rank 0 hangs on `all_reduce` after a delete         | Deleted rank 0 itself, or `Recreate` hasn't fired yet                                  | Deleting rank 0 removes the peer every other rank's `PET_MASTER_ADDR` points at, so nobody can complete rendezvous until the JobSet notices the failure and recreates the whole gang (§3.2) — if you're watching immediately after the delete, you're just seeing the (expected) gap before `Recreate` kicks in, not a stuck state                                                                                        | `kubectl -n ch07-training get jobs` — both Jobs should show a new generation                              |
+| Checkpoint dir empty after resume                   | `.done` marker never written (grace period too short, or write raced eviction)         | The `.pt` payload and `.done` marker (§3.2) are two separate writes; if the pod is killed between them — because `terminationGracePeriodSeconds` was too short for the upload to finish — the reader on restart correctly ignores the incomplete step and falls back to the last step that *did* get a `.done` marker, which can look like "the checkpoint vanished" if you were watching the newest one                  | Check pod logs for `SIGTERM received`; increase `terminationGracePeriodSeconds`                           |
+| Mountpoint S3 mount `permission denied`             | IRSA binding from §4.3's storage setup didn't propagate yet, or SA name mismatch       | IRSA works by federating a Kubernetes ServiceAccount's OIDC token to an IAM role via a trust policy; if the ServiceAccount name/namespace in the trust policy doesn't exactly match what the pod actually uses, or the CSI driver's pod started before the IAM role propagated through AWS's eventually-consistent IAM, the mount will be denied even though the setup commands "succeeded"                               | Re-run the storage setup commands; confirm `serviceAccountName: trainer` matches the binding's subject    |
 
 ## 7. Cleanup and cost notes
 
@@ -793,11 +793,11 @@ on the same network switch, eliminating inter-switch latency and achieving full 
 
 ### Versions tested
 
-| Component | Version | Source |
-|---|---|---|
-| Kubeflow Trainer | `${KUBEFLOW_TRAINER_VERSION}` (v2.3.0) | `versions.env`, `oci://ghcr.io/kubeflow/charts/kubeflow-trainer` |
-| PyTorch training image | `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime` (GPU), `-cuda13.0-` (runtime default) | Docker Hub `pytorch/pytorch` |
-| Kueue (optional overlay) | `${KUEUE_VERSION}` (0.19.4) | `versions.env`, `kueue.x-k8s.io/v1beta2` |
+| Component                | Version                                                                                | Source                                                           |
+| ------------------------ | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Kubeflow Trainer         | `${KUBEFLOW_TRAINER_VERSION}` (v2.3.0)                                                 | `versions.env`, `oci://ghcr.io/kubeflow/charts/kubeflow-trainer` |
+| PyTorch training image   | `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime` (GPU), `-cuda13.0-` (runtime default) | Docker Hub `pytorch/pytorch`                                     |
+| Kueue (optional overlay) | `${KUEUE_VERSION}` (0.19.4)                                                            | `versions.env`, `kueue.x-k8s.io/v1beta2`                         |
 
 ---
 

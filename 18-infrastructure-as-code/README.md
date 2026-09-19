@@ -35,12 +35,12 @@ files. **Why does *only this chapter* get this treatment, when the other 17 use 
 kustomize?** Because cluster and node-pool provisioning has a different risk profile than everything
 else in the course:
 
-| | Chapters 00, 01–17 (kustomize + shell/`eksctl`) | Chapter 18 (Terraform) |
-|---|---|---|
-| How often does it change? | Disposable — you build it, use it for a lab, tear it down same day | Stood up once, kept for months, changed rarely |
-| Blast radius of a mistake | A bad `ClusterQueue` or Helm value breaks one namespace; `kubectl delete -k` and redo | A bad node-pool change can take down every workload's compute, or (worse) delete the cluster |
-| Is the current state already visible? | Yes — `kubectl get`/`diff` shows the live object right now | Not by default — the AWS console doesn't show you a diff before you click "Update" |
-| Recreate cost if you get it wrong | Minutes | Potentially the whole cluster + VPC |
+|                                       | Chapters 00, 01–17 (kustomize + shell/`eksctl`)                                       | Chapter 18 (Terraform)                                                                       |
+| ------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| How often does it change?             | Disposable — you build it, use it for a lab, tear it down same day                    | Stood up once, kept for months, changed rarely                                               |
+| Blast radius of a mistake             | A bad `ClusterQueue` or Helm value breaks one namespace; `kubectl delete -k` and redo | A bad node-pool change can take down every workload's compute, or (worse) delete the cluster |
+| Is the current state already visible? | Yes — `kubectl get`/`diff` shows the live object right now                            | Not by default — the AWS console doesn't show you a diff before you click "Update"           |
+| Recreate cost if you get it wrong     | Minutes                                                                               | Potentially the whole cluster + VPC                                                          |
 
 A shell script calling `eksctl create cluster` is the right tool for a lab environment you'll delete in
 an afternoon (chapters 00–17's whole premise). It stops being the right tool the moment a real platform
@@ -118,13 +118,13 @@ describing the cluster. This chapter's [`eks/main.tf`](eks/main.tf) describes th
 same VPC shape, same spot CPU pool, same spot GPU pool scaled to zero — as Terraform resources/modules
 instead. Concretely:
 
-| Chapter 00 (`eksctl`) | Chapter 18 (Terraform) | What's actually different |
-|---|---|---|
-| `eks/cluster.yaml` (`ClusterConfig` YAML) | `eks/main.tf`, `eks/variables.tf` (HCL) | Same information, different syntax; `envsubst` templating in ch.00 becomes Terraform variables here |
-| `eksctl create cluster -f cluster.yaml` | `terraform apply` | `eksctl` runs immediately; `terraform apply` shows a plan first and needs a typed `yes` |
-| eksctl re-run to change the cluster (e.g. `eksctl update nodegroup`) | edit a `.tf` file, `terraform plan`, then `terraform apply` | eksctl has no diff step; Terraform always shows one |
-| Nothing — `eksctl` doesn't remember what it did beyond querying AWS live | `terraform.tfstate` (§3.3) | This is the piece with no eksctl equivalent at all |
-| `eksctl delete cluster` | `terraform destroy` (via `eks/cleanup.sh`, §0.2) | eksctl deletes immediately; this chapter wraps destroy in a confirmation-gated script |
+| Chapter 00 (`eksctl`)                                                    | Chapter 18 (Terraform)                                      | What's actually different                                                                           |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `eks/cluster.yaml` (`ClusterConfig` YAML)                                | `eks/main.tf`, `eks/variables.tf` (HCL)                     | Same information, different syntax; `envsubst` templating in ch.00 becomes Terraform variables here |
+| `eksctl create cluster -f cluster.yaml`                                  | `terraform apply`                                           | `eksctl` runs immediately; `terraform apply` shows a plan first and needs a typed `yes`             |
+| eksctl re-run to change the cluster (e.g. `eksctl update nodegroup`)     | edit a `.tf` file, `terraform plan`, then `terraform apply` | eksctl has no diff step; Terraform always shows one                                                 |
+| Nothing — `eksctl` doesn't remember what it did beyond querying AWS live | `terraform.tfstate` (§3.3)                                  | This is the piece with no eksctl equivalent at all                                                  |
+| `eksctl delete cluster`                                                  | `terraform destroy` (via `eks/cleanup.sh`, §0.2)            | eksctl deletes immediately; this chapter wraps destroy in a confirmation-gated script               |
 
 Keep this table in mind through the rest of the README — every `.tf` file here is answering "how would
 I say this same thing to Terraform instead of to `eksctl`?", not introducing new infrastructure chapter
@@ -212,14 +212,14 @@ By the end you can:
    resources, and where Crossplane/ArgoCD fit as the next step up from "an engineer runs
    `terraform apply`."
 
-| Time | Activity |
-|---|---|
+| Time      | Activity                                                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | 0:00–0:20 | Read §0 (IaC/Terraform primer for first-timers) and §3 (concepts), compare the `.tf` module here to chapter 00's matching shell/eksctl step |
-| 0:20–0:40 | Lab steps 1–2: `fmt -check` + `init -backend=false` on the module |
-| 0:40–1:10 | Lab step 3: `terraform validate`, read the plan-equivalent reasoning in §4.4 |
-| 1:10–1:30 | Lab step 4: wire up a remote state backend block (no real bucket needed to read it) |
-| 1:30–1:50 | §6 troubleshooting + §8 checkpoint questions |
-| 1:50–2:00 | "Next step up" section — skim what Crossplane/ArgoCD change |
+| 0:20–0:40 | Lab steps 1–2: `fmt -check` + `init -backend=false` on the module                                                                           |
+| 0:40–1:10 | Lab step 3: `terraform validate`, read the plan-equivalent reasoning in §4.4                                                                |
+| 1:10–1:30 | Lab step 4: wire up a remote state backend block (no real bucket needed to read it)                                                         |
+| 1:30–1:50 | §6 troubleshooting + §8 checkpoint questions                                                                                                |
+| 1:50–2:00 | "Next step up" section — skim what Crossplane/ArgoCD change                                                                                 |
 
 ## 3. Concepts
 
@@ -257,12 +257,12 @@ That extra "ask what it would do" step (`plan`) is the entire point of this chap
 the lab below stops at `validate` (syntax-only, no account) rather than `plan` (needs real credentials)
 — see "Before you start" for why.
 
-| | EKS (`eks/`) |
-|---|---|
-| Resources used | `terraform-aws-modules/eks/aws` v21.x (module), `terraform-aws-modules/vpc/aws` v6.x |
-| Provider / floor | `hashicorp/aws` `>= 6.59` (module's own floor) |
-| CPU pool | `spot-cpu`, 6 diversified instance types, `capacity_type = "SPOT"`, 1–4 |
-| GPU pool | `spot-gpu`, g4dn.xlarge, `capacity_type = "SPOT"`, **0–1**, tainted |
+|                                | EKS (`eks/`)                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Resources used                 | `terraform-aws-modules/eks/aws` v21.x (module), `terraform-aws-modules/vpc/aws` v6.x                                                                                                                                                                                                                                                                                                                 |
+| Provider / floor               | `hashicorp/aws` `>= 6.59` (module's own floor)                                                                                                                                                                                                                                                                                                                                                       |
+| CPU pool                       | `spot-cpu`, 6 diversified instance types, `capacity_type = "SPOT"`, 1–4                                                                                                                                                                                                                                                                                                                              |
+| GPU pool                       | `spot-gpu`, g4dn.xlarge, `capacity_type = "SPOT"`, **0–1**, tainted                                                                                                                                                                                                                                                                                                                                  |
 | Why a module vs. raw resources | A bare `aws_eks_cluster` also needs you to hand-wire the OIDC provider, the `aws-auth`/access-entry dance, node IAM roles + policies, and security groups correctly — the module gets this right and keeps it current across EKS API changes. Raw `aws_eks_cluster` + `aws_eks_node_group` is documented as a "next step down" in `eks/main.tf`'s comments if you want to see it without the module. |
 
 ### 3.2 Why a module instead of raw resources
@@ -287,8 +287,8 @@ first run created. A **remote backend** moves that state file to shared storage 
 that everyone's Terraform CLI reads and writes, with **locking** so two people can't run `apply`
 simultaneously and corrupt the same state file.
 
-| Backend | Locking |
-|---|---|
+| Backend                                                | Locking                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `backend "s3"` — a bucket with versioning + encryption | `use_lockfile = true` (Terraform ≥ 1.10, GA in 1.11) — **not** DynamoDB. DynamoDB-based S3 locking is deprecated as of Terraform 1.11 and `dynamodb_table` is slated for removal in a future minor version. If you're pinned to Terraform < 1.10, use `dynamodb_table` instead; don't mix both. |
 
 `eks/versions.tf` has the exact commented-out `backend` block — uncomment, fill in your bucket name,
@@ -413,13 +413,13 @@ chapter's scope), uncomment the block, fill in the name, then run `terraform ini
 
 ## 6. Troubleshooting
 
-| Symptom | Cause | Why this happens | Fix |
-|---|---|---|---|
-| `terraform init`: `Failed to query available provider packages` | No network access, or a version constraint no release satisfies | `init` needs to reach the Terraform Registry (`registry.terraform.io`) to download the `hashicorp/aws` provider and the two nested modules; if your `~>`/`>=` pin in `versions.tf` no longer matches any published release (e.g. you bumped it past what's actually out), the registry has nothing to hand back either | Check connectivity; loosen the `~>`/`>=` constraint in `versions.tf` only if you've verified the new floor still has the fields this module uses |
-| `terraform fmt -check` exits non-zero with a diff | A file isn't canonically formatted | HCL has one canonical layout (`terraform fmt` picks it, not you); anything hand-edited with different spacing/alignment fails the check even though it would still `apply` correctly — the check exists purely for diff-cleanliness (§4 Step 1), not correctness | Run `terraform fmt -recursive` (no `-check`) to fix it in place |
-| `terraform init` fails to download the `vpc` or `eks` submodule | Registry unreachable, or a `~>` pin that no longer resolves (module got yanked or majors moved on) | Published modules occasionally get a new major version that changes required inputs (this module's own `main.tf` header notes `name`/`kubernetes_version` replaced `cluster_name`/`cluster_version` at the v21 boundary) — a `~>` constraint written for an older major can stop resolving once that major is no longer the latest in its line | Check `registry.terraform.io/modules/terraform-aws-modules/eks/aws` for the current latest major before bumping the pin |
-| Real `terraform apply` (outside this chapter's read-only lab) fails with a quota error | Same GPU/spot quotas as chapter 00 §3.2 | Terraform's AWS provider makes the identical EC2/EKS API calls `eksctl` does — it has no special access to capacity or quota AWS hasn't granted your account, so a quota that would block `eksctl create cluster` blocks `terraform apply` the same way, just reported as a Terraform error instead of an eksctl one | Do chapter 00 Step 2 (quota requests) first — Terraform doesn't bypass cloud quota, it just applies the same API calls the CLI does |
-| `terraform validate` passes but a real `terraform plan`/`apply` fails on a field the module doesn't recognize | You bumped `terraform-aws-modules/eks/aws`'s version pin without checking its current README | `validate` only checks that *your* HCL is internally consistent against the module's *currently downloaded* version (from `init`) — it can't warn you that a newer module version renamed or removed an input, because from Terraform's point of view your config is still valid against whatever's in `.terraform/modules/` | Re-run `terraform init -upgrade` after bumping the version pin, then `terraform validate` again, and diff the module's CHANGELOG for renamed inputs before trusting old examples |
+| Symptom                                                                                                       | Cause                                                                                              | Why this happens                                                                                                                                                                                                                                                                                                                               | Fix                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `terraform init`: `Failed to query available provider packages`                                               | No network access, or a version constraint no release satisfies                                    | `init` needs to reach the Terraform Registry (`registry.terraform.io`) to download the `hashicorp/aws` provider and the two nested modules; if your `~>`/`>=` pin in `versions.tf` no longer matches any published release (e.g. you bumped it past what's actually out), the registry has nothing to hand back either                         | Check connectivity; loosen the `~>`/`>=` constraint in `versions.tf` only if you've verified the new floor still has the fields this module uses                                 |
+| `terraform fmt -check` exits non-zero with a diff                                                             | A file isn't canonically formatted                                                                 | HCL has one canonical layout (`terraform fmt` picks it, not you); anything hand-edited with different spacing/alignment fails the check even though it would still `apply` correctly — the check exists purely for diff-cleanliness (§4 Step 1), not correctness                                                                               | Run `terraform fmt -recursive` (no `-check`) to fix it in place                                                                                                                  |
+| `terraform init` fails to download the `vpc` or `eks` submodule                                               | Registry unreachable, or a `~>` pin that no longer resolves (module got yanked or majors moved on) | Published modules occasionally get a new major version that changes required inputs (this module's own `main.tf` header notes `name`/`kubernetes_version` replaced `cluster_name`/`cluster_version` at the v21 boundary) — a `~>` constraint written for an older major can stop resolving once that major is no longer the latest in its line | Check `registry.terraform.io/modules/terraform-aws-modules/eks/aws` for the current latest major before bumping the pin                                                          |
+| Real `terraform apply` (outside this chapter's read-only lab) fails with a quota error                        | Same GPU/spot quotas as chapter 00 §3.2                                                            | Terraform's AWS provider makes the identical EC2/EKS API calls `eksctl` does — it has no special access to capacity or quota AWS hasn't granted your account, so a quota that would block `eksctl create cluster` blocks `terraform apply` the same way, just reported as a Terraform error instead of an eksctl one                           | Do chapter 00 Step 2 (quota requests) first — Terraform doesn't bypass cloud quota, it just applies the same API calls the CLI does                                              |
+| `terraform validate` passes but a real `terraform plan`/`apply` fails on a field the module doesn't recognize | You bumped `terraform-aws-modules/eks/aws`'s version pin without checking its current README       | `validate` only checks that *your* HCL is internally consistent against the module's *currently downloaded* version (from `init`) — it can't warn you that a newer module version renamed or removed an input, because from Terraform's point of view your config is still valid against whatever's in `.terraform/modules/`                   | Re-run `terraform init -upgrade` after bumping the version pin, then `terraform validate` again, and diff the module's CHANGELOG for renamed inputs before trusting old examples |
 
 ## 7. Cleanup and cost notes
 

@@ -116,13 +116,13 @@ By the end you can:
    upgrade does differently from a Kubernetes Deployment rolling update.
 6. Explain what changes once you layer the optional Kueue admission step.
 
-| Block | Time | What |
-|---|---|---|
-| Theory | 35 min | §3 concepts, RayCluster/RayJob/RayService, the two autoscalers |
-| Lab A | 40 min | Install KubeRay, create the GPU node pool, apply the EKS GPU RayCluster |
-| Lab B | 45 min | Submit `RayJob` (watch the ephemeral cluster come and go), inspect the dashboard |
-| Lab C | 40 min | Deploy `RayService`, curl `/generate`, trigger a spec change and watch the upgrade |
-| Review | 20 min | Kueue admission, troubleshooting, checkpoint questions, cleanup |
+| Block  | Time   | What                                                                               |
+| ------ | ------ | ---------------------------------------------------------------------------------- |
+| Theory | 35 min | §3 concepts, RayCluster/RayJob/RayService, the two autoscalers                     |
+| Lab A  | 40 min | Install KubeRay, create the GPU node pool, apply the EKS GPU RayCluster            |
+| Lab B  | 45 min | Submit `RayJob` (watch the ephemeral cluster come and go), inspect the dashboard   |
+| Lab C  | 40 min | Deploy `RayService`, curl `/generate`, trigger a spec change and watch the upgrade |
+| Review | 20 min | Kueue admission, troubleshooting, checkpoint questions, cleanup                    |
 
 ## 3. Concepts
 
@@ -191,11 +191,11 @@ a head start before a spot reclaim SIGKILLs the pod.
 
 ### 3.3 Two autoscalers, two triggers
 
-| | Ray autoscaler (`enableInTreeAutoscaling`) | Kubernetes node autoscaler (Cluster Autoscaler / Karpenter, chapter `13`) |
-|---|---|---|
-| Watches | Pending Ray tasks/actors vs. cluster resources | Unschedulable Pods |
-| Acts on | `workerGroupSpecs[].replicas` (adds/removes **Pods**) | Nodes (adds/removes **VMs**) |
-| Runs as | A sidecar-like process inside the Ray head | A cluster-level controller/DaemonSet-adjacent deployment |
+|         | Ray autoscaler (`enableInTreeAutoscaling`)            | Kubernetes node autoscaler (Cluster Autoscaler / Karpenter, chapter `13`) |
+| ------- | ----------------------------------------------------- | ------------------------------------------------------------------------- |
+| Watches | Pending Ray tasks/actors vs. cluster resources        | Unschedulable Pods                                                        |
+| Acts on | `workerGroupSpecs[].replicas` (adds/removes **Pods**) | Nodes (adds/removes **VMs**)                                              |
+| Runs as | A sidecar-like process inside the Ray head            | A cluster-level controller/DaemonSet-adjacent deployment                  |
 
 They compose in sequence: a burst of `ray.remote` GPU tasks makes the Ray autoscaler raise
 `gpu-spot` replicas toward `maxReplicas`, which creates new worker Pods with
@@ -210,11 +210,11 @@ Only the RayCluster's `gpu-spot` worker group carries spot + GPU `nodeSelector`/
 the head, the RayJob's ephemeral cluster and the RayService are all CPU-only and schedule fine on
 your default on-demand node pool from chapter `00`.
 
-| | EKS |
-|---|---|
-| GPU | 1x T4 (`g4dn.xlarge`) |
-| Spot nodeSelector | `eks.amazonaws.com/capacityType: SPOT` |
-| GPU taint added by | the `eksctl create nodegroup` command in §4.2 |
+|                     | EKS                                                     |
+| ------------------- | ------------------------------------------------------- |
+| GPU                 | 1x T4 (`g4dn.xlarge`)                                   |
+| Spot nodeSelector   | `eks.amazonaws.com/capacityType: SPOT`                  |
+| GPU taint added by  | the `eksctl create nodegroup` command in §4.2           |
 | Spot taint added by | nobody — opt-in, set explicitly in the nodegroup config |
 
 ### 3.5 Optional: Kueue admission
@@ -459,14 +459,14 @@ cluster come up before the old one is torn down.
 
 ## 6. Troubleshooting
 
-| Symptom | Likely cause | Why this happens | Fix |
-|---|---|---|---|
-| `rayclusters.ray.io` / `rayjobs.ray.io` not found | KubeRay operator not installed yet | These are CRDs — Kubernetes only understands `RayCluster`/`RayJob`/`RayService` objects once the KubeRay Helm chart has registered them with the API server. Applying any of this chapter's manifests before §4.1 asks the API server about a kind it's never heard of, which is a hard error, not a warning | Run §4.1's `helm upgrade --install`, check `kubectl -n kuberay-system get pods` |
-| GPU worker Pod stuck `Pending` | GPU node pool at 0 and no autoscaler trigger, or GPU quota exhausted | The GPU node group in §4.2 starts at `desiredCapacity: 0` on purpose (so it's free until needed); a worker Pod requesting `nvidia.com/gpu: "1"` only triggers a scale-up if a Kubernetes-level autoscaler (Cluster Autoscaler/Karpenter, chapter `13`) is watching this node group and there's AWS quota left to launch the instance — if either is missing, the Pod just sits `Pending` forever instead of erroring | `kubectl get nodes -l nvidia.com/gpu.present=true`; check the AWS console for G/VT quota |
-| RayJob stuck `Pending`/no cluster created | `spec.suspend` still `true` (only if you labeled it into Kueue per §3.5 and quota isn't free) | Kueue's RayJob webhook (enabled by `06-batch-jobs-and-kueue`'s Helm values) intercepts every `RayJob` carrying the `kueue.x-k8s.io/queue-name` label and sets `spec.suspend: true` until the `team-research` ClusterQueue has free quota to admit it — KubeRay itself never creates the embedded `rayClusterSpec`'s Pods while `suspend` is `true`, so "nothing happened" usually means "still queued," not "broken" | `kubectl get clusterqueue team-research -o yaml` |
-| RayService stuck `WaitForDashboard`/`DeploymentUnhealthy` | Serve app failed to import (bad `working_dir`/pip deps) or CPU too small to load the model | RayService only flips to `RUNNING` once Ray Serve reports the deployed application healthy; a Python import error in `serve_app.py`, a typo'd package in `serveConfigV2`'s `pip` list, or a head Pod too small to load `Qwen/Qwen3-0.6B` into memory all surface as the app never becoming healthy, which looks identical from `kubectl get rayservice` alone | `kubectl -n ch08-ray logs <head-pod> -c ray-head`; check `serveConfigV2` runtime_env |
-| Dashboard 502 / can't reach 8265 | Port-forward to the wrong service name, or head Pod not Ready | `port-forward` connects to a *Service*, and forwards traffic on to whichever Pod that Service currently selects — if the head Pod isn't Ready yet (still starting up) or you forwarded to a Service name from a different RayCluster/lab run, the tunnel opens but every request behind it fails | `kubectl -n ch08-ray get svc` for the exact `-head-svc` name |
-| `pi_estimate.py` / `serve_app.py` "file not found" | ConfigMap not mounted at the exact path the script/`working_dir` expects, or applied after the RayJob/RayService that references it | Both scripts reach the Ray Pods as ConfigMaps mounted as a volume, not baked into the container image — if the ConfigMap's name and the Pod spec's `volumes[].configMap.name` disagree, or the ConfigMap didn't exist yet when the Pod was scheduled, the volume mount silently doesn't find the file at runtime | Confirm `eks/pi-estimate-configmap.yaml`/`eks/qwen-serve-configmap.yaml` were applied before the RayJob/RayService, and that the ConfigMap name matches the volume's `configMap.name` |
+| Symptom                                                   | Likely cause                                                                                                                        | Why this happens                                                                                                                                                                                                                                                                                                                                                                                                     | Fix                                                                                                                                                                                   |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rayclusters.ray.io` / `rayjobs.ray.io` not found         | KubeRay operator not installed yet                                                                                                  | These are CRDs — Kubernetes only understands `RayCluster`/`RayJob`/`RayService` objects once the KubeRay Helm chart has registered them with the API server. Applying any of this chapter's manifests before §4.1 asks the API server about a kind it's never heard of, which is a hard error, not a warning                                                                                                         | Run §4.1's `helm upgrade --install`, check `kubectl -n kuberay-system get pods`                                                                                                       |
+| GPU worker Pod stuck `Pending`                            | GPU node pool at 0 and no autoscaler trigger, or GPU quota exhausted                                                                | The GPU node group in §4.2 starts at `desiredCapacity: 0` on purpose (so it's free until needed); a worker Pod requesting `nvidia.com/gpu: "1"` only triggers a scale-up if a Kubernetes-level autoscaler (Cluster Autoscaler/Karpenter, chapter `13`) is watching this node group and there's AWS quota left to launch the instance — if either is missing, the Pod just sits `Pending` forever instead of erroring | `kubectl get nodes -l nvidia.com/gpu.present=true`; check the AWS console for G/VT quota                                                                                              |
+| RayJob stuck `Pending`/no cluster created                 | `spec.suspend` still `true` (only if you labeled it into Kueue per §3.5 and quota isn't free)                                       | Kueue's RayJob webhook (enabled by `06-batch-jobs-and-kueue`'s Helm values) intercepts every `RayJob` carrying the `kueue.x-k8s.io/queue-name` label and sets `spec.suspend: true` until the `team-research` ClusterQueue has free quota to admit it — KubeRay itself never creates the embedded `rayClusterSpec`'s Pods while `suspend` is `true`, so "nothing happened" usually means "still queued," not "broken" | `kubectl get clusterqueue team-research -o yaml`                                                                                                                                      |
+| RayService stuck `WaitForDashboard`/`DeploymentUnhealthy` | Serve app failed to import (bad `working_dir`/pip deps) or CPU too small to load the model                                          | RayService only flips to `RUNNING` once Ray Serve reports the deployed application healthy; a Python import error in `serve_app.py`, a typo'd package in `serveConfigV2`'s `pip` list, or a head Pod too small to load `Qwen/Qwen3-0.6B` into memory all surface as the app never becoming healthy, which looks identical from `kubectl get rayservice` alone                                                        | `kubectl -n ch08-ray logs <head-pod> -c ray-head`; check `serveConfigV2` runtime_env                                                                                                  |
+| Dashboard 502 / can't reach 8265                          | Port-forward to the wrong service name, or head Pod not Ready                                                                       | `port-forward` connects to a *Service*, and forwards traffic on to whichever Pod that Service currently selects — if the head Pod isn't Ready yet (still starting up) or you forwarded to a Service name from a different RayCluster/lab run, the tunnel opens but every request behind it fails                                                                                                                     | `kubectl -n ch08-ray get svc` for the exact `-head-svc` name                                                                                                                          |
+| `pi_estimate.py` / `serve_app.py` "file not found"        | ConfigMap not mounted at the exact path the script/`working_dir` expects, or applied after the RayJob/RayService that references it | Both scripts reach the Ray Pods as ConfigMaps mounted as a volume, not baked into the container image — if the ConfigMap's name and the Pod spec's `volumes[].configMap.name` disagree, or the ConfigMap didn't exist yet when the Pod was scheduled, the volume mount silently doesn't find the file at runtime                                                                                                     | Confirm `eks/pi-estimate-configmap.yaml`/`eks/qwen-serve-configmap.yaml` were applied before the RayJob/RayService, and that the ConfigMap name matches the volume's `configMap.name` |
 
 ## 7. Cleanup and cost notes
 
@@ -584,13 +584,13 @@ region before a real node joins the cluster.
 
 ### Versions tested
 
-| Component | Version | Source |
-|---|---|---|
-| KubeRay operator | `${KUBERAY_VERSION}` (1.7.0) | `versions.env`, helm repo `https://ray-project.github.io/kuberay-helm/` |
-| Ray (head/worker image) | `2.52.0` (`rayproject/ray:2.52.0-py311[-gpu]`) | not in `versions.env` — pinned here; verified tag exists on Docker Hub |
-| RayCluster/RayJob/RayService API | `ray.io/v1` | KubeRay v1.7.0 CRDs |
-| Serve model | `Qwen/Qwen3-0.6B` (ungated) | verified present on Hugging Face Hub |
-| Kueue (optional overlay) | `${KUEUE_VERSION}` (0.19.4) | `versions.env`, `kueue.x-k8s.io/v1beta2` |
+| Component                        | Version                                        | Source                                                                  |
+| -------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------- |
+| KubeRay operator                 | `${KUBERAY_VERSION}` (1.7.0)                   | `versions.env`, helm repo `https://ray-project.github.io/kuberay-helm/` |
+| Ray (head/worker image)          | `2.52.0` (`rayproject/ray:2.52.0-py311[-gpu]`) | not in `versions.env` — pinned here; verified tag exists on Docker Hub  |
+| RayCluster/RayJob/RayService API | `ray.io/v1`                                    | KubeRay v1.7.0 CRDs                                                     |
+| Serve model                      | `Qwen/Qwen3-0.6B` (ungated)                    | verified present on Hugging Face Hub                                    |
+| Kueue (optional overlay)         | `${KUEUE_VERSION}` (0.19.4)                    | `versions.env`, `kueue.x-k8s.io/v1beta2`                                |
 
 ---
 
