@@ -653,7 +653,7 @@ gets rate-limited.
 - vLLM: [OpenAI-Compatible Server](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html), [Engine Args](https://docs.vllm.ai/en/latest/serving/engine_args.html), [Distributed Serving (Tensor Parallel)](https://docs.vllm.ai/en/latest/serving/distributed_serving.html)
 - Ollama: [OpenAI compatibility](https://ollama.com/blog/openai-compatibility), [qwen3 library page](https://ollama.com/library/qwen3)
 - Model: [Qwen/Qwen3-0.6B on Hugging Face](https://huggingface.co/Qwen/Qwen3-0.6B)
-- Cross-link: `01-gpu-nodes-and-scheduling` (GPU node pool reused here), `05-model-storage-and-data` (shared model cache options), `10-autoscaling-inference` (HPA/KEDA scaling this Deployment), `12-inference-gateway-and-multinode-serving` (Gateway API Inference Extension, multi-node serving)
+- Cross-link: `01-gpu-nodes-and-scheduling` (GPU node pool reused here), `05-model-storage-and-data` (shared model cache options), `10-autoscaling-inference` (HPA/KEDA scaling this Deployment), `12-inference-gateway-and-multinode-serving` (Gateway API Inference Extension, multi-node serving), and [AI Infrastructure Research & Articles](../AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md#31-model-serving-kv-cache--attention-mechanics) (seminal papers on PagedAttention, FlashAttention, SGLang, and Speculative Decoding)
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `VLLM_VERSION=v0.29.0` (image `vllm/vllm-openai:v0.29.0-cu129`),
 `OLLAMA_VERSION=0.34.1` (image `ollama/ollama:0.34.1`), model `Qwen/Qwen3-0.6B` (vLLM) / `qwen3:0.6b` (Ollama library tag).

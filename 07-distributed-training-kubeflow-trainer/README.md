@@ -766,7 +766,8 @@ on the same network switch, eliminating inter-switch latency and achieving full 
 - [EKS: Mountpoint for Amazon S3 CSI driver](https://docs.aws.amazon.com/eks/latest/userguide/s3-csi.html)
 - Cross-links: `05-model-storage-and-data` (the CSI drivers used for checkpoints here),
   `06-batch-jobs-and-kueue` (the `team-research` ClusterQueue the optional `kueue/<cloud>` overlay
-  submits into), `08-ray-on-kubernetes` (an alternative gang-scheduled distributed workload model)
+  submits into), `08-ray-on-kubernetes` (an alternative gang-scheduled distributed workload model),
+  and [AI Infrastructure Research & Articles](../AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md#21-advanced-gpu-interconnect--fabric-networking-rdma-rocev2-efa-nccl) (deep dive into RDMA, AWS EFA, NCCL tuning, ZeRO, and Megatron-LM)
 
 ### Versions tested
 

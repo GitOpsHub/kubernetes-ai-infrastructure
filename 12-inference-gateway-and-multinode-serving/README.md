@@ -737,7 +737,7 @@ isn't enough, not a replacement for learning the primitives first.
   [05-model-storage-and-data](../05-model-storage-and-data) (weights caching),
   [10-autoscaling-inference](../10-autoscaling-inference) (scaling the Pods this Gateway routes
   to), [13-node-autoscaling-and-cost](../13-node-autoscaling-and-cost) (scaling the GPU nodes
-  underneath)
+  underneath), and [AI Infrastructure Research & Articles](../AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md#22-disaggregated-prefill--decode-pd-disaggregation--splitwise--mooncake) (deep dive into Disaggregated Prefill & Decode, Splitwise, Mooncake, and KV-cache aware routing)
 
 ### Versions tested
 

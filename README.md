@@ -141,6 +141,28 @@ flowchart LR
 
 ---
 
+## Beyond the Labs: AI Infrastructure Research & Seminal Papers
+
+Looking to master the frontier systems engineering concepts and research papers behind modern AI platforms?
+Check out the companion master guide:
+
+👉 **[AI Infrastructure: Advanced Landscape, Missing Pillars & Curated Research Canon](AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md)**
+
+It covers:
+- **The 8 Missing Architectural Pillars**:
+  1. *GPU Interconnect & Networking*: RDMA, RoCEv2, AWS EFA, GPUDirect RDMA, and NCCL tuning.
+  2. *Disaggregated Prefill & Decode (PD Disaggregation)*: Splitwise, Mooncake, and decoupled compute/memory pools.
+  3. *KV-Cache-Aware Routing & Semantic Caching*: `llm-d`, RadixAttention (SGLang), and Gateway API prefix routing.
+  4. *Mixture of Experts (MoE) & 4D Parallelism*: Expert Parallelism (EP), All-to-All communication, DeepSeek DualPipe & MLA.
+  5. *High-Density Multi-LoRA Serving*: Dynamic adapter swapping (S-LoRA, Punica).
+  6. *Agentic Workload Sandboxing*: Model Context Protocol (MCP) in K8s, gVisor, Firecracker microVMs.
+  7. *Heterogeneous AI Silicon*: AWS Trainium/Inferentia (Neuron), Google Cloud TPU, and AMD ROCm.
+  8. *Extreme Cold-Start Optimization*: P2P model streaming (Dragonfly), SafeTensors mmap, and S3 Express OneZone.
+- **The Definitive Research Canon**: Detailed breakdowns and direct links to the seminal papers every AI infra engineer should read (*PagedAttention*, *FlashAttention 1-3*, *Splitwise*, *ZeRO*, *Megatron-LM*, *RingAttention*, *Meta Llama 3 Infrastructure*, *DeepSeek-V3 Report*, *EAGLE*).
+- **Essential Industry Engineering Blogs**: Meta Engineering, SemiAnalysis, Tim Dettmers, Eugene Yan, and NVIDIA Tech Blogs.
+
+---
+
 ## Suggested daily rhythm (3 hours)
 
 | Block | Time | What |
