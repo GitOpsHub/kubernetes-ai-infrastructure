@@ -8,7 +8,7 @@
 go wrong?"* Read section 1 and 3 slowly before touching a command; the labs will make a lot more
 sense once you know what a "device plugin", a "claim", and "isolation" actually mean.
 
-## Before you start
+## 0. Before you start
 
 Needs from [`01-gpu-nodes-and-scheduling`](../01-gpu-nodes-and-scheduling) or
 [`02-nvidia-gpu-operator`](../02-nvidia-gpu-operator): a device plugin (either chapter's) already
@@ -602,3 +602,7 @@ rm -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml
 `versions.env` yet — see `# VERIFY` items below), `dra-example-driver` `v0.5.0`, kind `v0.30+`,
 `kindest/node:v1.35.8`, images `nvidia/cuda:12.9.1-base-ubuntu24.04`,
 `nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1-ubuntu18.04`, `ubuntu:22.04`.
+
+---
+
+[← Prev: 02-nvidia-gpu-operator](../02-nvidia-gpu-operator) | [Course Map](../README.md) | [Next: 04-gpu-observability →](../04-gpu-observability)

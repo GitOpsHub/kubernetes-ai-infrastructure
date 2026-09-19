@@ -85,7 +85,7 @@ This chapter builds the isolation up in layers, and each layer is a distinct Kub
 If any of the above is still fuzzy once you hit §3, come back to this section — the deeper dives
 there assume you already have these five terms straight.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -830,3 +830,7 @@ sequence for that variant in one command.)
 | External Secrets Operator (Helm chart `external-secrets/external-secrets`) | `2.10.0` *(not in versions.env — verified via Artifact Hub, 2026-09-16)* |
 | Kyverno (Helm chart `kyverno/kyverno`) | `3.9.1`, app `v1.19.1` *(not in versions.env — verified via Artifact Hub, 2026-09-16)* |
 | cosign / Sigstore keyless (Fulcio + Rekor) | schema per current [Kyverno Sigstore docs](https://kyverno.io/docs/policy-types/cluster-policy/verify-images/sigstore/) |
+
+---
+
+[← Prev: 13-node-autoscaling-and-cost](../13-node-autoscaling-and-cost) | [Course Map](../README.md) | [Next: 15-mlops-gitops-and-pipelines →](../15-mlops-gitops-and-pipelines)

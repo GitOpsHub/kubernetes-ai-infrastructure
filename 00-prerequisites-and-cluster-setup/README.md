@@ -8,7 +8,7 @@ explained in plain English the first time it shows up, and every command block s
 *why* before you run it. You don't need any prior Kubernetes or AWS experience — you do need an AWS
 account and a willingness to read before you paste.
 
-## Before you start
+## 0. Before you start
 
 This is the first chapter — there's no prior chapter output required. You do need, before you begin:
 
@@ -571,3 +571,7 @@ them by hand in the AWS console or CLI.
 - New to Kubernetes entirely? The official [Kubernetes Basics tutorial](https://kubernetes.io/docs/tutorials/kubernetes-basics/) and [Concepts overview](https://kubernetes.io/docs/concepts/overview/) are good, vendor-neutral background before or alongside this course.
 
 **Versions tested** (2026-09-16): Kubernetes 1.35 (EKS `version: "1.35"`), eksctl v0.230.0 schema, kubectl 1.36 client / kustomize v5.8.1, images `registry.k8s.io/pause:3.10.1`, `busybox:1.37.0`.
+
+---
+
+[Course Map](../README.md) | [Next: 01-gpu-nodes-and-scheduling →](../01-gpu-nodes-and-scheduling)

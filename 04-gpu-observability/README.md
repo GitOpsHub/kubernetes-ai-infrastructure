@@ -9,7 +9,7 @@ what a Pod, DaemonSet, Service, and namespace are (from earlier chapters), but i
 assume you've used Prometheus, Grafana, or a GPU driver before. Section 3 below explains all of
 those from scratch — read it before the lab, not after.
 
-## Before you start
+## 0. Before you start
 
 Needs from [`02-nvidia-gpu-operator`](../02-nvidia-gpu-operator): a running GPU Operator install
 with `dcgmExporter.enabled: true` (the chart default) — this chapter scrapes that exporter, it
@@ -670,3 +670,7 @@ chart to confirm it parses; not applied to a live cluster.
 - AMP's exact per-sample pricing (cost notes and Step 4's cost warning) — check the linked AWS
   pricing page for current rates before running Step 4 against anything beyond this lab.
 </content>
+
+---
+
+[← Prev: 03-gpu-sharing-and-dra](../03-gpu-sharing-and-dra) | [Course Map](../README.md) | [Next: 05-model-storage-and-data →](../05-model-storage-and-data)

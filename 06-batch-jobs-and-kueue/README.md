@@ -6,7 +6,7 @@
 
 ---
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -651,3 +651,7 @@ eksctl delete nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --na
 | Kueue (Helm chart `oci://registry.k8s.io/kueue/charts/kueue`) | `0.19.4` (`KUEUE_VERSION`), API `kueue.x-k8s.io/v1beta2` |
 | Kubernetes | 1.29+ (chart minimum); labs written against 1.35 |
 | Job image | `registry.k8s.io/e2e-test-images/agnhost:2.53` *(not in versions.env — upstream Kueue's own examples use this tag)* |
+
+---
+
+[← Prev: 05-model-storage-and-data](../05-model-storage-and-data) | [Course Map](../README.md) | [Next: 07-distributed-training-kubeflow-trainer →](../07-distributed-training-kubeflow-trainer)

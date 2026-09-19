@@ -8,7 +8,7 @@
 the device plugin, `nvidia-smi`) before asking you to run anything. If a term in the Lab feels
 unfamiliar, it was almost certainly defined in section 3 — jump back there rather than guessing.
 
-## Before you start
+## 0. Before you start
 
 Needs from [`00-prerequisites-and-cluster-setup`](../00-prerequisites-and-cluster-setup): a cluster
 with a spot CPU pool up (Step 4), tools verified (Step 1), `env.sh`/`versions.env` sourced, and GPU
@@ -681,3 +681,7 @@ MPS, MIG) is a device-plugin/driver-level feature layered on top, covered in cha
 Helm chart `nvdp/nvidia-device-plugin`), images `nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0`,
 `nvidia/cuda:12.9.1-base-ubuntu24.04`, `busybox:1.37.0`, eksctl v0.230.0 schema.
 </content>
+
+---
+
+[← Prev: 00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) | [Course Map](../README.md) | [Next: 02-nvidia-gpu-operator →](../02-nvidia-gpu-operator)

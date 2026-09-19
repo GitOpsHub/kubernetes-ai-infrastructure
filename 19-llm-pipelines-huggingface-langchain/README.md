@@ -8,7 +8,7 @@
 
 ---
 
-## Before you start
+## 0. Before you start
 
 This chapter reuses earlier chapters instead of rebuilding them:
 
@@ -1681,3 +1681,7 @@ Tested 2026-09-18 on Kubernetes 1.35. Keep in sync with `versions.env`, `common/
 | busybox (`wait-for-model`) | `1.37` | `vllm-deployment.yaml` |
 | Models / dataset | `Qwen/Qwen3-0.6B@c1899de…`, `HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f…`, `trl-lib/Capybara@e235e84…`, `BAAI/bge-small-en-v1.5@5c38ec7…` | `params.env`, `cpu-lab/params.env`, `tei-deployment.yaml` |
 | Mountpoint S3 CSI / GCS FUSE CSI / Blob CSI | managed add-on versions (depend on cluster version) | installed by Step 2's `eksctl create addon` block |
+
+---
+
+[← Prev: 18-infrastructure-as-code](../18-infrastructure-as-code) | [Course Map](../README.md)

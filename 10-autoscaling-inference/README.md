@@ -8,7 +8,7 @@
 HorizontalPodAutoscaler is, what KEDA adds on top of it, and what "scale to zero" actually means,
 before you touch any YAML. Everything else in this chapter assumes you've read that primer.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -680,3 +680,7 @@ before applying the other to keep the scaling decision unambiguous.
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `PROMETHEUS_ADAPTER_VERSION=5.3.0`, `KEDA_VERSION=2.20.2`,
 `KUBE_PROMETHEUS_STACK_VERSION=91.4.1` (from chapter 04).
+
+---
+
+[← Prev: 09-llm-inference-with-vllm](../09-llm-inference-with-vllm) | [Course Map](../README.md) | [Next: 11-kserve →](../11-kserve)

@@ -11,7 +11,7 @@ chapter solves and why they're introduced together.
 
 ---
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -734,3 +734,7 @@ project that no longer exists.
 | MLflow Python client (pipeline register step image) | `ghcr.io/mlflow/mlflow:v3.4.0` — `# VERIFY:` pin to a client version compatible with your deployed server's app version |
 | Kueue / kube-prometheus-stack / KServe / vLLM chart-versions referenced by child Applications | same as `versions.env` (`KUEUE_VERSION`, `KUBE_PROMETHEUS_STACK_VERSION`, `KSERVE_VERSION`) — kept in sync by hand since Argo CD `Application` YAML can't `${env}`-expand |
 </content>
+
+---
+
+[← Prev: 14-multi-tenancy-and-security](../14-multi-tenancy-and-security) | [Course Map](../README.md) | [Next: 16-capstone-ai-platform →](../16-capstone-ai-platform)

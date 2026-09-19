@@ -10,7 +10,7 @@ container toolkit, GFD, DCGM...). Section 3.0 below defines every one of those t
 language *before* you touch a command. Read it first if any of them are new — the lab will make a
 lot more sense.
 
-## Before you start
+## 0. Before you start
 
 Needs from [`01-gpu-nodes-and-scheduling`](../01-gpu-nodes-and-scheduling): a spot GPU node group up
 on EKS. EKS's AL2023 NVIDIA-accelerated AMI bakes the driver and container toolkit in at boot, so
@@ -523,3 +523,7 @@ toolkit `v1.20.0`, `DEVICE_PLUGIN_VERSION=v0.20.0` (matches `versions.env`), gfd
 dcgm-exporter `4.6.0-4.8.3-distroless` (DCGM 4.6.0 + exporter `DCGM_EXPORTER_CHART_VERSION=4.8.3`,
 matches `versions.env`), migManager `v0.15.0`.
 </content>
+
+---
+
+[← Prev: 01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling) | [Course Map](../README.md) | [Next: 03-gpu-sharing-and-dra →](../03-gpu-sharing-and-dra)

@@ -6,7 +6,7 @@
 
 ---
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -573,3 +573,7 @@ RayCluster/RayJob/RayService and autoscaler mechanics on ordinary CPU capacity.
 | RayCluster/RayJob/RayService API | `ray.io/v1` | KubeRay v1.7.0 CRDs |
 | Serve model | `Qwen/Qwen3-0.6B` (ungated) | verified present on Hugging Face Hub |
 | Kueue (optional overlay) | `${KUEUE_VERSION}` (0.19.4) | `versions.env`, `kueue.x-k8s.io/v1beta2` |
+
+---
+
+[← Prev: 07-distributed-training-kubeflow-trainer](../07-distributed-training-kubeflow-trainer) | [Course Map](../README.md) | [Next: 09-llm-inference-with-vllm →](../09-llm-inference-with-vllm)

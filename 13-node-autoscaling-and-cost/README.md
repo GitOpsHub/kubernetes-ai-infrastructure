@@ -9,7 +9,7 @@ is the first time something *other than you* decides when a new machine should e
 bigger conceptual jump than it sounds, so section 1 below spends real time on it before any command
 runs.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -683,3 +683,7 @@ its `Events` section (not node state) is where the mismatch actually surfaces.
 From `versions.env`: `KARPENTER_VERSION=1.14.1`. GKE and AKS NAP have no separate chart/CLI
 version to pin (features of the managed control plane / `az aks` CLI, gated by cluster/CLI
 version instead — see prerequisites noted in each script).
+
+---
+
+[← Prev: 12-inference-gateway-and-multinode-serving](../12-inference-gateway-and-multinode-serving) | [Course Map](../README.md) | [Next: 14-multi-tenancy-and-security →](../14-multi-tenancy-and-security)

@@ -6,7 +6,7 @@
 
 ---
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -775,3 +775,7 @@ on the same network switch, eliminating inter-switch latency and achieving full 
 | Kubeflow Trainer | `${KUBEFLOW_TRAINER_VERSION}` (v2.3.0) | `versions.env`, `oci://ghcr.io/kubeflow/charts/kubeflow-trainer` |
 | PyTorch training image | `pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime` (GPU), `-cuda13.0-` (runtime default) | Docker Hub `pytorch/pytorch` |
 | Kueue (optional overlay) | `${KUEUE_VERSION}` (0.19.4) | `versions.env`, `kueue.x-k8s.io/v1beta2` |
+
+---
+
+[← Prev: 06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue) | [Course Map](../README.md) | [Next: 08-ray-on-kubernetes →](../08-ray-on-kubernetes)

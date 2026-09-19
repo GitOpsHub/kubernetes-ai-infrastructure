@@ -8,7 +8,7 @@ apply`/`get`/`logs` (from earlier chapters) but assumes nothing about how LLMs g
 below is written for someone who has never seen an inference server before — read it before Step 1,
 not after something breaks.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -657,3 +657,7 @@ gets rate-limited.
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `VLLM_VERSION=v0.29.0` (image `vllm/vllm-openai:v0.29.0-cu129`),
 `OLLAMA_VERSION=0.34.1` (image `ollama/ollama:0.34.1`), model `Qwen/Qwen3-0.6B` (vLLM) / `qwen3:0.6b` (Ollama library tag).
+
+---
+
+[← Prev: 08-ray-on-kubernetes](../08-ray-on-kubernetes) | [Course Map](../README.md) | [Next: 10-autoscaling-inference →](../10-autoscaling-inference)

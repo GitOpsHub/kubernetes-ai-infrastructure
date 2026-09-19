@@ -6,7 +6,7 @@
 
 ---
 
-## Before you start
+## 0. Before you start
 
 This chapter's labs need **no GPU** (every serving pod uses `vllm/vllm-openai-cpu:v0.29.0`), so it
 only needs [`00-prerequisites-and-cluster-setup`](../00-prerequisites-and-cluster-setup)'s cluster
@@ -835,3 +835,7 @@ echo "EFS file system (if created in Step 4) is NOT deleted automatically — de
 | Model | `Qwen/Qwen3-0.6B` @ `c1899de289a04d12100db370d81485cdf75e47ca` |
 | Mountpoint for S3 CSI driver | v2.8.0 (EKS add-on version depends on cluster) *(not in versions.env)* |
 | busybox | `1.37` |
+
+---
+
+[← Prev: 04-gpu-observability](../04-gpu-observability) | [Course Map](../README.md) | [Next: 06-batch-jobs-and-kueue →](../06-batch-jobs-and-kueue)

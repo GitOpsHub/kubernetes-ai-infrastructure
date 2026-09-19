@@ -9,7 +9,7 @@ section 3 (Concepts) slowly, even the parts that look like background trivia. Ev
 it assumes you know what a Gateway, an HTTPRoute, an InferencePool, and a LeaderWorkerSet group
 each are — the lab steps explain the *commands*, not the *nouns*.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -745,3 +745,7 @@ From `versions.env`: `GATEWAY_API_VERSION=v1.6.2`, `GAIE_VERSION=v1.6.1`, `LWS_V
 `VLLM_VERSION=v0.29.0`. Not in `versions.env` (pinned in this chapter's scripts, report to the
 lead for consolidation): `NGF_VERSION=2.7.0` (NGINX Gateway Fabric).
 </content>
+
+---
+
+[← Prev: 11-kserve](../11-kserve) | [Course Map](../README.md) | [Next: 13-node-autoscaling-and-cost →](../13-node-autoscaling-and-cost)

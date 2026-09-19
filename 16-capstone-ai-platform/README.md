@@ -16,7 +16,7 @@ the actual subject of this chapter. If a term below is unfamiliar (ClusterQueue,
 Deployment, Gateway, HPA, spot instance), it was taught in an earlier chapter; the "Before you
 start" list right below tells you exactly which one, so you can jump back rather than guess.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes **every prior chapter's output, applied fresh in the order section 4 lays
 out** — it is not a chapter you can jump into cold. If you skip ahead without doing this, the
@@ -872,3 +872,7 @@ already flagged `# VERIFY` in `common/pipeline/workflowtemplate-platform-e2e.yam
 version compatibility — see `15-mlops-gitops-and-pipelines/README.md`'s note) and
 `curlimages/curl:8.11.1` (unpinned upstream, latest stable as of 2026-09-16) in both this chapter's
 and the CPU lab's smoke-test steps.
+
+---
+
+[← Prev: 15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines) | [Course Map](../README.md) | [Next: 17-platform-day2-operations →](../17-platform-day2-operations)

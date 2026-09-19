@@ -155,7 +155,7 @@ Helm values, and namespace-scoped Kubernetes objects don't have that problem to 
 they're already declarative, already diffable with `kubectl diff`, and already fast enough to recreate
 that a script suffices. So: kustomize + shell everywhere else, Terraform here.
 
-## Before you start
+## 0. Before you start
 
 - Read [chapter 00](../00-prerequisites-and-cluster-setup/README.md) first — this chapter's module
   is a Terraform rewrite of exactly what chapter 00's `eksctl create cluster -f eks/cluster.yaml`
@@ -554,3 +554,7 @@ often literally translated from an existing Terraform module's shape.
 see `versions.tf`), `hashicorp/aws` 6.65.0, `terraform-aws-modules/eks/aws` 21.25.0,
 `terraform-aws-modules/vpc/aws` 6.7.2.
 </content>
+
+---
+
+[← Prev: 17-platform-day2-operations](../17-platform-day2-operations) | [Course Map](../README.md) | [Next: 19-llm-pipelines-huggingface-langchain →](../19-llm-pipelines-huggingface-langchain)

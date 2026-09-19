@@ -4,7 +4,7 @@
 > CPU predictive models, the new `LLMInferenceService` CRD for GPU generative models with a vLLM
 > backend, RawDeployment mode (no Knative dependency), and canary rollouts.
 
-## Before you start
+## 0. Before you start
 
 This chapter assumes:
 
@@ -547,3 +547,7 @@ was exercised here; exact generated Service name for a RawDeployment predictor/L
 in the canary `HTTPRoute` and the generative port-forward step; Helm OCI chart names/flags for
 Step 1's install — re-run `helm show values oci://ghcr.io/kserve/charts/kserve-resources --version v0.20.0`
 before relying on this in a real environment.
+
+---
+
+[← Prev: 10-autoscaling-inference](../10-autoscaling-inference) | [Course Map](../README.md) | [Next: 12-inference-gateway-and-multinode-serving →](../12-inference-gateway-and-multinode-serving)

@@ -991,3 +991,7 @@ chapter's EKS lab (step 4/5 above) sources them from there like any other chapte
 - `cpu-lab/install-velero-minio.sh`: `minio/minio:latest` and `minio/mc:latest` are intentionally
   unpinned (MinIO here is a disposable test double, not a component this course tracks in
   `versions.env`) — pin an explicit `RELEASE.*` tag if you keep this cpu-lab setup running.
+
+---
+
+[← Prev: 16-capstone-ai-platform](../16-capstone-ai-platform) | [Course Map](../README.md) | [Next: 18-infrastructure-as-code →](../18-infrastructure-as-code)

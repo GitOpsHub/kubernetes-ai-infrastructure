@@ -2,8 +2,11 @@
 
 [![validate](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml/badge.svg)](https://github.com/GitOpsHub/kubernetes-ai-infrastructure/actions/workflows/validate.yml)
 
-A hands-on course for DevOps engineers on running AI workloads (GPU scheduling, training, LLM serving,
-autoscaling, cost) on Kubernetes. Every lab targets **EKS**, and runs on **spot capacity** by default.
+A hands-on course for DevOps engineers on running AI workloads — GPU scheduling, training, LLM
+serving, autoscaling, and cost management — on Kubernetes. Every lab targets **EKS** and runs on
+**spot capacity** by default across 20 numbered chapters.
+
+---
 
 ## New to Kubernetes, GPUs, or AWS? Start here
 
@@ -21,34 +24,67 @@ around that idea: getting GPUs into pods, sharing them, storing and loading mult
 weights, training across many machines, serving models at scale, autoscaling, and keeping the cost of
 all this under control.
 
-Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup. Every kustomize
-overlay and shell script in this repo is checked on every PR by
-[`scripts/validate-all.sh`](scripts/validate-all.sh) — run it locally before you push:
+---
+
+## Quick Start (3 commands)
+
+```bash
+# 1. Set up your environment (fill in your AWS account ID, region, and budget email)
+cp env.sh.example env.sh
+source env.sh && source versions.env
+
+# 2. Verify the repo renders cleanly
+./scripts/validate-all.sh
+
+# 3. Open chapter 00 and follow the lab
+# -> 00-prerequisites-and-cluster-setup/README.md
+```
+
+> **Request GPU quota on day 1** (chapter 00). Spot GPU quota approval can take days, and the
+> default quota for L4/T4 in most regions is 0.
+
+---
+
+## What you need before starting
+
+| Requirement | Details |
+|---|---|
+| **AWS account** | Admin/owner-level IAM access to create EKS clusters, EC2 instances, and IAM roles |
+| **Budget** | ~$20-50/month for labs (spot discount applies; run cleanup after every session) |
+| **OS** | macOS or Linux (Windows via WSL2) |
+| **Tools** | `kubectl`, `helm`, `kustomize`, `aws` CLI v2, `eksctl`, `k9s`, `jq` -- chapter 00 installs all of these |
+| **Python** | Basic familiarity only (chapter 19 has Python sources) |
+
+---
+
+## How to use this repo
+
+1. **Set up your environment** -- copy `env.sh.example` to `env.sh`, fill in your AWS account ID,
+   region, and budget email, then source both files before running any command:
+   ```bash
+   cp env.sh.example env.sh
+   source env.sh && source versions.env
+   ```
+2. **Work through chapters in order** the first time. Each chapter README is self-contained: it
+   explains its concepts before using them and assumes nothing beyond what earlier chapters set up.
+   Jumping ahead is fine once you know what a chapter depends on.
+3. **Everything is copy-pasteable** -- each chapter README's Lab section inlines every command with
+   an explanation before it and an expected output snippet after it. You never need to open a
+   separate script file.
+4. **Apply manifests with kustomize**: `kubectl apply -k NN-chapter/eks` -- the `eks/` overlay adds
+   node selectors, tolerations, and storage classes on top of the cloud-agnostic `common/` base.
+5. **Clean up after every session.** Each chapter ends with a Cleanup section. Run it. Forgotten
+   spot GPU nodes cost real money.
+
+Read [CONVENTIONS.md](CONVENTIONS.md) for the full folder layout and README section contract. Every
+kustomize overlay and shell script in this repo is checked on every PR by
+[`scripts/validate-all.sh`](scripts/validate-all.sh) -- run it locally before you push:
 
 ```bash
 ./scripts/validate-all.sh
 ```
 
-## How to use this repo
-
-```bash
-cp env.sh.example env.sh      # fill in your AWS account/region
-source env.sh && source versions.env
-```
-
-Each chapter folder has a `README.md` (theory + lab, fully copy-pasteable — no separate script files
-to open) plus `common/`, `eks/` and, where possible, a `cpu-lab/` so you can learn the mechanics before
-you have GPU quota. The one exception is chapter 18, whose `eks/` folder is a Terraform module instead
-of a kustomize overlay — see its README for why. Chapter 19 also carries Python sources under
-`common/src/` (built into an image or mounted via ConfigMap).
-
-> **Request GPU quota on day 1** (chapter 00). Spot GPU quota approval can take days, and default quota
-> for L4/T4 in most regions is 0.
-
-Every chapter README is self-contained: it explains its own concepts before it uses them, and assumes
-nothing beyond what earlier chapters in the sequence set up (cluster, node groups, CRDs installed). Work
-through the chapters in order the first time — jumping ahead is fine once you know what a chapter needs
-from [chapter 00](00-prerequisites-and-cluster-setup/) onward.
+---
 
 ## Course map
 
@@ -83,25 +119,27 @@ flowchart LR
 | 00 | [Prerequisites & cluster setup](00-prerequisites-and-cluster-setup/) | How do I get a spot CPU+GPU EKS cluster without surprise bills? | 1 |
 | 01 | [GPU nodes & scheduling](01-gpu-nodes-and-scheduling/) | How does a GPU actually get into a pod? | 1 |
 | 02 | [NVIDIA GPU Operator](02-nvidia-gpu-operator/) | When should I manage the GPU software stack myself? | 1 |
-| 03 | [GPU sharing & DRA](03-gpu-sharing-and-dra/) | How do I avoid wasting a whole GPU on a small workload? | 1–2 |
+| 03 | [GPU sharing & DRA](03-gpu-sharing-and-dra/) | How do I avoid wasting a whole GPU on a small workload? | 1-2 |
 | 04 | [GPU observability](04-gpu-observability/) | Is my expensive GPU actually doing work? | 1 |
-| 05 | [Model storage & data](05-model-storage-and-data/) | How do 10–100 GB of weights get to the pod quickly? | 1–2 |
-| 06 | [Batch jobs & Kueue](06-batch-jobs-and-kueue/) | How do teams share scarce GPUs fairly? | 1–2 |
+| 05 | [Model storage & data](05-model-storage-and-data/) | How do 10-100 GB of weights get to the pod quickly? | 1-2 |
+| 06 | [Batch jobs & Kueue](06-batch-jobs-and-kueue/) | How do teams share scarce GPUs fairly? | 1-2 |
 | 07 | [Distributed training](07-distributed-training-kubeflow-trainer/) | How do I train across many pods and survive spot preemption? | 2 |
-| 08 | [Ray on Kubernetes](08-ray-on-kubernetes/) | When is Ray a better fit than plain Jobs? | 1–2 |
+| 08 | [Ray on Kubernetes](08-ray-on-kubernetes/) | When is Ray a better fit than plain Jobs? | 1-2 |
 | 09 | [LLM inference with vLLM](09-llm-inference-with-vllm/) | What does it take to serve an LLM reliably? | 2 |
-| 10 | [Autoscaling inference](10-autoscaling-inference/) | Why doesn't CPU-based HPA work, and what does? | 1–2 |
-| 11 | [KServe](11-kserve/) | What does a model-serving platform add? | 1–2 |
+| 10 | [Autoscaling inference](10-autoscaling-inference/) | Why doesn't CPU-based HPA work, and what does? | 1-2 |
+| 11 | [KServe](11-kserve/) | What does a model-serving platform add? | 1-2 |
 | 12 | [Inference gateway & multi-node serving](12-inference-gateway-and-multinode-serving/) | How should LLM traffic be routed and big models split? | 2 |
 | 13 | [Node autoscaling & cost](13-node-autoscaling-and-cost/) | How do I get GPUs just in time and pay less? | 2 |
-| 14 | [Multi-tenancy & security](14-multi-tenancy-and-security/) | How do I safely share the platform? | 1–2 |
+| 14 | [Multi-tenancy & security](14-multi-tenancy-and-security/) | How do I safely share the platform? | 1-2 |
 | 15 | [GitOps & MLOps pipelines](15-mlops-gitops-and-pipelines/) | How do I manage all this declaratively? | 2 |
 | 16 | [Capstone AI platform](16-capstone-ai-platform/) | Can I build and operate the whole thing? | 3 |
 | 17 | [Platform day-2 operations](17-platform-day2-operations/) | How do I keep this running: drains, upgrades, incidents, backup/DR, chargeback? | 2 |
-| 18 | [Infrastructure as Code](18-infrastructure-as-code/) | How would a platform team actually provision these clusters (Terraform, not CLI scripts)? | 1–2 |
-| 19 | [LLM pipelines on EKS: Hugging Face + LangChain](19-llm-pipelines-huggingface-langchain/) | How do I wire a Hugging Face model → fine-tune → serve → LangChain app pipeline on AWS? | 2 |
+| 18 | [Infrastructure as Code](18-infrastructure-as-code/) | How would a platform team actually provision these clusters (Terraform, not CLI scripts)? | 1-2 |
+| 19 | [LLM pipelines on EKS: Hugging Face + LangChain](19-llm-pipelines-huggingface-langchain/) | How do I wire a Hugging Face model -> fine-tune -> serve -> LangChain app pipeline on AWS? | 2 |
 
-**About 29–37 days at 3 hours/day** (roughly 6–8 weeks at 5 days/week).
+**About 29-37 days at 3 hours/day** (roughly 6-8 weeks at 5 days/week).
+
+---
 
 ## Suggested daily rhythm (3 hours)
 
@@ -111,12 +149,19 @@ flowchart LR
 | Lab | 1 h 45 min | Do the EKS lab |
 | Review | 30 min | Answer checkpoint questions without peeking, run cleanup, write notes |
 
+---
+
 ## Cost safety
 
 - Spot GPU node groups are created with **min nodes = 0**, so they only cost money while a GPU pod is pending or running.
 - Every chapter's README ends with a Cleanup section. Run it at the end of each session.
 - Set a budget alert (chapter 00) on your AWS account before creating GPU node groups.
+- Check for leftover EBS volumes and load balancers after deleting a cluster -- they are **not** automatically removed and will continue billing.
+
+---
 
 ## Versions
 
-All pinned in [versions.env](versions.env) (verified 2026-09-16/18, Kubernetes 1.35).
+All component versions are pinned in [versions.env](versions.env) (verified 2026-09-16/18,
+Kubernetes 1.35). Environment variables (AWS account ID, region, etc.) go in `env.sh` -- copy
+[env.sh.example](env.sh.example) and fill it in before running any command.
