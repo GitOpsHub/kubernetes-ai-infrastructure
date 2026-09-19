@@ -121,25 +121,25 @@ By the end you can:
 5. Install the NVIDIA DRA driver on a dedicated EKS node group and confirm it publishes
    `ResourceSlice`s for real GPUs.
 
-| Time | Activity |
-|---|---|
+| Time      | Activity                                                                             |
+| --------- | ------------------------------------------------------------------------------------ |
 | 0:00–0:35 | Read section 3 (concepts). Skim `eks/device-plugin-config.yaml` and `eks/dra/*.yaml` |
-| 0:35–1:00 | Time-slicing lab on EKS |
-| 1:00–1:20 | MPS lab |
-| 1:20–1:55 | DRA lab (single claim, shared claim, CEL selector, opaque sharing config) |
-| 1:55–2:25 | MIG (read-through if you don't have A100/H100 quota; hands-on if you do) |
-| 2:25–2:40 | Checkpoint questions, cleanup |
+| 0:35–1:00 | Time-slicing lab on EKS                                                              |
+| 1:00–1:20 | MPS lab                                                                              |
+| 1:20–1:55 | DRA lab (single claim, shared claim, CEL selector, opaque sharing config)            |
+| 1:55–2:25 | MIG (read-through if you don't have A100/H100 quota; hands-on if you do)             |
+| 2:25–2:40 | Checkpoint questions, cleanup                                                        |
 
 ## 3. Concepts
 
 ### 3.1 Time-slicing vs MPS vs MIG vs DRA
 
-| | Isolation | Memory limit per client | GPUs it works on | Configured via |
-|---|---|---|---|---|
-| Time-slicing | None (context-switch only) | No | Any | Device plugin `sharing.timeSlicing` config |
-| MPS | Process-level, shared fault domain | Yes (per-client quota) | Any (full GPU, not MIG) | Device plugin `sharing.mps` config |
-| MIG | Hardware (own SM + memory) | Yes (fixed by profile) | A100 / H100 / H200 only | MIG Manager (GPU Operator) partitions after node join, node label `nvidia.com/mig.config` |
-| DRA | Depends on driver's claim config (can express time-slicing/MPS/MIG) | Depends on config | Any, driver-defined | `ResourceClaim`/`ResourceClaimTemplate` + `DeviceClass`, GA API |
+|              | Isolation                                                           | Memory limit per client | GPUs it works on        | Configured via                                                                            |
+| ------------ | ------------------------------------------------------------------- | ----------------------- | ----------------------- | ----------------------------------------------------------------------------------------- |
+| Time-slicing | None (context-switch only)                                          | No                      | Any                     | Device plugin `sharing.timeSlicing` config                                                |
+| MPS          | Process-level, shared fault domain                                  | Yes (per-client quota)  | Any (full GPU, not MIG) | Device plugin `sharing.mps` config                                                        |
+| MIG          | Hardware (own SM + memory)                                          | Yes (fixed by profile)  | A100 / H100 / H200 only | MIG Manager (GPU Operator) partitions after node join, node label `nvidia.com/mig.config` |
+| DRA          | Depends on driver's claim config (can express time-slicing/MPS/MIG) | Depends on config       | Any, driver-defined     | `ResourceClaim`/`ResourceClaimTemplate` + `DeviceClass`, GA API                           |
 
 **"Isolation" means:** can a bug, crash, or resource hog in one pod's use of the GPU affect
 another pod sharing the same card? "None" means yes, freely — a memory leak in one pod's process
@@ -168,9 +168,9 @@ named "profiles", one label per node choosing which profile applies. Relabeling 
 without recreating it — the GPU Operator's config-manager sidecar notices the label change and
 restarts the plugin pod for you.
 
-| | Time-slicing | MPS | MIG | Resource name (single strategy) | Resource name (mixed strategy) |
-|---|---|---|---|---|---|
-| EKS | Device plugin `sharing.timeSlicing` config (GPU Operator, chapter 02) | Device plugin `sharing.mps` config | MIG Manager (GPU Operator) partitions after node join, label `nvidia.com/mig.config=all-1g.5gb` | `nvidia.com/gpu` | `nvidia.com/mig-<profile>` |
+|     | Time-slicing                                                          | MPS                                | MIG                                                                                             | Resource name (single strategy) | Resource name (mixed strategy) |
+| --- | --------------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------- | ------------------------------ |
+| EKS | Device plugin `sharing.timeSlicing` config (GPU Operator, chapter 02) | Device plugin `sharing.mps` config | MIG Manager (GPU Operator) partitions after node join, label `nvidia.com/mig.config=all-1g.5gb` | `nvidia.com/gpu`                | `nvidia.com/mig-<profile>`     |
 
 ### 3.3 DRA in one paragraph
 
@@ -477,14 +477,14 @@ NVIDIA's MIG profile naming: 1 GPU compute slice (of 7 total on an A100) and 5GB
 
 ## 6. Troubleshooting
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| Pod `FailedPrepareDynamicResources` / stuck `ContainerCreating` (DRA) | DRA driver feature gate not enabled (e.g. `TimeSlicingSettings`) or driver/device-plugin both on the node. This happens because a claim's opaque `config[]` block asks the driver to do something (apply a sharing strategy) that the driver was installed without permission to do — the driver silently can't satisfy the claim. | Check `helm get values nvidia-dra-driver-gpu -n nvidia-dra-driver-gpu`; confirm no device plugin DaemonSet on that node (`kubectl get ds -n gpu-operator -o wide`) |
-| `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` after enabling sharing | Node still labeled with the old / no `nvidia.com/device-plugin.config`, plugin didn't restart. The scheduler is still seeing the old (smaller) advertised GPU count because the plugin pod on that node never picked up the new config — labels only take effect once the plugin actually restarts and re-registers with the kubelet. | `kubectl label node <node> nvidia.com/device-plugin.config=time-sliced-4 --overwrite`; GPU Operator's config-manager restarts the plugin automatically, static installs need a manual `kubectl rollout restart ds/nvidia-device-plugin` |
-| MPS pod never sees `CUDA_MPS_*` env | Plugin's MPS control daemon not running. The device plugin only injects those env vars when it has successfully started the MPS control daemon on the node — if that daemon crashed or never started, clients get scheduled as if MPS worked but never actually get quota-managed access. | `kubectl -n gpu-operator logs -l app=nvidia-device-plugin-mps-control-daemon` |
-| `ResourceClaim` stuck `pending` forever (no error) | No node in range advertises a matching `ResourceSlice`, or CEL selector too strict. Unlike a `Pending` pod from ordinary scheduling (which usually gets an event explaining why), an over-strict or typo'd CEL expression can just quietly match nothing, with no obvious error pointing at the expression itself. | `kubectl get resourceslices -o yaml`, check `device.capacity` names/units match the CEL expression exactly |
-| Device plugin ConfigMap change has no effect | Wrong `devicePlugin.config.name`/`default` on the Helm release, or node missing the label. The ConfigMap can be perfectly correct and applied, but if the Helm release's `devicePlugin.config.name` doesn't point at it (or the node lacks the label selecting a key inside it), the plugin keeps reading whatever it was already using. | Re-run the `helm upgrade gpu-operator ...` from Step 1 (`--set devicePlugin.config.name=device-plugin-sharing --set devicePlugin.config.default=any`); verify with `kubectl get nodes -o custom-columns=NAME:.metadata.name,CFG:.metadata.labels.nvidia\.com/device-plugin\.config` |
-| `no matches for kind "ResourceClaimTemplate"` | Cluster too old (pre-1.34) or `resource.k8s.io/v1` not yet GA on this control plane. DRA objects only exist as API types on clusters new enough to have the GA API compiled in — applying one before the API exists behaves exactly like applying a CRD-backed resource before the CRD is installed. | Confirm the cluster is on Kubernetes 1.36+ (`kubectl version`); recreate the EKS cluster on `version: "1.36"` per chapter 00 if not |
+| Symptom                                                                         | Cause                                                                                                                                                                                                                                                                                                                                    | Fix                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pod `FailedPrepareDynamicResources` / stuck `ContainerCreating` (DRA)           | DRA driver feature gate not enabled (e.g. `TimeSlicingSettings`) or driver/device-plugin both on the node. This happens because a claim's opaque `config[]` block asks the driver to do something (apply a sharing strategy) that the driver was installed without permission to do — the driver silently can't satisfy the claim.       | Check `helm get values nvidia-dra-driver-gpu -n nvidia-dra-driver-gpu`; confirm no device plugin DaemonSet on that node (`kubectl get ds -n gpu-operator -o wide`)                                                                                                                  |
+| `0/1 nodes are available: 1 Insufficient nvidia.com/gpu` after enabling sharing | Node still labeled with the old / no `nvidia.com/device-plugin.config`, plugin didn't restart. The scheduler is still seeing the old (smaller) advertised GPU count because the plugin pod on that node never picked up the new config — labels only take effect once the plugin actually restarts and re-registers with the kubelet.    | `kubectl label node <node> nvidia.com/device-plugin.config=time-sliced-4 --overwrite`; GPU Operator's config-manager restarts the plugin automatically, static installs need a manual `kubectl rollout restart ds/nvidia-device-plugin`                                             |
+| MPS pod never sees `CUDA_MPS_*` env                                             | Plugin's MPS control daemon not running. The device plugin only injects those env vars when it has successfully started the MPS control daemon on the node — if that daemon crashed or never started, clients get scheduled as if MPS worked but never actually get quota-managed access.                                                | `kubectl -n gpu-operator logs -l app=nvidia-device-plugin-mps-control-daemon`                                                                                                                                                                                                       |
+| `ResourceClaim` stuck `pending` forever (no error)                              | No node in range advertises a matching `ResourceSlice`, or CEL selector too strict. Unlike a `Pending` pod from ordinary scheduling (which usually gets an event explaining why), an over-strict or typo'd CEL expression can just quietly match nothing, with no obvious error pointing at the expression itself.                       | `kubectl get resourceslices -o yaml`, check `device.capacity` names/units match the CEL expression exactly                                                                                                                                                                          |
+| Device plugin ConfigMap change has no effect                                    | Wrong `devicePlugin.config.name`/`default` on the Helm release, or node missing the label. The ConfigMap can be perfectly correct and applied, but if the Helm release's `devicePlugin.config.name` doesn't point at it (or the node lacks the label selecting a key inside it), the plugin keeps reading whatever it was already using. | Re-run the `helm upgrade gpu-operator ...` from Step 1 (`--set devicePlugin.config.name=device-plugin-sharing --set devicePlugin.config.default=any`); verify with `kubectl get nodes -o custom-columns=NAME:.metadata.name,CFG:.metadata.labels.nvidia\.com/device-plugin\.config` |
+| `no matches for kind "ResourceClaimTemplate"`                                   | Cluster too old (pre-1.34) or `resource.k8s.io/v1` not yet GA on this control plane. DRA objects only exist as API types on clusters new enough to have the GA API compiled in — applying one before the API exists behaves exactly like applying a CRD-backed resource before the CRD is installed.                                     | Confirm the cluster is on Kubernetes 1.36+ (`kubectl version`); recreate the EKS cluster on `version: "1.36"` per chapter 00 if not                                                                                                                                                 |
 
 ## 7. Cleanup and cost notes
 
