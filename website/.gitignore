@@ -1,0 +1,12 @@
+# Docusaurus build output
+.docusaurus/
+build/
+
+# Node
+node_modules/
+
+# Generated docs (populated by scripts/sync-docs.sh at build time)
+docs/
+
+# macOS
+.DS_Store
