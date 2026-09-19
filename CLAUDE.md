@@ -5,19 +5,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this repo is
 
 A hands-on course teaching Kubernetes for AI workloads (GPU scheduling, training, LLM serving,
-autoscaling, cost) to a DevOps audience. It is not an application — there is no build/lint/test suite.
-The "product" is a sequence of 20 numbered chapters (`00-prerequisites-and-cluster-setup` through
-`19-llm-pipelines-huggingface-langchain`), each a self-contained lab with Kubernetes manifests, Helm
-values, and an **EKS**-only overlay. Every operational step (cluster/nodegroup creation, Helm installs,
-scale/cleanup) is inlined as copy-pasteable bash in the chapter's README — there are no per-chapter
-`create-*.sh`/`install-*.sh` script files to open. Chapter 18 is the one exception — its `eks/` folder
-is a Terraform module instead of a kustomize overlay, see its README for why (it also keeps a real
-`cleanup.sh`, a guarded `terraform destroy` wrapper — that one stays a script because the safety guard
-is the point). Chapter 19 is the only chapter that carries Python sources: `common/src/` holds the
-trainer code (built into an image) and PEP 723 `uv run` scripts (mounted into pods via kustomize
-`configMapGenerator`, which is why they live inside the chapter's `common/` kustomization root). Read
-[README.md](README.md) for the course map and [CONVENTIONS.md](CONVENTIONS.md) for the full chapter
-layout contract before adding or editing a chapter.
+autoscaling, cost) to a DevOps audience. It is not an application in the product sense — there's no app
+to build or ship — but the repo does carry a real CI/validation layer (see below), so "no test suite"
+no longer applies. The "product" is a sequence of 20 numbered chapters (`00-prerequisites-and-cluster-setup`
+through `19-llm-pipelines-huggingface-langchain`), each a self-contained lab with Kubernetes manifests,
+Helm values, and an **EKS**-only overlay. Every operational step (cluster/nodegroup creation, Helm
+installs, scale/cleanup) is inlined as copy-pasteable bash in the chapter's README — there are no
+per-chapter `create-*.sh`/`install-*.sh` script files to open. Chapter 18 is the one exception — its
+`eks/` folder is a Terraform module instead of a kustomize overlay, see its README for why (it also
+keeps a real `cleanup.sh`, a guarded `terraform destroy` wrapper — that one stays a script because the
+safety guard is the point). Chapter 19 is the only chapter that carries Python sources: `common/src/`
+holds the trainer code (built into an image) and PEP 723 `uv run` scripts (mounted into pods via
+kustomize `configMapGenerator`, which is why they live inside the chapter's `common/` kustomization
+root). Read [README.md](README.md) for the course map and [CONVENTIONS.md](CONVENTIONS.md) for the
+full chapter layout contract before adding or editing a chapter.
+
+The repo also publishes a Docusaurus docs site from `website/` (see "Docs website" below) and a
+research/notes file, [AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md](AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md),
+that isn't part of the course itself.
 
 ## Environment setup
 
@@ -31,29 +36,34 @@ used across all chapters. Chapter READMEs reference these as `${KUEUE_VERSION}`,
 When bumping a pinned version, update `versions.env` and the affected chapter's "Versions tested" table
 together — don't let them drift.
 
-## Validating changes (no test suite — use these instead)
+## Validating changes
 
 ```bash
-# Validate a chapter overlay renders without error
-kubectl kustomize <chapter>/<cloud>       # cloud = common | eks | cpu-lab
+# Repo-wide check — same thing CI runs on every PR touching yaml/yml/sh
+# (kustomize build, kubeconform on core resources, shellcheck/bash -n, terraform fmt+validate for ch18)
+./scripts/validate-all.sh
 
-# Validate every overlay in the repo
-for d in $(find [0-9][0-9]-* -name kustomization.yaml -exec dirname {} \; | sort -u); do
-  kubectl kustomize "$d" > /dev/null || echo "FAIL $d"
-done
+# Validate a single chapter overlay renders without error
+kubectl kustomize <chapter>/<cloud>       # cloud = common | eks | cpu-lab
 
 # Validate a Helm values file against the real chart (don't hand-verify field names from memory)
 helm show values <chart>@<pinned-version>
 helm template <chart>@<pinned-version> -f <chapter>/eks/values-*.yaml
-
-# Shell scripts (few remain — most operational steps live in READMEs now)
-bash -n <script>.sh && chmod +x <script>.sh
 ```
 
+[scripts/validate-all.sh](scripts/validate-all.sh) is what [.github/workflows/validate.yml](.github/workflows/validate.yml)
+runs on every PR that touches `**/*.yaml`, `**/*.yml`, or `**/*.sh`, plus every push to `main`. It
+intentionally skips CRD schema validation (Kueue's `TrainJob`, `RayCluster`, `InferencePool`, …) —
+kubeconform has no schema for them, so cross-check those by hand against the pinned version's CRD
+source instead of trusting a clean run. A separate workflow, [.github/workflows/deploy-docs.yml](.github/workflows/deploy-docs.yml),
+builds and publishes the `website/` docs site to GitHub Pages on every push to `main` that touches
+any `**.md` or `website/**` — it is unrelated to the kustomize/Terraform validation above.
+
 **No commands here touch a live cluster or cloud account** — `kubectl kustomize`, `helm template`, and
-`bash -n` are all local/dry-run. Never run `kubectl apply`, `helm install`, or `aws`/`eksctl` mutating
-commands against a real cluster/account without the user's explicit go-ahead — GPU node groups and spot
-capacity cost real money the moment they're created.
+`scripts/validate-all.sh` are all local/dry-run (it runs `terraform init -backend=false`, no real
+backend/credentials). Never run `kubectl apply`, `helm install`, or `aws`/`eksctl` mutating commands
+against a real cluster/account without the user's explicit go-ahead — GPU node groups and spot capacity
+cost real money the moment they're created.
 
 ## Repo-wide invariants (see CONVENTIONS.md for full detail)
 
@@ -79,6 +89,24 @@ capacity cost real money the moment they're created.
   mark anything you couldn't verify with an inline `# VERIFY:` comment rather than guessing.
 - Namespaces are per chapter (`ch06-kueue`, `ch07-training`, …) unless a component has a conventional
   namespace (`gpu-operator`, `kueue-system`, `monitoring`, `kserve`, `karpenter`, `argocd`).
+
+## Docs website (`website/`)
+
+A Docusaurus 3 site that republishes the chapter READMEs (plus `CONVENTIONS.md`) as browsable docs,
+deployed to GitHub Pages by `deploy-docs.yml`. **Never hand-edit files under `website/docs/`** — they
+are generated. The source of truth is always a chapter's `README.md` (or `CONVENTIONS.md`); edit that,
+then regenerate:
+
+```bash
+cd website
+npm run sync     # scripts/sync-docs.sh -> node scripts/sync-docs.js: copies chapter READMEs into website/docs/NN-slug/
+npm start         # local preview at http://localhost:3000
+npm run build     # production build (also runs sync via `prebuild`)
+```
+
+`website/docs/` is gitignored — it's regenerated output, never committed. `sync` runs automatically
+before `start`/`build` (npm `pre*` hooks) and again in CI before the Pages build, so don't trust a
+locally-present `website/docs/` without re-running `sync` first.
 
 ## Chapter 15's GitOps note
 
