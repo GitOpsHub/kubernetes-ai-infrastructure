@@ -78,18 +78,6 @@ const sidebars = {
       collapsed: false,
       items: [
         { type: 'doc', id: 'llm-pipelines/index', label: '19 · LLM Pipelines (HF + LangChain)' },
-        {
-          type: 'category',
-          label: 'LangChain App Docs',
-          collapsed: true,
-          items: [
-            { type: 'doc', id: 'llm-pipelines/spot-gpu-nodes',    label: 'Spot GPU Nodes' },
-            { type: 'doc', id: 'llm-pipelines/kueue-gpu-queues',  label: 'Kueue GPU Queues' },
-            { type: 'doc', id: 'llm-pipelines/model-storage',     label: 'Model Storage' },
-            { type: 'doc', id: 'llm-pipelines/vllm-serving',      label: 'vLLM Serving' },
-            { type: 'doc', id: 'llm-pipelines/keda-autoscaling',  label: 'KEDA Autoscaling' },
-          ],
-        },
       ],
     },
   ],
