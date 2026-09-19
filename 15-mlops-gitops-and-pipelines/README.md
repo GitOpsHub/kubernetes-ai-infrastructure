@@ -351,15 +351,18 @@ Layout:
 
 ```
 15-mlops-gitops-and-pipelines/
-├── common/
-│   ├── argocd-apps/
-│   │   ├── project.yaml            AppProject "ai-platform"
-│   │   └── apps-eks/                8 child Application manifests + kustomization
-│   ├── workflows/                  ch15-pipelines namespace, RBAC, PVC, train-and-register WorkflowTemplate
-│   └── mlflow/                     values-mlflow-{eks,cpu-lab}.yaml (Helm values, not applied directly)
-├── eks/                             root-app.yaml (the ONE Application you apply by hand), kustomization.yaml
-└── cpu-lab/                        install-argo-workflows.sh, install-mlflow.sh (plain Helm, no Argo CD needed), kustomization.yaml (workflows), cleanup.sh
+└── eks/
+    ├── project.yaml                 AppProject "ai-platform"
+    ├── root-app.yaml                the ONE Application you apply by hand
+    ├── apps/                        8 child Application manifests (plain directory, no aggregator file)
+    ├── pipelines/                   ch15-pipelines namespace, RBAC, PVC, train-and-register WorkflowTemplate
+    ├── values-argo-workflows.yaml   Helm values, referenced by apps/app-argo-workflows.yaml ($values source)
+    └── values-mlflow-eks.yaml       Helm values, referenced by apps/app-mlflow.yaml ($values source)
 ```
+
+Every file under `eks/` is a complete, standalone Kubernetes manifest (or a Helm values file
+referenced by one) — apply any of them directly with `kubectl apply -f`, no kustomize build step
+involved.
 
 ```bash
 cp env.sh.example env.sh   # repo root, if not already done
@@ -367,64 +370,36 @@ source env.sh && source versions.env
 ```
 
 Why this first: `versions.env` is where every pinned chart/image version in this course lives
-(`ARGO_WORKFLOWS_VERSION`, `MLFLOW_CHART_VERSION`, etc.) — every script and Application manifest
-below references those variables instead of a hardcoded version, so sourcing it is what makes
-`${ARGO_WORKFLOWS_VERSION}` resolve to something real in the commands that follow. `env.sh` (your
-own copy, gitignored) supplies the AWS account/region details later steps that touch a real
-cluster or S3 bucket will need.
+(`ARGO_WORKFLOWS_VERSION`, `MLFLOW_CHART_VERSION`, etc.) — the Application manifests below
+reference those versions directly (Argo CD can't `${env}`-expand, so they're kept in sync by hand
+against `versions.env`, see §3.4/§4 Step 1). `env.sh` (your own copy, gitignored) supplies the AWS
+account/region details later steps that touch a real cluster or S3 bucket will need.
 
-### Step 1: No Argo CD yet? Start here (any cluster)
-
-What you're about to do: install Argo Workflows and MLflow directly via Helm (no Argo CD
-involved), then run the `train-and-register` pipeline end to end and confirm MLflow actually
-recorded the run. This is the "any cluster" path — it works on a kind/minikube cluster with no
-AWS account at all, because `cpu-lab/install-mlflow.sh` uses `values-mlflow-cpu-lab.yaml`, which
-stores its backend and artifacts on local PVC storage instead of S3.
+You can also try the pipeline directly, without Argo CD, once you have a real EKS cluster and
+have installed Argo Workflows and MLflow via Helm yourself (`helm upgrade --install
+argo-workflows argo/argo-workflows --version "${ARGO_WORKFLOWS_VERSION}" --namespace argo
+--create-namespace --set controller.workflowNamespaces='{ch15-pipelines}'` and `helm upgrade
+--install mlflow community-charts/mlflow --version "${MLFLOW_CHART_VERSION}" --namespace mlflow
+--create-namespace -f eks/values-mlflow-eks.yaml`, the latter needing the `YOUR_AWS_ACCOUNT`/
+`YOUR_ACCOUNT_ID` placeholders in that values file filled in first, see Step 1 below):
 
 ```bash
-./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh
-./15-mlops-gitops-and-pipelines/cpu-lab/install-mlflow.sh
-kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/namespace.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/serviceaccount-pipelines-runner.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/pvc-pipeline-artifacts.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/workflowtemplate-train-pipeline.yaml
 kubectl -n argo port-forward svc/argo-workflows-server 2746:2746 &
 kubectl -n mlflow port-forward svc/mlflow 5000:5000 &
 argo submit --watch -n ch15-pipelines --from workflowtemplate/train-and-register
 ```
 
-What each line actually does, for a first-timer:
-
-- `install-argo-workflows.sh` runs `helm upgrade --install argo-workflows argo/argo-workflows
-  --version "${ARGO_WORKFLOWS_VERSION}" --namespace argo --create-namespace`, pinned to the
-  version in `versions.env` — same as any Helm install you've done in earlier chapters, just
-  wrapped in a script so this README doesn't repeat three lines of `helm repo add`/`update`/
-  `upgrade --install` boilerplate. It also passes `--set controller.workflowNamespaces='{ch15-pipelines}'`,
-  which tells the *cluster-wide* Argo Workflows controller which namespaces it's allowed to run
-  `WorkflowTemplate`s in — without this, `argo submit -n ch15-pipelines` would fail even though the
-  controller itself is healthy, because the controller was never told to watch that namespace.
-- `install-mlflow.sh` similarly runs `helm upgrade --install mlflow community-charts/mlflow
-  --version "${MLFLOW_CHART_VERSION}" --namespace mlflow --create-namespace -f
-  common/mlflow/values-mlflow-cpu-lab.yaml` — an ordinary Helm install into its own namespace.
-- `kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab` applies this chapter's own
-  kustomization: the `ch15-pipelines` namespace, the `pipelines-runner` ServiceAccount + RBAC the
-  Workflow's Pods run as, the `pipeline-artifacts` PVC the train/register steps share a
-  filesystem through, and the `train-and-register` `WorkflowTemplate` itself. None of this needs
-  Argo CD — it's the exact same `kubectl apply -k` pattern every earlier chapter used.
-- The two `port-forward ... &` commands open a local TCP tunnel to each Service so you can reach
-  the Argo Workflows UI and the MLflow UI from your own browser at `localhost:2746` and
-  `localhost:5000` — the trailing `&` backgrounds them so your shell isn't blocked; kill them later
-  with `kill %1 %2` or just close the terminal.
-- `argo submit --watch -n ch15-pipelines --from workflowtemplate/train-and-register` is the actual
-  pipeline run: it creates a `Workflow` object from the saved `WorkflowTemplate`, and `--watch`
-  streams each step's status live instead of you having to separately run `argo get`/`argo logs`.
-
-**Expected output**: `argo submit --watch` prints both steps (`train`, `register`) reaching
-`Succeeded`, ending with `Status: Succeeded`.
-
 **How to tell this worked**: open `http://localhost:5000` — the `ch15-train-and-register`
 experiment has a new run with a logged `eval_loss` metric, and **Models** shows a registered
 model `ch15-demo-model` with a new version. If the Workflow succeeded but nothing shows up here,
-the register step ran against the wrong `MLFLOW_TRACKING_URI` — see section 6.
+the register step ran against the wrong `MLFLOW_TRACKING_URI` — see section 6. This is a useful
+sanity check before Step 2 below wires the same objects up through Argo CD instead.
 
-### Step 2 (only if you run Argo CD): Review, then apply the app-of-apps
+### Step 1: Review, then apply the app-of-apps
 
 **Do not skip the review.** Every `Application`/`AppProject` manifest here has `YOUR_ORG`,
 `YOUR_PROJECT`, `YOUR_AWS_ACCOUNT`, or `YOUR_STORAGE_ACCOUNT` placeholders — fill in your own
@@ -441,7 +416,7 @@ grep -rln "YOUR_" 15-mlops-gitops-and-pipelines/ | xargs sed -i '' 's#YOUR_ORG/k
 
 The `grep -rln` first prints every file containing a placeholder so you know the full scope of
 what to edit before changing anything (currently `eks/root-app.yaml` and
-`common/argocd-apps/project.yaml`, both `repoURL`/`sourceRepos` entries). The `sed -i ''` line
+`eks/project.yaml`, both `repoURL`/`sourceRepos` entries). The `sed -i ''` line
 (macOS/BSD `sed` syntax — drop the `''` on GNU/Linux `sed`) is one example substitution for the
 git URL placeholder; it's deliberately not a script that rewrites every placeholder for you,
 because `YOUR_AWS_ACCOUNT`/`YOUR_STORAGE_ACCOUNT` values depend on your own AWS account and S3
