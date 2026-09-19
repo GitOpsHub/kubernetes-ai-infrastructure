@@ -15,8 +15,7 @@ This chapter reuses earlier chapters instead of rebuilding them:
 - **A cluster** from [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup), with
   `env.sh` filled in (`AWS_REGION`, `EKS_CLUSTER`, `AWS_ACCOUNT_ID` for EKS).
 - **A spot GPU node pool plus a device plugin** from
-  [01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling). On EKS that's
-  `eks/create-gpu-nodegroup.sh` + `eks/install-device-plugin.sh`, which gives you the `spot-gpu`
+  [01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling) §4, which gives you the `spot-gpu`
   managed node group (`g6.xlarge`/`g4dn.xlarge`, taint `nvidia.com/gpu=present:NoSchedule`, nodes
   labelled `nvidia.com/gpu.present=true` by the AL2023 NVIDIA AMI). **That group has `maxSize: 1` and
   no cluster autoscaler**, which matters in this chapter (see the GPU budget note in §3.8).
@@ -27,12 +26,12 @@ This chapter reuses earlier chapters instead of rebuilding them:
   `Recreate`, grace period) and its `common/create-hf-secret.sh`, which this chapter reuses. The CPU lab
   also needs chapter 09's `cpu-lab/` Ollama.
 - **Argo Workflows** from [15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines) is
-  *optional*. Every `<cloud>/install.sh` installs it if it's missing, or adds `ch19-pipelines` to an
-  existing Helm release's `controller.workflowNamespaces`. If chapter 15's Argo CD app-of-apps manages
-  it, the script prints the GitOps path and doesn't touch it.
+  *optional*. Step 1 below installs it if it's missing, or adds `ch19-pipelines` to an existing
+  Helm release's `controller.workflowNamespaces`. If chapter 15's Argo CD app-of-apps manages it,
+  `common/install-argo-workflows.sh` prints the GitOps path and doesn't touch it.
 - Tools beyond chapter 00's list: the **`argo` CLI** (`brew install argo`), **Docker with buildx**
-  (the trainer image is built locally), **`envsubst`** (`brew install gettext`, used by
-  `eks/install.sh`) and `jq`. The CPU lab also needs `kind` or `minikube`.
+  (the trainer image is built locally), **`envsubst`** (`brew install gettext`) and `jq`. The CPU
+  lab also needs `kind` or `minikube`.
 - A **Hugging Face token is optional**: every repo used here is ungated. You need a **write** token only
   for the optional publish-to-Hub step.
 
@@ -263,7 +262,7 @@ sequenceDiagram
 
 **Grace period versus notice.** EC2 gives a 2-minute spot interruption notice. The finetune pod's
 `podSpecPatch` sets `terminationGracePeriodSeconds: 110`, which leaves time to finish the current step
-and upload an adapter-sized checkpoint. GKE and AKS give about 30 s. On every cloud, the periodic
+and upload an adapter-sized checkpoint. The periodic
 `SAVE_STEPS` checkpoints are the real safety net. The SIGTERM save is a bonus, and it only happens if
 something turns the notice into a pod eviction. On EKS, managed node groups use Capacity Rebalancing
 and drain the node (chapter 00 §3.3). A hard node loss with no SIGTERM loses at most `SAVE_STEPS` steps.
@@ -410,7 +409,25 @@ chapter's steps run as `pipeline-runner`, which has its own executor RBAC in `co
 fallback group instead of the spot one.
 
 ```bash
-./19-llm-pipelines-huggingface-langchain/eks/install.sh
+: "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}"
+HERE=19-llm-pipelines-huggingface-langchain/eks
+INCLUDE="${INCLUDE:-ch19-cpu-spot}"
+
+if eksctl get nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${INCLUDE%%,*}" >/dev/null 2>&1; then
+  echo "node group ${INCLUDE%%,*} already exists"
+  # cleanup scales it to 0 without deleting it, and there is no cluster autoscaler in this lab:
+  # bring it back to its working size (2 nodes: parallel hf-pull steps + TEI + rag-api don't fit
+  # on one 4 vCPU node).
+  eksctl scale nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${INCLUDE%%,*}" \
+    --nodes "${CPU_NODES:-2}" --nodes-min 0 --nodes-max 3
+else
+  TMP="$(mktemp -d)"
+  envsubst '${EKS_CLUSTER} ${AWS_REGION}' < "${HERE}/nodegroup-ch19.yaml" > "${TMP}/nodegroup-ch19.yaml"
+  eksctl create nodegroup -f "${TMP}/nodegroup-ch19.yaml" --include "${INCLUDE}"
+  rm -rf "${TMP}"
+fi
+
+"${HERE}/../common/install-argo-workflows.sh"
 ```
 
 Expected output (abridged, the eksctl lines vary):
@@ -451,8 +468,83 @@ them with the `pipeline-runner` and `model-reader` ServiceAccounts in `ch19-pipe
 writes `eks/bucket.env`, which kustomize injects into the PV's `bucketName`. The script is idempotent.
 
 ```bash
-./19-llm-pipelines-huggingface-langchain/eks/setup-s3-iam.sh
-cat 19-llm-pipelines-huggingface-langchain/eks/bucket.env
+: "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}" "${AWS_ACCOUNT_ID:?}"
+HERE=19-llm-pipelines-huggingface-langchain/eks
+NS=ch19-pipelines
+BUCKET="${S3_BUCKET:-${AWS_ACCOUNT_ID}-ch19-pipelines}"
+TMP="$(mktemp -d)"
+
+if ! aws s3api head-bucket --bucket "${BUCKET}" 2>/dev/null; then
+  if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+    aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}"
+  else
+    aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}" \
+      --create-bucket-configuration "LocationConstraint=${AWS_REGION}"
+  fi
+  aws s3api put-public-access-block --bucket "${BUCKET}" \
+    --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+fi
+
+for addon in eks-pod-identity-agent aws-mountpoint-s3-csi-driver; do
+  if ! aws eks describe-addon --cluster-name "${EKS_CLUSTER}" --addon-name "${addon}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+    aws eks create-addon --cluster-name "${EKS_CLUSTER}" --addon-name "${addon}" --region "${AWS_REGION}"
+  fi
+done
+
+cat > "${TMP}/trust.json" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "pods.eks.amazonaws.com"},
+    "Action": ["sts:AssumeRole", "sts:TagSession"]
+  }]
+}
+JSON
+
+# Mountpoint's documented least-privilege actions. No s3:DeleteObject anywhere: nothing in this
+# chapter deletes or overwrites objects.
+cat > "${TMP}/model-reader.json" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::${BUCKET}"]},
+    {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::${BUCKET}/*"]}
+  ]
+}
+JSON
+cat > "${TMP}/pipeline-runner.json" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::${BUCKET}"]},
+    {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"],
+     "Resource": ["arn:aws:s3:::${BUCKET}/*"]}
+  ]
+}
+JSON
+
+for sa in pipeline-runner model-reader; do
+  ROLE="ch19-${sa}-${EKS_CLUSTER}"
+  if ! aws iam get-role --role-name "${ROLE}" >/dev/null 2>&1; then
+    aws iam create-role --role-name "${ROLE}" --assume-role-policy-document "file://${TMP}/trust.json" >/dev/null
+  fi
+  aws iam put-role-policy --role-name "${ROLE}" --policy-name s3-ch19 \
+    --policy-document "file://${TMP}/${sa}.json"
+  ROLE_ARN="$(aws iam get-role --role-name "${ROLE}" --query Role.Arn --output text)"
+
+  EXISTING="$(aws eks list-pod-identity-associations --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+    --namespace "${NS}" --service-account "${sa}" --query 'associations[0].associationId' --output text)"
+  if [[ "${EXISTING}" == "None" || -z "${EXISTING}" ]]; then
+    aws eks create-pod-identity-association --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+      --namespace "${NS}" --service-account "${sa}" --role-arn "${ROLE_ARN}" >/dev/null
+  fi
+  echo "role ${ROLE} -> ${NS}/${sa}"
+done
+rm -rf "${TMP}"
+
+printf '# written by chapter 19 setup\nS3_BUCKET=%s\n' "${BUCKET}" > "${HERE}/bucket.env"
+cat "${HERE}/bucket.env"
 ```
 
 Expected output (abridged, `create-addon` also prints JSON the first time):
@@ -487,8 +579,32 @@ arm64 image fails on the GPU node with `exec format error`. The image is large (
 CUDA libraries), so the first build and push take a while.
 
 ```bash
-./19-llm-pipelines-huggingface-langchain/eks/build-push-ecr.sh
-cat 19-llm-pipelines-huggingface-langchain/eks/images.env
+: "${AWS_REGION:?source env.sh}" "${AWS_ACCOUNT_ID:?}"
+HERE=19-llm-pipelines-huggingface-langchain/eks
+REPO=ch19-trainer
+REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
+IMAGE="${REGISTRY}/${REPO}:${TAG}"
+CONTEXT="${HERE}/../common/src/trainer"
+
+if ! aws ecr describe-repositories --repository-names "${REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
+  aws ecr create-repository --repository-name "${REPO}" --region "${AWS_REGION}" \
+    --image-scanning-configuration scanOnPush=true >/dev/null
+fi
+# Every rebuild pushes another ~6-8 GB image, and ECR bills per GB-month: keep only the newest 5.
+aws ecr put-lifecycle-policy --repository-name "${REPO}" --region "${AWS_REGION}" \
+  --lifecycle-policy-text '{"rules":[{"rulePriority":1,"description":"keep last 5 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}' \
+  >/dev/null
+aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
+
+# --platform: EKS GPU nodes are x86_64; building on an Apple-silicon laptop would otherwise
+# produce an arm64 image that fails with "exec format error" on the node.
+docker buildx build --platform linux/amd64 \
+  --build-arg TORCH_VARIANT=cu129 \
+  -t "${IMAGE}" --push "${CONTEXT}"
+
+printf '# written by chapter 19 build\nTRAINER_IMAGE=%s\n' "${IMAGE}" > "${HERE}/images.env"
+cat "${HERE}/images.env"
 ```
 
 Expected output (abridged):
@@ -952,112 +1068,6 @@ huggingface.co contains `model.safetensors`, `config.json` and the tokenizer fil
 
 </details>
 
-<details>
-<summary><b>GKE (condensed)</b></summary>
-
-Same objects and steps as EKS. What differs: the Cloud Storage FUSE CSI driver, Workload Identity
-Federation for GKE (IAM granted directly to the KSA principals: `pipeline-runner` →
-`roles/storage.objectUser`, `model-reader` → `roles/storage.objectViewer`, no Google service account),
-the `cloud.google.com/gke-spot` selector, and the L4 `spot-gpu` pool from chapter 01. That pool
-autoscales 0→1, so there's no manual scale step. `patch-workflow-gke.yaml` puts the
-`gke-gcsfuse/volumes: "true"` annotation on every step pod through `spec.podMetadata`.
-
-```bash
-# 1. GcsFuseCsiDriver add-on (if off), spot pool ch19-cpu-spot (e2-standard-4, 0-3 nodes; SPOT=false = on-demand), Argo Workflows
-./19-llm-pipelines-huggingface-langchain/gke/install.sh
-# 2. bucket gs://${PROJECT_ID}-ch19-pipelines + KSA-principal IAM -> gke/bucket.env
-./19-llm-pipelines-huggingface-langchain/gke/setup-gcs-iam.sh
-# 3. trainer image -> ${REGION}-docker.pkg.dev/${PROJECT_ID}/ch19/ch19-trainer:<tag> -> gke/images.env
-./19-llm-pipelines-huggingface-langchain/gke/build-push-artifact-registry.sh
-# 4. optional HF token
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines
-# 5-6. deploy, then free the single GPU for training
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/gke
-kubectl -n ch19-pipelines get pods -w                 # tei, rag-api, vllm -> 1/1 Running
-kubectl -n ch19-pipelines scale deploy/vllm --replicas=0
-# 7-8. pipeline (+ spot drill exactly as on EKS)
-argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline -p run-id=qwen3-sft-001 --watch
-# 9. inspect the bucket
-source 19-llm-pipelines-huggingface-langchain/gke/bucket.env
-gcloud storage ls -r "gs://${GCS_BUCKET}/runs/qwen3-sft-001/" | grep -E "_COMPLETE|safetensors|metrics"
-gcloud storage cat "gs://${GCS_BUCKET}/runs/qwen3-sft-001/eval/metrics.json" | jq
-# 10. serve the fine-tuned model
-sed -i.bak 's#^MODEL_PATH=.*#MODEL_PATH=/mnt/store/runs/qwen3-sft-001/model#' \
-  19-llm-pipelines-huggingface-langchain/gke/serving.env && rm 19-llm-pipelines-huggingface-langchain/gke/serving.env.bak
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/gke
-kubectl -n ch19-pipelines scale deploy/vllm --replicas=1
-kubectl -n ch19-pipelines rollout status deploy/vllm --timeout=15m
-# 11. same port-forward + curl commands as EKS Step 11
-# 12-13. batch, then read results via _COMPLETE
-argo submit -n ch19-pipelines --from workflowtemplate/langchain-batch-inference --watch
-WF=$(argo list -n ch19-pipelines --prefix langchain-batch-inference -o name | head -1)
-RESULTS=$(gcloud storage cat "gs://${GCS_BUCKET}/batch/${WF}/_COMPLETE" | jq -r .results_file)
-gcloud storage cat "gs://${GCS_BUCKET}/batch/${WF}/${RESULTS}" | jq -c '{id, sources, error}'
-```
-
-Expected output and "how to tell this worked" match the EKS steps. GKE-specific checks:
-
-```bash
-kubectl -n ch19-pipelines get pod -l app.kubernetes.io/name=vllm -o jsonpath='{.items[0].spec.initContainers[*].name}'; echo
-```
-
-Expected: `gke-gcsfuse-sidecar wait-for-model` (the sidecar injected as a native sidecar). If your
-chapter 01 pool is T4 rather than L4, change `nvidia-l4` to `nvidia-tesla-t4` in
-`gke/patch-finetune-gpu.yaml` and `gke/patch-gpu-spot.yaml`.
-
-</details>
-
-<details>
-<summary><b>AKS (condensed)</b></summary>
-
-Same objects and steps as EKS. What differs: the Blob CSI driver (blobfuse2) with Azure Workload
-Identity (one user-assigned identity `${AKS_CLUSTER}-ch19-pipelines` with federated credentials for
-`pipeline-runner` and `model-reader`), and the T4 `gpuspot` pool from chapter 01, which autoscales
-0→1 and trains in fp16 because a T4 has no bf16. AKS **taints** spot pools
-(`kubernetes.azure.com/scalesetpriority=spot:NoSchedule`), so every patch here adds the toleration
-as well as the selector. Argo replaces the workflow-level toleration list with a template's own list,
-so `patch-finetune-gpu.yaml` appends the spot toleration to the GPU steps' list too.
-
-```bash
-# 1. OIDC + workload identity + blob driver (if off), spot pool ch19spot (Standard_D4s_v5, 0-3; WITH_ONDEMAND=true adds ch19od), Argo
-./19-llm-pipelines-huggingface-langchain/aks/install.sh
-# 2. storage account + container "models" + identity + "Storage Account Contributor" + federated creds -> aks/bucket.env
-./19-llm-pipelines-huggingface-langchain/aks/setup-blob-iam.sh
-# 3. ACR (ch19acr<hash>), --attach-acr, trainer image -> aks/images.env
-./19-llm-pipelines-huggingface-langchain/aks/build-push-acr.sh
-# 4. optional HF token
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines
-# 5-6. deploy, free the GPU
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/aks
-kubectl -n ch19-pipelines get pods -w
-kubectl -n ch19-pipelines scale deploy/vllm --replicas=0
-# 7-8. pipeline
-argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline -p run-id=qwen3-sft-001 --watch
-# 9. inspect (your own az identity needs a Storage Blob Data role for --auth-mode login)
-source 19-llm-pipelines-huggingface-langchain/aks/bucket.env
-az storage blob list --account-name "$AZ_STORAGE_ACCOUNT" -c "$AZ_CONTAINER" --auth-mode login \
-  --prefix runs/qwen3-sft-001/ --query "[].{name:name, size:properties.contentLength}" -o table
-# 10. serve the fine-tuned model
-sed -i.bak 's#^MODEL_PATH=.*#MODEL_PATH=/mnt/store/runs/qwen3-sft-001/model#' \
-  19-llm-pipelines-huggingface-langchain/aks/serving.env && rm 19-llm-pipelines-huggingface-langchain/aks/serving.env.bak
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/aks
-kubectl -n ch19-pipelines scale deploy/vllm --replicas=1
-kubectl -n ch19-pipelines rollout status deploy/vllm --timeout=15m
-# 11. same port-forward + curl commands as EKS Step 11
-# 12-13. batch, then read results via _COMPLETE
-argo submit -n ch19-pipelines --from workflowtemplate/langchain-batch-inference --watch
-WF=$(argo list -n ch19-pipelines --prefix langchain-batch-inference -o name | head -1)
-az storage blob download --account-name "$AZ_STORAGE_ACCOUNT" -c "$AZ_CONTAINER" --auth-mode login \
-  -n "batch/${WF}/_COMPLETE" -f ./ch19-complete.json -o none && jq . ./ch19-complete.json
-```
-
-Expected output and "how to tell this worked" match the EKS steps. A 403 from `az storage blob` is
-about **your** access, not the pods'. As in chapter 05, the default workload-identity mode makes the
-driver fetch the account key, so the read-only/read-write split is enforced only by vLLM's `readOnly`
-mount (see the comment at the top of `setup-blob-iam.sh`).
-
-</details>
-
 ### CPU lab (no GPU, no cloud)
 
 What changes (`cpu-lab/kustomization.yaml`): `model-store` is a plain `ReadWriteOnce` PVC (`pvc.yaml`,
@@ -1152,8 +1162,6 @@ Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Ins
 - **Grace periods match each cloud's notice.** The finetune pod gets 110 s: most of EC2's 2-minute
   notice, enough to finish a step and upload an adapter checkpoint. The evaluate pod gets 30 s, since
   it has nothing to save and a retry re-reads `metrics.json` or re-scores. vLLM keeps chapter 09's 25 s.
-  On GKE and AKS (~30 s notice), the SIGTERM save may not finish in time. The periodic checkpoints are
-  what you rely on there.
 - **Pull steps are cheap to retry** (`retryPolicy: Always`, limit 3). A half-copied revision has no
   `_COMPLETE`, and the re-run skips files that are already there and identical.
 - **Serving from the bucket makes a reclaim cheaper.** On day 1 (`MODEL_PATH=Qwen/Qwen3-0.6B`), every
@@ -1165,9 +1173,9 @@ Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Ins
   `eks.amazonaws.com/capacityType: SPOT` also matches the GPU nodes. The `nvidia.com/gpu` taint keeps
   the CPU steps off them. The GPU steps add `nvidia.com/gpu.present: "true"` at template level, which
   *replaces* the workflow-level selector in Argo.
-- **On-demand fallback.** EKS `INCLUDE=ch19-cpu-ondemand ./eks/install.sh`, GKE `SPOT=false`, AKS
-  `WITH_ONDEMAND=true`. The patches still select spot capacity, so drop the spot selector from the
-  relevant `patch-*.yaml` to actually use the fallback. For GPUs, use chapter 01's on-demand pool.
+- **On-demand fallback.** `INCLUDE=ch19-cpu-ondemand` in Step 1's node-group commands. The patches
+  still select spot capacity, so drop the spot selector from the relevant `patch-*.yaml` to actually
+  use the fallback. For GPUs, use chapter 01's on-demand pool.
 
 ## 6. Troubleshooting
 
@@ -1190,42 +1198,71 @@ Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Ins
 | Empty answers in cpu-lab | Ollama ignores `chat_template_kwargs`, so `qwen3:0.6b` spends all of `MAX_TOKENS` reasoning. `REASONING_EFFORT=none` (in `cpu-lab/params.env`) is the off-switch; the batch step gets it via `envFrom` and rag-api via an `optional` key ref | `kubectl -n ch19-pipelines exec deploy/rag-api -- env \| grep REASONING` must print `REASONING_EFFORT=none`; if not, re-apply `cpu-lab` so rag-api picks up the ConfigMap |
 | HTTP 400 mentioning `reasoning_effort` from vLLM | **`# VERIFY:`** in `rag_chain.py`: vLLM v0.29 is believed to accept only `low\|medium\|high`, not `none` | Leave `REASONING_EFFORT` unset for the GPU overlays (`common/base/params.env` doesn't set it) |
 | `batch-infer` exits 1: `N/12 (>50%) failed -- writing nothing` | The LLM went away mid-batch (`wait-for-llm` only checks `/models` once) | Fix vLLM, then `argo retry -n ch19-pipelines <wf>` (same workflow name, so the same `batch/<wf>/` output dir) or submit again (new dir); nothing partial was written |
-| GKE step pods stay `Running` after the main container finished | **`# VERIFY:`** in `gke/patch-workflow-gke.yaml`: step pods can complete only if the gcsfuse sidecar is injected as a *native* sidecar (GKE ≥ 1.29) | Check the control-plane version; the sidecar should appear under `initContainers` |
-| GKE `install.sh`/`cleanup.sh`: cluster or node pool `not found` | The scripts address the cluster with `--location "${GKE_LOCATION}"`, which defaults to `$ZONE` because chapter 00 creates a zonal cluster. A regional cluster isn't found there | `GKE_LOCATION="$REGION" ./gke/install.sh` (same for `cleanup.sh`). The bucket and Artifact Registry always use `$REGION` |
 | cpu-lab TEI pod `exec format error` / `CrashLoopBackOff` on an arm64 laptop | The pinned TEI CPU image may not ship an arm64 variant | `docker manifest inspect ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4`; run kind on an amd64 host or enable amd64 emulation in Docker Desktop |
 
 ## 7. Cleanup and cost notes
 
-```bash
-./19-llm-pipelines-huggingface-langchain/eks/cleanup.sh          # EKS
-./19-llm-pipelines-huggingface-langchain/gke/cleanup.sh          # GKE
-./19-llm-pipelines-huggingface-langchain/aks/cleanup.sh          # AKS
-./19-llm-pipelines-huggingface-langchain/cpu-lab/cleanup.sh      # cpu-lab (DELETE_IMAGE=true also removes the local image)
-./01-gpu-nodes-and-scheduling/eks/cleanup.sh                     # EKS: scale spot-gpu / ondemand-gpu to 0
-```
-
-What `eks/cleanup.sh` does **by default**: deletes all Workflows in `ch19-pipelines`, then everything
-from `kubectl delete -k eks`. That includes the namespace (and with it the `hf-token` Secret), the
-Deployments, the WorkflowTemplates and the PV/PVC objects. The PV is `Retain`, so the **data stays in
-the bucket**. It then scales `ch19-cpu-spot` and `ch19-cpu-ondemand` to 0. It **keeps** the S3 bucket,
-the IAM roles `ch19-pipeline-runner-${EKS_CLUSTER}`/`ch19-model-reader-${EKS_CLUSTER}`, the Pod
-Identity associations, the ECR repo `ch19-trainer` and the node groups, because the bucket holds your
-models and checkpoints.
+By default: delete all Workflows in `ch19-pipelines`, then everything `kubectl delete -k eks`
+covers. That includes the namespace (and with it the `hf-token` Secret), the Deployments, the
+WorkflowTemplates and the PV/PVC objects. The PV is `Retain`, so the **data stays in the bucket**.
+Then scale `ch19-cpu-spot` and `ch19-cpu-ondemand` to 0. This **keeps** the S3 bucket, the IAM
+roles `ch19-pipeline-runner-${EKS_CLUSTER}`/`ch19-model-reader-${EKS_CLUSTER}`, the Pod Identity
+associations, the ECR repo `ch19-trainer` and the node groups, because the bucket holds your models
+and checkpoints:
 
 ```bash
-DELETE_CLOUD_RESOURCES=true ./19-llm-pipelines-huggingface-langchain/eks/cleanup.sh
+: "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}"
+HERE=19-llm-pipelines-huggingface-langchain/eks
+source "${HERE}/bucket.env"
+NS=ch19-pipelines
+
+kubectl -n "${NS}" delete workflows.argoproj.io --all --ignore-not-found
+kubectl delete -k "${HERE}" --ignore-not-found
+for ng in ch19-cpu-spot ch19-cpu-ondemand; do
+  eksctl scale nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" \
+    --nodes 0 --nodes-min 0 2>/dev/null || true
+done
+echo "GPU capacity is chapter 01's spot-gpu group — scale that separately, see below."
 ```
 
-That **also** deletes the Pod Identity associations, both IAM roles and their `s3-ch19` policies, the
-bucket **and everything in it** (`aws s3 rm --recursive`, then `delete-bucket`), the ECR repository
-(`--force`, all tags) and both `ch19-cpu-*` node groups. It leaves the `eks-pod-identity-agent` and
-Mountpoint add-ons in place because other chapters use them. On every cloud, Argo Workflows is left
-installed, since it's shared with chapter 15 (`helm uninstall argo-workflows -n argo` if nothing else
-uses it). GKE's and AKS's `DELETE_CLOUD_RESOURCES=true` delete the bucket or storage account, the
-registry and the chapter's CPU pool(s) the same way.
+To also delete the S3 bucket (and everything in it), the IAM roles, the ECR repo and the node
+groups themselves — the `eks-pod-identity-agent` and Mountpoint add-ons are left in place because
+other chapters use them:
 
-Coming back after a default cleanup on EKS: re-run `eks/install.sh`. When `ch19-cpu-spot` already
-exists it scales it back to 2 nodes (`CPU_NODES=1 ./install.sh` for one) instead of creating it.
+```bash
+for id in $(aws eks list-pod-identity-associations --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+      --namespace "${NS}" --query 'associations[].associationId' --output text); do
+  aws eks delete-pod-identity-association --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" --association-id "${id}"
+done
+for sa in pipeline-runner model-reader; do
+  ROLE="ch19-${sa}-${EKS_CLUSTER}"
+  aws iam delete-role-policy --role-name "${ROLE}" --policy-name s3-ch19 2>/dev/null || true
+  aws iam delete-role --role-name "${ROLE}" 2>/dev/null || true
+done
+aws s3 rm "s3://${S3_BUCKET}" --recursive
+aws s3api delete-bucket --bucket "${S3_BUCKET}" --region "${AWS_REGION}"
+aws ecr delete-repository --repository-name ch19-trainer --region "${AWS_REGION}" --force
+for ng in ch19-cpu-spot ch19-cpu-ondemand; do
+  eksctl delete nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}"
+done
+```
+
+Argo Workflows is left installed, since it's shared with chapter 15
+(`helm uninstall argo-workflows -n argo` if nothing else uses it). Also scale down chapter 01's GPU
+node group:
+
+```bash
+kubectl delete -k 01-gpu-nodes-and-scheduling/eks --ignore-not-found
+for ng in spot-gpu ondemand-gpu; do
+  eksctl scale nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" --nodes 0 --nodes-min 0 2>/dev/null || true
+done
+```
+
+Or, in the CPU lab: `19-llm-pipelines-huggingface-langchain/cpu-lab/cleanup.sh`
+(`DELETE_IMAGE=true` also removes the local image).
+
+Coming back after a default cleanup: re-run the Step 1 commands above. When `ch19-cpu-spot` already
+exists they scale it back to 2 nodes (`CPU_NODES=1` for one) instead of creating it.
 
 Cost notes (EKS, us-east-1 ballpark; check current pricing):
 
@@ -1368,7 +1405,7 @@ second GPU node during training.
 - LangChain: [LCEL / Runnables](https://python.langchain.com/docs/concepts/lcel/), [`Runnable.batch` and `max_concurrency`](https://python.langchain.com/docs/concepts/runnables/), [`ChatOpenAI`](https://python.langchain.com/docs/integrations/chat/openai/), [Custom embeddings](https://python.langchain.com/docs/how_to/custom_embeddings/)
 - vLLM: [OpenAI-compatible server (incl. `chat_template_kwargs`)](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html); Qwen3 thinking switch: [Qwen/Qwen3-0.6B model card](https://huggingface.co/Qwen/Qwen3-0.6B)
 - Argo Workflows: [Retries and `retryStrategy.expression`](https://argo-workflows.readthedocs.io/en/latest/retries/), [WorkflowTemplates](https://argo-workflows.readthedocs.io/en/latest/workflow-templates/), [Workflow RBAC](https://argo-workflows.readthedocs.io/en/latest/workflow-rbac/)
-- Storage semantics: [Mountpoint for S3 semantics](https://github.com/awslabs/mountpoint-s3/blob/main/doc/SEMANTICS.md), [Mountpoint S3 CSI driver](https://github.com/awslabs/mountpoint-s3-csi-driver), [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html), [Cloud Storage FUSE CSI](https://cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-setup), [Azure Blob CSI](https://learn.microsoft.com/azure/aks/azure-blob-csi)
+- Storage semantics: [Mountpoint for S3 semantics](https://github.com/awslabs/mountpoint-s3/blob/main/doc/SEMANTICS.md), [Mountpoint S3 CSI driver](https://github.com/awslabs/mountpoint-s3-csi-driver), [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - Spot: [EC2 Spot interruption notices](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html), [EKS managed node groups and Spot](https://docs.aws.amazon.com/eks/latest/userguide/managed-node-groups.html#managed-node-group-capacity-types)
 - uv: [Running scripts with inline metadata (PEP 723)](https://docs.astral.sh/uv/guides/scripts/)
 - Cross-links: `01-gpu-nodes-and-scheduling` (the GPU pool), `05-model-storage-and-data` (bucket CSI + workload identity), `07-distributed-training-kubeflow-trainer` (multi-GPU training), `09-llm-inference-with-vllm` (vLLM shape, `create-hf-secret.sh`, cpu-lab Ollama), `10-autoscaling-inference` (scaling vLLM, incl. to zero), `15-mlops-gitops-and-pipelines` (Argo Workflows, MLflow, GitOps)

@@ -2,7 +2,7 @@
 
 > Running multi-node PyTorch DDP training as a first-class Kubernetes object with **Kubeflow
 > Trainer v2** (`TrainJob` / `TrainingRuntime` / `ClusterTrainingRuntime`), gang-scheduled and
-> checkpointed so it survives spot reclaims, on **GKE, EKS and AKS**.
+> checkpointed so it survives spot reclaims, on **EKS**.
 
 ---
 
@@ -34,9 +34,9 @@ gives you:
   built on a **JobSet** (one Kubernetes `batch/v1` Job per replicated node group, with a
   `failurePolicy` that can recreate the *whole* gang on a single lost pod), plus a plugin that
   injects `PET_*` env vars so `torchrun` needs zero rendezvous flags.
-- **`runtimePatches`** — strategic-merge patches an overlay (here: each cloud folder) layers onto
-  the runtime's JobSet template without forking the runtime itself. That's how `gke/`, `eks/` and
-  `aks/` add their own node selectors/tolerations/volumes to the *same* `torch-ddp-spot` runtime.
+- **`runtimePatches`** — strategic-merge patches the `eks/` overlay layers onto the runtime's
+  JobSet template without forking the runtime itself. That's how `eks/` adds its own node
+  selectors/tolerations/volumes to the `torch-ddp-spot` runtime.
 
 This is the DevOps translation of what an HPC scheduler's job step / gang-scheduling and
 checkpoint-restart features do, expressed as Kubernetes CRDs. Chapter `06-batch-jobs-and-kueue`
@@ -51,9 +51,9 @@ By the end you can:
    (`failurePolicy.restartStrategy: Recreate`) is required for static-world-size DDP on spot.
 2. Read and extend `common/base/trainingruntime-torch-ddp-spot.yaml` and
    `common/trainjob-ddp-gpu.yaml`.
-3. Explain what a `runtimePatches` cloud overlay does and why the GPU-taint toleration and the
-   spot-taint toleration differ across GKE/EKS/AKS (AKS auto-taints spot, none of the three
-   auto-taint GPU nodes the same way — see `01-gpu-nodes-and-scheduling`).
+3. Explain what the `runtimePatches` overlay does and why the GPU-taint and spot-taint
+   tolerations it adds aren't automatic (EKS auto-taints neither — see
+   `01-gpu-nodes-and-scheduling`).
 4. Trigger a spot reclaim (or simulate one) mid-training and watch the DDP script's SIGTERM
    handling + JobSet's gang-recreate bring the run back to the last complete checkpoint.
 5. Layer the `kueue/<cloud>` overlay on top and explain what changes once Kueue's ResourceFlavor,
@@ -115,47 +115,40 @@ settings in `common/base/trainingruntime-torch-ddp-spot.yaml` handle this:
   docstring) — object stores have no atomic rename, so the `.pt` file is written first and the
   `.done` marker second; a reader only trusts a step once `.done` exists.
 
-### 3.3 Cloud overlays via `runtimePatches`
+### 3.3 The `eks/` overlay via `runtimePatches`
 
 `common/trainjob-ddp-gpu.yaml` and `common/base/trainingruntime-torch-ddp-spot.yaml` are
-completely cloud-agnostic. Each of `gke/patch-trainjob-gke.yaml`, `eks/patch-trainjob-eks.yaml`
-and `aks/patch-trainjob-aks.yaml` adds one `spec.runtimePatches[]` entry (a strategic-merge patch
-the Trainer controller applies to the runtime's JobSet template at admission time) carrying that
-cloud's spot/GPU `nodeSelector` + `tolerations`, and (GKE only) the `gke-gcsfuse/volumes: "true"`
-pod annotation that injects the GCS FUSE sidecar.
+completely cloud-agnostic. `eks/patch-trainjob-eks.yaml` adds one `spec.runtimePatches[]` entry (a
+strategic-merge patch the Trainer controller applies to the runtime's JobSet template at admission
+time) carrying the spot/GPU `nodeSelector` + `tolerations`.
 
-| | GKE | EKS | AKS |
-|---|---|---|---|
-| GPU | 1x L4 (`g2-standard-4`, `nvidia-l4`) | 1x L4 (`g6.xlarge`) | 1x T4 (`Standard_NC4as_T4_v3`) |
-| Spot nodeSelector | `cloud.google.com/gke-spot: "true"` | `eks.amazonaws.com/capacityType: SPOT` | `kubernetes.azure.com/scalesetpriority: spot` |
-| GPU taint added by | GKE automatically | `create-gpu-nodegroup.sh` (`nvidia.com/gpu`) | `create-gpu-nodepool.sh` (`nvidia.com/gpu=present`) |
-| Spot taint added by | nobody (opt-in) | nobody (opt-in) | **AKS automatically** |
-| Checkpoint bucket | GCS via GCS FUSE CSI | S3 via Mountpoint CSI (IRSA) | Azure Blob via Blob CSI (kubelet managed identity) |
+| | EKS |
+|---|---|
+| GPU | 1x L4 (`g6.xlarge`) |
+| Spot nodeSelector | `eks.amazonaws.com/capacityType: SPOT` |
+| GPU taint added by | this chapter's node-group create (§4.3), `nvidia.com/gpu` |
+| Spot taint added by | nobody (opt-in) |
+| Checkpoint bucket | S3 via Mountpoint CSI (IRSA) |
 
-Apply a full lab with `kubectl apply -k 07-distributed-training-kubeflow-trainer/gke` (or
-`eks`/`aks` — see §4.4 for the explicit per-cloud commands).
+Apply the full lab with `kubectl apply -k 07-distributed-training-kubeflow-trainer/eks` — see §4.4
+for the explicit command sequence.
 
-### 3.4 Optional: Kueue admission (`kueue/<cloud>`)
+### 3.4 Optional: Kueue admission (`kueue/eks`)
 
-`kueue/gke`, `kueue/eks`, `kueue/aks` layer the `common/kueue` Kustomize *Component* on top of the
-matching cloud overlay: it labels the TrainJob `kueue.x-k8s.io/queue-name: ch07-queue` (Kueue's
-webhook then suspends the TrainJob until admitted) and adds a `LocalQueue` pointing at the
-`team-research` `ClusterQueue` from `06-batch-jobs-and-kueue`. Once admitted, Kueue's own
-ResourceFlavor patch decides spot vs on-demand — so each cloud's Kueue overlay also **removes**
-the hardcoded spot-only key from the cloud overlay's `nodeSelector` (keeping the GPU-type selector
-and both tolerations), letting Kueue fall back to on-demand instead of the TrainJob just
-sitting `Pending` when spot is unavailable. These directories live at the chapter root
-(`kueue/<cloud>`, not `<cloud>/kueue`) because Kustomize refuses an overlay that lists its own
-parent directory as a resource ("cycle detected") — see the comment in `kueue/gke/kustomization.yaml`.
+`kueue/eks` layers the `common/kueue` Kustomize *Component* on top of the `eks` overlay: it labels
+the TrainJob `kueue.x-k8s.io/queue-name: ch07-queue` (Kueue's webhook then suspends the TrainJob
+until admitted) and adds a `LocalQueue` pointing at the `team-research` `ClusterQueue` from
+`06-batch-jobs-and-kueue`. Once admitted, Kueue's own ResourceFlavor patch decides spot vs
+on-demand — so the Kueue overlay also **removes** the hardcoded spot-only key from the `eks`
+overlay's `nodeSelector` (keeping the GPU-type selector and both tolerations), letting Kueue fall
+back to on-demand instead of the TrainJob just sitting `Pending` when spot is unavailable. This
+directory lives at the chapter root (`kueue/eks`, not `eks/kueue`) because Kustomize refuses an
+overlay that lists its own parent directory as a resource ("cycle detected") — see the comment in
+`kueue/eks/kustomization.yaml`.
 
 ```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/gke   # or eks / aks
+kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks
 ```
-
-> **Stray-file cleanup note:** an earlier pass had left a single `07-.../kueue/gke/kustomization.yaml`
-> with no `eks`/`aks` counterparts and no README coverage. This pass verified the file still
-> renders correctly, added the missing `kueue/eks` and `kueue/aks` overlays with the equivalent
-> per-cloud patch, and documented all three here — nothing was deleted, the layout was completed.
 
 ## 4. Lab
 
@@ -173,32 +166,20 @@ should not yet exist (first run) or should already have Trainer installed (idemp
 ### 4.2 Install Kubeflow Trainer
 
 What you're about to do: install the Trainer controller + JobSet CRDs via Helm, pinned to
-`${KUBEFLOW_TRAINER_VERSION}`. The chart and values are identical across clouds — only the script
-path differs.
-
-<details>
-<summary><b>GKE</b></summary>
+`${KUBEFLOW_TRAINER_VERSION}`, and enable the built-in `torch-distributed` ClusterTrainingRuntime.
 
 ```bash
-./07-distributed-training-kubeflow-trainer/gke/install.sh
+: "${KUBEFLOW_TRAINER_VERSION:?source versions.env first}"
+helm upgrade --install kubeflow-trainer oci://ghcr.io/kubeflow/charts/kubeflow-trainer \
+  --namespace kubeflow-system --create-namespace \
+  --version "${KUBEFLOW_TRAINER_VERSION#v}" \
+  --set runtimes.torchDistributed.enabled=true \
+  --wait --timeout 10m
+kubectl -n kubeflow-system rollout status deploy --timeout=5m
+kubectl get crd trainjobs.trainer.kubeflow.org trainingruntimes.trainer.kubeflow.org clustertrainingruntimes.trainer.kubeflow.org
+# The runtimes are applied by a post-install hook Job; give it a moment if this is empty.
+kubectl get clustertrainingruntimes
 ```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
-```bash
-./07-distributed-training-kubeflow-trainer/eks/install.sh
-```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-./07-distributed-training-kubeflow-trainer/aks/install.sh
-```
-</details>
 
 Expected output (tail):
 
@@ -210,57 +191,110 @@ clustertrainingruntime.trainer.kubeflow.org/torch-distributed created
 How to tell this worked: `kubectl get clustertrainingruntimes` lists `torch-distributed`, and
 `kubectl -n kubeflow-system get pods` shows the trainer-controller-manager `Running`.
 
-### 4.3 GPU node pool and checkpoint storage
+### 4.3 GPU node group and checkpoint storage
+
+What you're about to do: create a spot GPU managed node group (`CAPACITY=on-demand` creates the
+fallback group instead; requires "All G and VT Spot Instance Requests" — or on-demand G/VT — vCPU
+quota ≥ 16), then create the checkpoint bucket and wire up IRSA for the Mountpoint for S3 CSI
+driver.
 
 ```bash
-# GKE
-./07-distributed-training-kubeflow-trainer/gke/create-gpu-nodepool.sh
-./07-distributed-training-kubeflow-trainer/gke/setup-storage.sh
+: "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}"
+CAPACITY="${CAPACITY:-spot}"
+if [[ "${CAPACITY}" == "spot" ]]; then NG=gpu-spot-l4; SPOT=true; else NG=gpu-ondemand-l4; SPOT=false; fi
 
-# EKS
-./07-distributed-training-kubeflow-trainer/eks/create-gpu-nodegroup.sh
-./07-distributed-training-kubeflow-trainer/eks/setup-storage.sh
-
-# AKS
-./07-distributed-training-kubeflow-trainer/aks/create-gpu-nodepool.sh
-./07-distributed-training-kubeflow-trainer/aks/setup-storage.sh
+cat <<YAML | eksctl create nodegroup -f -
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${EKS_CLUSTER}
+  region: ${AWS_REGION}
+managedNodeGroups:
+  - name: ${NG}
+    amiFamily: AmazonLinux2023          # eksctl picks the NVIDIA AL2023 AMI for GPU instance types
+    instanceTypes: ["g6.xlarge", "g6.2xlarge"]
+    spot: ${SPOT}
+    minSize: 0
+    desiredCapacity: 0
+    maxSize: 2
+    volumeSize: 100                     # the PyTorch CUDA image is ~4 GB compressed
+    labels:
+      ch07.lab/gpu: l4
+    taints:
+      - key: nvidia.com/gpu
+        value: "true"
+        effect: NoSchedule
+    propagateASGTags: true              # lets Cluster Autoscaler scale this group from zero
+    # efaEnabled: true                  # advanced: only on EFA-capable types (p4d/p5/g6e.8xlarge+)
+YAML
 ```
 
-Each `setup-storage.sh` creates the checkpoint bucket/container, wires up its cloud's identity
-mechanism (Workload Identity Federation on GKE, IRSA on EKS, the AKS kubelet managed identity on
-AKS — no per-pod identity needed there, see `aks/setup-storage.sh`), and writes
-`<cloud>/storage/storage.env` so the kustomize overlay's `replacements:` can fill in the PV.
+Checkpoint storage — creates the S3 bucket, an IAM role for the Mountpoint for S3 CSI driver
+(IRSA), installs/updates the add-on so it tolerates the GPU taint, then writes
+`eks/storage/storage.env` so the kustomize overlay's `replacements:` can fill in the PV:
+
+```bash
+: "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}" "${AWS_ACCOUNT_ID:?}"
+BUCKET="${BUCKET:-${AWS_ACCOUNT_ID}-ch07-checkpoints}"
+ROLE_NAME="${ROLE_NAME:-${EKS_CLUSTER}-s3-csi-driver}"
+POLICY_NAME="${POLICY_NAME:-${EKS_CLUSTER}-ch07-s3-checkpoints}"
+HERE=07-distributed-training-kubeflow-trainer/eks
+
+if ! aws s3api head-bucket --bucket "${BUCKET}" 2>/dev/null; then
+  if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+    aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}"
+  else
+    aws s3api create-bucket --bucket "${BUCKET}" --region "${AWS_REGION}" \
+      --create-bucket-configuration "LocationConstraint=${AWS_REGION}"
+  fi
+fi
+
+POLICY_DOC=$(cat <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "MountpointFullBucketAccess", "Effect": "Allow", "Action": ["s3:ListBucket"],
+     "Resource": ["arn:aws:s3:::${BUCKET}"]},
+    {"Sid": "MountpointFullObjectAccess", "Effect": "Allow",
+     "Action": ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:DeleteObject"],
+     "Resource": ["arn:aws:s3:::${BUCKET}/*"]}
+  ]
+}
+JSON
+)
+POLICY_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${POLICY_NAME}"
+aws iam get-policy --policy-arn "${POLICY_ARN}" >/dev/null 2>&1 || \
+  aws iam create-policy --policy-name "${POLICY_NAME}" --policy-document "${POLICY_DOC}"
+
+eksctl utils associate-iam-oidc-provider --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --approve
+eksctl create iamserviceaccount \
+  --name s3-csi-driver-sa --namespace kube-system \
+  --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" \
+  --attach-policy-arn "${POLICY_ARN}" \
+  --role-name "${ROLE_NAME}" --role-only --approve
+
+ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"
+if aws eks describe-addon --cluster-name "${EKS_CLUSTER}" --addon-name aws-mountpoint-s3-csi-driver --region "${AWS_REGION}" >/dev/null 2>&1; then
+  aws eks update-addon --cluster-name "${EKS_CLUSTER}" --addon-name aws-mountpoint-s3-csi-driver \
+    --region "${AWS_REGION}" --service-account-role-arn "${ROLE_ARN}" \
+    --configuration-values '{"node":{"tolerateAllTaints":true}}' --resolve-conflicts OVERWRITE
+else
+  aws eks create-addon --cluster-name "${EKS_CLUSTER}" --addon-name aws-mountpoint-s3-csi-driver \
+    --region "${AWS_REGION}" --service-account-role-arn "${ROLE_ARN}" \
+    --configuration-values '{"node":{"tolerateAllTaints":true}}'
+fi
+
+printf 'BUCKET_NAME=%s\nMOUNT_REGION=region %s\n' "${BUCKET}" "${AWS_REGION}" > "${HERE}/storage/storage.env"
+echo "Wrote ${HERE}/storage/storage.env"
+```
 
 ### 4.4 Run the lab
 
-What you're about to do: apply the cloud overlay (TrainJob + patched runtime), watch the 2-rank
+What you're about to do: apply the `eks` overlay (TrainJob + patched runtime), watch the 2-rank
 DDP TrainJob rendezvous and start writing checkpoints.
-
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/gke
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
 
 ```bash
 kubectl apply -k 07-distributed-training-kubeflow-trainer/eks
-```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/aks
-```
-</details>
-
-```bash
 kubectl -n ch07-training get trainjob ddp-gpu -w   # Ctrl-C once JOBSSTATUS shows Running
 kubectl -n ch07-training logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f --prefix
 ```
@@ -300,31 +334,8 @@ restarting from `step=0` — the Job's `backoffLimit: 0` fails that Job fast, an
 contrast to see once, then go set up chapter 05's bucket-backed checkpoints for the real thing).
 It runs 2 nodes x 2 procs = 4 ranks on whatever spot CPU pool chapter 00 gave you:
 
-<details>
-<summary><b>GKE</b></summary>
-
-```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/gke
-```
-</details>
-
-<details>
-<summary><b>EKS</b></summary>
-
 ```bash
 kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/eks
-```
-</details>
-
-<details>
-<summary><b>AKS</b></summary>
-
-```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/aks
-```
-</details>
-
-```bash
 kubectl -n ch07-training-cpu get trainjob,jobset,pods -w
 kubectl -n ch07-training-cpu logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f
 ```
@@ -341,38 +352,40 @@ GPUs for real.
   NCCL group at a different `MASTER_ADDR` epoch — recreating the JobSet's Jobs makes every rank
   re-run the rendezvous handshake together.
 - **Grace period budget**: `terminationGracePeriodSeconds: 25` assumes checkpoint writes are fast
-  (small demo model). Size this to your real checkpoint's upload time to the bucket, and remember
-  AWS gives ~2 minutes of spot notice vs ~30s on GKE/AKS — you may want a longer period on EKS.
-  spec is per-cloud reclaim notice, not something the runtime can read directly.
+  (small demo model). Size this to your real checkpoint's upload time to the bucket — EKS gives
+  ~2 minutes of spot notice, so you have room to grow this if a real checkpoint needs longer.
 - **`CHECKPOINT_EVERY`**: the more often you checkpoint, the less work a reclaim throws away, at
   the cost of bucket PUT traffic — tune `common/trainjob-ddp-gpu.yaml`'s env for your model size.
-- **On-demand fallback**: none of the cloud overlays here run mixed spot+on-demand — for that
-  layer `kueue/<cloud>` (§3.4), which is what actually picks the flavor at admission time.
+- **On-demand fallback**: the `eks` overlay here doesn't run mixed spot+on-demand — for that
+  layer `kueue/eks` (§3.4), which is what actually picks the flavor at admission time.
 
 ## 6. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied `kueue/<cloud>`) | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
-| Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node pool scaled to 0 and cluster/node autoscaler hasn't scaled up yet, or GPU quota exhausted | `kubectl get nodes -l ...`, check cloud console quota page |
-| `clustertrainingruntimes` empty after `install.sh` | Post-install hook Job hasn't finished | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
+| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied `kueue/eks`) | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
+| Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node group scaled to 0 and nothing has scaled it up yet, or GPU quota exhausted | `kubectl get nodes -l ...`, check the EC2 quota console |
+| `clustertrainingruntimes` empty after install | Post-install hook Job hasn't finished | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
 | Rank 0 hangs on `all_reduce` after a delete | Deleted rank 0 itself, or `Recreate` hasn't fired yet | `kubectl -n ch07-training get jobs` — both Jobs should show a new generation |
 | Checkpoint dir empty after resume | `.done` marker never written (grace period too short, or write raced eviction) | Check pod logs for `SIGTERM received`; increase `terminationGracePeriodSeconds` |
-| GCS FUSE / Mountpoint / Blob mount `permission denied` | Identity binding from `setup-storage.sh` didn't propagate yet, or SA name mismatch | Re-run `setup-storage.sh`; confirm `serviceAccountName: trainer` matches the binding's subject |
+| Mountpoint S3 mount `permission denied` | IRSA binding from §4.3's storage setup didn't propagate yet, or SA name mismatch | Re-run the storage setup commands; confirm `serviceAccountName: trainer` matches the binding's subject |
 
 ## 7. Cleanup and cost notes
 
 ```bash
-./07-distributed-training-kubeflow-trainer/gke/cleanup.sh   # GKE
-./07-distributed-training-kubeflow-trainer/eks/cleanup.sh   # EKS
-./07-distributed-training-kubeflow-trainer/aks/cleanup.sh   # AKS
+: "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}"
+kubectl delete trainjobs --all -n ch07-training --ignore-not-found
+kubectl delete -k 07-distributed-training-kubeflow-trainer/eks --ignore-not-found
+for ng in gpu-spot-l4 gpu-ondemand-l4; do
+  eksctl delete nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" --wait 2>/dev/null || true
+done
+helm uninstall kubeflow-trainer -n kubeflow-system   # only if you're done with the whole chapter
+aws s3 rb "s3://${BUCKET:-${AWS_ACCOUNT_ID}-ch07-checkpoints}" --force   # only if you want checkpoints gone too
 ```
 
-Deletes the TrainJob, applied manifests and the GPU node pool(s) (scaled from 0, so idle cost is
-near zero between runs — but 2 running L4/T4 GPU nodes are **not** cheap; don't leave the lab
-`Running` overnight). Checkpoint storage is kept by default; set `DELETE_BUCKET=true` (GKE/EKS) or
-`DELETE_STORAGE=true` (AKS) to remove it too. Uninstall the Trainer controller itself with
-`UNINSTALL_TRAINER=true` if you're done with the whole chapter.
+Deletes the TrainJob, applied manifests and the GPU node group(s) (scaled from 0, so idle cost is
+near zero between runs — but 2 running L4 GPU nodes are **not** cheap; don't leave the lab
+`Running` overnight). Checkpoint storage is kept unless you run the last line.
 
 ## 8. Checkpoint questions
 
@@ -399,16 +412,16 @@ does. Writing the payload first and a marker second means a reader can trust "is
 by checking only for the marker's existence, never observing a partially-uploaded `.pt`.
 </details>
 
-<details><summary>4. Only AKS auto-taints its spot node pool. What would go wrong if the AKS overlay's TrainJob patch had the <code>nodeSelector</code> but forgot the <code>kubernetes.azure.com/scalesetpriority</code> toleration?</summary>
+<details><summary>4. EKS doesn't auto-taint its spot node group — this chapter's node-group create adds the GPU taint itself. What would go wrong if the <code>eks</code> overlay's TrainJob patch had the <code>nodeSelector</code> but forgot the <code>nvidia.com/gpu</code> toleration?</summary>
 
-The pod would never schedule: it explicitly asks (via `nodeSelector`) for a spot node, but every
-spot node carries a `NoSchedule` taint the pod doesn't tolerate, so it sits `Pending` with a
-`node(s) had untolerated taint` event forever.
+The pod would never schedule: it explicitly asks (via `nodeSelector`) for the GPU node group, but
+every node in that group carries a `NoSchedule` taint the pod doesn't tolerate, so it sits
+`Pending` with a `node(s) had untolerated taint` event forever.
 </details>
 
-<details><summary>5. What changes about spot/on-demand placement when you layer <code>kueue/&lt;cloud&gt;</code> instead of applying the plain cloud overlay?</summary>
+<details><summary>5. What changes about spot/on-demand placement when you layer <code>kueue/eks</code> instead of applying the plain <code>eks</code> overlay?</summary>
 
-Without Kueue, the cloud overlay's `nodeSelector` hardcodes spot — if spot capacity is
+Without Kueue, the `eks` overlay's `nodeSelector` hardcodes spot — if spot capacity is
 unavailable the TrainJob just sits `Pending`. With Kueue, the hardcoded capacity-type key is
 removed and Kueue's ClusterQueue (spot ResourceFlavor tried first, on-demand as fallback) decides
 placement at admission time, writing its own `runtimePatch` with whichever flavor's
@@ -434,9 +447,8 @@ addition and doesn't exercise cross-node NCCL at all.
 <details><summary>8. `common/kueue/kustomization.yaml` is a Kustomize <em>Component</em>, not a plain overlay. What does that buy you here?</summary>
 
 A `Component` can be layered into an existing Kustomization's `components:` list without owning
-the base `resources:` — the same `common/kueue` component is reused unmodified by `kueue/gke`,
-`kueue/eks` and `kueue/aks`, each combining it with a *different* base (`../../gke`, `../../eks`,
-`../../aks`) rather than needing three near-duplicate overlay files.
+the base `resources:` — the same `common/kueue` component is reused unmodified by `kueue/eks`,
+which combines it with the `../../eks` base rather than needing a near-duplicate overlay file.
 </details>
 
 ## 9. Further reading
@@ -445,9 +457,7 @@ the base `resources:` — the same `common/kueue` component is reused unmodified
 - [Kubeflow Trainer API reference (TrainJob/TrainingRuntime)](https://www.kubeflow.org/docs/components/trainer/reference/)
 - [JobSet](https://jobset.sigs.k8s.io/)
 - [torchrun / torch.distributed elastic](https://pytorch.org/docs/stable/elastic/run.html)
-- [GKE: Cloud Storage FUSE CSI driver](https://cloud.google.com/kubernetes-engine/docs/how-to/persistent-volumes/cloud-storage-fuse-csi-driver)
 - [EKS: Mountpoint for Amazon S3 CSI driver](https://docs.aws.amazon.com/eks/latest/userguide/s3-csi.html)
-- [AKS: Blob Storage CSI driver](https://learn.microsoft.com/en-us/azure/aks/azure-blob-csi)
 - Cross-links: `05-model-storage-and-data` (the CSI drivers used for checkpoints here),
   `06-batch-jobs-and-kueue` (the `team-research` ClusterQueue the optional `kueue/<cloud>` overlay
   submits into), `08-ray-on-kubernetes` (an alternative gang-scheduled distributed workload model)

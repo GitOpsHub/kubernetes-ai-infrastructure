@@ -46,8 +46,8 @@ Kubernetes/AI concept — every concept here was taught already — it's to teac
 stack you didn't build end-to-end yourself and find where the joints don't line up, exactly the
 skill you need when you inherit (or build) a real platform.
 
-This chapter is a **read-and-run playbook**, not a new set of from-scratch labs. `common/`, `gke/`,
-`eks/`, `aks/` ship the glue that earlier chapters deliberately don't own: a bridging `ClusterQueue`
+This chapter is a **read-and-run playbook**, not a new set of from-scratch labs. `common/` and
+`eks/` ship the glue that earlier chapters deliberately don't own: a bridging `ClusterQueue`
 (`common/kueue-bridge/`) so chapter 07's GPU `TrainJob` actually gets admitted through chapter 06's
 Kueue setup, and an Argo Workflows `WorkflowTemplate` (`common/pipeline/`) that sequences a real
 `TrainJob` → MLflow registration → vLLM promotion → a live smoke test through the Gateway. You run
@@ -161,33 +161,29 @@ No other chapter's files are modified. See `common/kueue-bridge/clusterqueue-tea
 
 ## 4. Lab: build order
 
-Each phase below is `kubectl apply -k <chapter>/<cloud>` plus that chapter's install script(s), same
-commands as `<cloud>/deploy-platform.sh` in this folder (which lists every command, commented out,
-in order — uncomment and run a phase at a time rather than copy-pasting from here). Pick **one**
-cloud for your first full run.
+Each phase below runs that chapter's own Lab steps (§4 of its README, EKS-only, fully
+copy-pasteable there — not repeated here) plus, where noted, this chapter's own glue overlay. The
+same sequence, as commented-out reference commands you uncomment a phase at a time, lives in
+[`eks/deploy-platform.sh`](eks/deploy-platform.sh).
 
 ### Phase 0 — cluster + GPU (ch00–02)
 
 ```bash
-cp env.sh.example env.sh && "$EDITOR" env.sh   # fill in project/account/subscription
+cp env.sh.example env.sh && "$EDITOR" env.sh   # fill in your AWS account/region
 source env.sh && source versions.env
-./00-prerequisites-and-cluster-setup/gke/create-cluster.sh   # or eks/create-cluster.sh, aks/create-cluster.sh
-./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh
-./02-nvidia-gpu-operator/gke/install.sh
 ```
 
-**Acceptance criteria:** `kubectl get nodes -L cloud.google.com/gke-spot` (or the EKS/AKS spot
-label from `CONVENTIONS.md`) shows at least one spot CPU node Ready; `kubectl -n gpu-operator get
-pods` all Running; `kubectl describe node <gpu-node> | grep nvidia.com/gpu` shows the extended
-resource advertised.
+Run chapter 00 §4 (cluster), chapter 01 §4 (GPU node group + device plugin), chapter 02 §4 (GPU
+Operator).
+
+**Acceptance criteria:** `kubectl get nodes -L eks.amazonaws.com/capacityType` shows at least one
+spot CPU node Ready; `kubectl -n gpu-operator get pods` all Running; `kubectl describe node
+<gpu-node> | grep nvidia.com/gpu` shows the extended resource advertised.
 
 ### Phase 1 — observability + storage (ch04–05)
 
-```bash
-./04-gpu-observability/gke/install-kube-prometheus-stack.sh
-./05-model-storage-and-data/gke/setup-gcs-iam.sh   # Workload Identity binding
-kubectl apply -k 05-model-storage-and-data/gke
-```
+Run chapter 04 §4 (kube-prometheus-stack) and chapter 05 §4 (S3 CSI + IAM setup, then
+`kubectl apply -k 05-model-storage-and-data/eks`).
 
 **Acceptance criteria:** `kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus`
 Running; a `DCGM_FI_DEV_GPU_UTIL` series exists in Prometheus once phase 3 has a GPU pod running.
@@ -196,13 +192,15 @@ Running; a `DCGM_FI_DEV_GPU_UTIL` series exists in Prometheus once phase 3 has a
 
 ```bash
 kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab   # namespace + flavors + cohort + queues (cloud-agnostic)
-./06-batch-jobs-and-kueue/gke/create-nodepool.sh
-./06-batch-jobs-and-kueue/gke/install-kueue.sh
-kubectl apply -k 06-batch-jobs-and-kueue/gke
-kubectl apply -k 16-capstone-ai-platform/gke   # applies common/kueue-bridge + common/pipeline too — see note below
 ```
 
-> `16-capstone-ai-platform/<cloud>` bundles **all** of this chapter's resources (queueing bridge +
+Run chapter 06 §4 (node group + Kueue install, then `kubectl apply -k 06-batch-jobs-and-kueue/eks`).
+
+```bash
+kubectl apply -k 16-capstone-ai-platform/eks   # applies common/kueue-bridge + common/pipeline too — see note below
+```
+
+> `16-capstone-ai-platform/eks` bundles **all** of this chapter's resources (queueing bridge +
 > pipeline). Applying it here is fine — the pipeline's `WorkflowTemplate` is inert until you `argo
 > submit` it in phase 6 — but if you'd rather apply the bridge alone first, `kubectl apply -k
 > 16-capstone-ai-platform/common/kueue-bridge` targets just that piece.
@@ -212,15 +210,16 @@ kubectl apply -k 16-capstone-ai-platform/gke   # applies common/kueue-bridge + c
 
 ### Phase 3 — training + serving (ch07, 09, optionally 11)
 
+Run chapter 07 §4 (GPU node group, checkpoint storage, Trainer install, then
+`kubectl apply -k 07-distributed-training-kubeflow-trainer/eks` and
+`kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks`).
+
 ```bash
-./07-distributed-training-kubeflow-trainer/gke/create-gpu-nodepool.sh
-./07-distributed-training-kubeflow-trainer/gke/setup-storage.sh
-./07-distributed-training-kubeflow-trainer/gke/install.sh
-kubectl apply -k 07-distributed-training-kubeflow-trainer/gke
-kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/gke
 HF_TOKEN="$HF_TOKEN" ./09-llm-inference-with-vllm/common/create-hf-secret.sh ch09-vllm
-kubectl apply -k 09-llm-inference-with-vllm/gke
+kubectl apply -k 09-llm-inference-with-vllm/eks
 ```
+
+Optional: chapter 11 §4 for the KServe path instead of/alongside raw vLLM.
 
 **Acceptance criteria:** `kubectl -n ch07-training get trainjobs` shows a TrainJob reach
 `Complete` (or is currently `Running`/admitted, not stuck `Pending` — check `kubectl get workload -n
@@ -230,17 +229,10 @@ localhost:8000/v1/models` returns the served model.
 
 ### Phase 4 — gateway, autoscaling, node autoscaling (ch10, 12–13)
 
-```bash
-./12-inference-gateway-and-multinode-serving/common/install-gateway-crds.sh
-./12-inference-gateway-and-multinode-serving/common/install-lws.sh
-./12-inference-gateway-and-multinode-serving/gke/create-gateway.sh
-kubectl apply -k 12-inference-gateway-and-multinode-serving/gke
-./10-autoscaling-inference/gke/install-keda.sh
-./10-autoscaling-inference/gke/install-prometheus-adapter.sh
-kubectl apply -k 10-autoscaling-inference/gke
-./13-node-autoscaling-and-cost/gke/enable-nap.sh
-kubectl apply -k 13-node-autoscaling-and-cost/gke
-```
+Run chapter 12 §4 (Gateway API CRDs, LWS, gateway controller, then
+`kubectl apply -k 12-inference-gateway-and-multinode-serving/eks`), chapter 10 §4 (KEDA +
+Prometheus Adapter, then `kubectl apply -k 10-autoscaling-inference/eks`), and chapter 13 §4
+(Karpenter install, then `kubectl apply -k 13-node-autoscaling-and-cost/eks`).
 
 **Acceptance criteria:** `kubectl -n ch12-gateway get gateway,httproute,inferencepool` all
 `Programmed`/`Accepted`; a request through the Gateway's external address reaches vLLM;
@@ -248,11 +240,8 @@ kubectl apply -k 13-node-autoscaling-and-cost/gke
 
 ### Phase 5 — multi-tenancy + security (ch14)
 
-```bash
-./14-multi-tenancy-and-security/gke/install-external-secrets.sh
-./14-multi-tenancy-and-security/gke/install-kyverno.sh
-kubectl apply -k 14-multi-tenancy-and-security/gke
-```
+Run chapter 14 §4 (External Secrets + Kyverno install, then
+`kubectl apply -k 14-multi-tenancy-and-security/eks`).
 
 **Acceptance criteria:** `kubectl auth can-i create trainjobs -n ch07-training --as
 system:serviceaccount:ch16-capstone:capstone-pipeline` returns `no` (RBAC is scoped — the
@@ -275,9 +264,43 @@ jsonpath='{.spec.template.metadata.annotations}'` shows the
 
 ### Validate everything at once
 
+What you're about to do: run a read-only health check across every layer of the platform — the
+capstone's "is it actually wired together" checklist, runnable at any point during/after the phases
+above. Nothing here mutates the cluster.
+
 ```bash
-./16-capstone-ai-platform/gke/validate-platform.sh   # read-only; every layer, one command
+echo "== Kueue: quota + admission (ch06, ch16 bridge) =="
+kubectl get resourceflavor,clusterqueue,cohort
+kubectl get localqueue -A
+
+echo "== GPU nodes + device plugin (ch01-02) =="
+kubectl get nodes -L nvidia.com/gpu.present,eks.amazonaws.com/capacityType
+kubectl -n gpu-operator get pods || true
+
+echo "== Observability (ch04) =="
+kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus || true
+
+echo "== Training / serving frameworks (ch07-09, 11) =="
+kubectl -n ch07-training get trainjobs,trainingruntimes || true
+kubectl -n ch09-vllm get deployments,pods || true
+kubectl -n kserve get pods || true
+
+echo "== Gateway + multi-node + autoscaling (ch10, 12-13) =="
+kubectl -n ch12-gateway get gateway,httproute,inferencepool || true
+kubectl -n ch09-vllm get scaledobject,hpa || true
+
+echo "== Security (ch14) =="
+kubectl get validatingadmissionpolicy,clusterpolicy || true
+kubectl -n ch14-team-a get resourcequota,networkpolicy || true
+kubectl -n external-secrets get pods || true
+
+echo "== GitOps + pipelines + registry (ch15-16) =="
+kubectl get application -n argocd -l app.kubernetes.io/part-of=ai-platform || true
+kubectl -n ch15-pipelines get workflowtemplates,workflows || true
+kubectl -n mlflow get pods || true
 ```
+
+Review each section above for CrashLoopBackOff/Pending/0-ready before calling the platform healthy.
 
 ## 5. Spot considerations
 
@@ -297,16 +320,15 @@ running them *together* surfaces interactions a single chapter's lab doesn't:
   batch Job from chapter 06's own lab can compete for the same `ch06-cohort` quota — expected, and a
   good thing to demonstrate: submit both and watch `kubectl get workload -A` show one admitted,
   one pending on borrowed quota.
-- **AKS-only:** the spot taint is added automatically (`kubernetes.azure.com/scalesetpriority=spot:NoSchedule`,
-  see `CONVENTIONS.md`) — every workload above that lands on a spot node needs the matching
-  toleration; each chapter's overlay already adds it, but if you hand-write a new Pod for the game
-  day, don't forget it.
+- **EKS doesn't auto-taint spot nodes** (see `CONVENTIONS.md`) — every workload above that's meant
+  to land on a spot node needs its own toleration; each chapter's overlay already adds it, but if
+  you hand-write a new Pod for the game day, don't forget it.
 
 ## 6. Game day
 
-Read-only observation first (`validate-platform.sh`), then break one thing at a time and write down
-what recovered on its own vs. what needed a human. None of these commands touch cloud billing
-objects directly (no `gcloud`/`aws`/`az` delete) — they act on the cluster only, but node drains and
+Read-only observation first (§4's "Validate everything at once"), then break one thing at a time
+and write down what recovered on its own vs. what needed a human. None of these commands touch
+cloud billing objects directly (no `aws` delete) — they act on the cluster only, but node drains and
 force-deletes **do** cause real spot evictions/replacements which cost real (small) money.
 
 | Scenario | How to trigger it | What should happen | What to check |
@@ -351,14 +373,11 @@ source below is something chapters 04, 09, 10 and 13 already installed.
 
 ## 9. Cleanup
 
-```bash
-./16-capstone-ai-platform/gke/cleanup.sh   # or eks / aks — reverse dependency order, every line commented
-```
-
-Like `deploy-platform.sh`, every command is commented out — uncomment and run a phase at a time so
-you can inspect anything that fails to drain cleanly before deleting the node pool under it.
-**Node pools/nodegroups are the expensive part and the cluster deletion in Phase 0 is last on
-purpose** — verify nothing GPU-backed is still Running before you get there.
+See [`eks/cleanup.sh`](eks/cleanup.sh) — reverse dependency order, every line commented, pointing
+at each chapter's own README §7 (Cleanup) for the exact commands. Uncomment and run a phase at a
+time so you can inspect anything that fails to drain cleanly before deleting the node group under
+it. **Node groups are the expensive part and the cluster deletion in Phase 0 is last on purpose** —
+verify nothing GPU-backed is still Running before you get there.
 
 ## 10. Brief vs. reality (read this before you file a bug against your own run)
 
@@ -367,18 +386,15 @@ things worth knowing before you rely on cross-chapter paths:
 
 - **Chapter list matches the original plan exactly** (00-prerequisites through 16-capstone, no
   chapters added, renamed, split or dropped) — no mismatch there.
-- **`07-distributed-training-kubeflow-trainer/cpu-lab/{base,gke,eks,aks}` exist as empty
-  directories** — chapter 07's own `common/base/kustomization.yaml` comment says it's "shared by the
-  GPU lab and the CPU lab," but no CPU `TrainingRuntime`/`TrainJob` manifests were ever added there.
-  Chapter 07's `TrainingRuntime` is GPU-only end to end (hard-codes `nvidia.com/gpu` in
-  `resourcesPerNode`). This chapter's own `cpu-lab/` (section 11) does **not** patch or complete
-  chapter 07's directories (out of this chapter's ownership) — instead it reuses chapter 15's
-  already-CPU-friendly `train-and-register` `WorkflowTemplate` as the training stand-in. If you need
-  a real CPU TrainingRuntime for chapter 07 itself, that's a gap to raise against that chapter, not
-  this one.
-- **`16-capstone-ai-platform/eks/cleanup.sh` was a 0-byte file** before this chapter's README/cpu-lab
-  work — fixed here to mirror `gke/cleanup.sh` and `aks/cleanup.sh` (same reverse-phase structure,
-  EKS paths). No other existing file in `common/`, `gke/`, `aks/` needed changes.
+- **The course is EKS-only.** Every chapter's `gke/`/`aks/` overlays and per-cloud shell scripts
+  were removed; every operational step is inlined in that chapter's own README §4/§7 instead. This
+  chapter's own `common/base/kustomization.yaml` comment in chapter 07 about being "shared by the
+  GPU lab and the CPU lab" is stale — chapter 07's `TrainingRuntime` is GPU-only end to end
+  (hard-codes `nvidia.com/gpu` in `resourcesPerNode`). This chapter's own `cpu-lab/` (section 11)
+  does **not** patch or complete chapter 07's CPU path (out of this chapter's ownership) — instead
+  it reuses chapter 15's already-CPU-friendly `train-and-register` `WorkflowTemplate` as the
+  training stand-in. If you need a real CPU TrainingRuntime for chapter 07 itself, that's a gap to
+  raise against that chapter, not this one.
 
 ## 11. CPU lab: the same platform, no GPU quota required
 
@@ -395,13 +411,13 @@ and gluing training → registry → serving together).
 | Chapter 07 `TrainJob` (real PyTorch DDP, NCCL, 2 GPU nodes) | Chapter 15's `train-and-register` stand-in step (a Python container that writes a toy metric + checkpoint file) | No real distributed training, no NCCL, no gang scheduling — this proves the *pipeline*, not the *training* |
 | Chapter 09 vLLM (PagedAttention, continuous batching, tensor parallel) | Chapter 09's `cpu-lab/` Ollama deployment (`ch09-vllm-cpu` namespace, Qwen3-0.6B GGUF via llama.cpp) | Much lower throughput, no tensor parallel, different KV-cache implementation — same OpenAI-ish request shape, not the same performance characteristics |
 | Chapter 12 Gateway + InferencePool, multi-node LWS | Not reproduced — a plain in-cluster `curl` to the Ollama Service | No real Gateway routing/load-balancing behavior to observe |
-| Chapter 13 Karpenter/NAP scaling nodes for GPU pods | Chapter 13's `cpu-lab/` `scale-demo-cpu` (optional, run separately) — and per that chapter's own README, you still need a **real** GKE/EKS/AKS CPU node pool with its cluster autoscaler on to see an actual node get added; `kind`/`minikube` can't demonstrate this at all | Real node autoscaling needs a real cloud cluster even in the "CPU lab" — this is the one piece that isn't laptop-only |
+| Chapter 13 Karpenter scaling nodes for GPU pods | Chapter 13's `cpu-lab/` `scale-demo-cpu` (optional, run separately) — and per that chapter's own README, you still need a **real** EKS CPU node group with Karpenter running to see an actual node get added; `kind`/`minikube` can't demonstrate this at all | Real node autoscaling needs a real cloud cluster even in the "CPU lab" — this is the one piece that isn't laptop-only |
 | This chapter's GPU `team-research` ClusterQueue (bridges 06↔07 for `nvidia.com/gpu`) | Chapter 06's existing `team-a-queue`/`team-a-cq` (CPU-only, already covers `cpu`/`memory`) — no new bridge needed since nothing here requests a GPU | None — the CPU path never needed the bridge in the first place |
 
 ### 11.2 Build order
 
 ```bash
-# 1. Any cluster works: kind/minikube, or a real GKE/EKS/AKS spot CPU pool from ch00.
+# 1. Any cluster works: kind/minikube, or a real EKS spot CPU node group from ch00.
 ./06-batch-jobs-and-kueue/cpu-lab/install-kueue.sh
 kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab
 
