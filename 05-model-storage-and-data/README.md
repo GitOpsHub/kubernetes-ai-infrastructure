@@ -292,6 +292,60 @@ keys ever exist**, only automatically-issued, automatically-expiring credentials
 Nothing long-lived is stored in the cluster. The IAM Pod Identity association names the **namespace and ServiceAccount**.
 That makes RBAC on who can create pods with `serviceAccountName: model-writer` a security boundary (chapter `14-multi-tenancy-and-security`).
 
+### 3.5 Production storage: Node-local NVMe RAID-0, zero-copy mmap, and distributed caching
+
+While S3 Mountpoint and EFS solve centralized artifact distribution, **tier-1 production inference clusters serving 70B+ models rely on node-local NVMe instance storage and zero-copy memory mapping** to achieve instant pod startups.
+
+#### The I/O throughput hierarchy for model loading
+
+Loading a 70B model quantized to INT4/AWQ requires reading ~35 GB of tensor data. Loading it in BF16 requires reading ~140 GB:
+
+| Storage Tier | Typical Bandwidth | Cold-Start Time (35 GB model) | Cold-Start Time (140 GB model) | Best Used For |
+|---|---|---|---|---|
+| **EBS gp3 (Default)** | 125 MB/s | ~4.6 minutes | ~18.6 minutes | Generic pod storage, OS boot disk |
+| **EBS gp3 (Provisioned)** | 500–1,000 MB/s | ~40–70 seconds | ~2.5–4.5 minutes | Predictable persistent volumes |
+| **S3 Mountpoint CSI** | ~1.2 GB/s | ~30 seconds | ~1.9 minutes | Central model registry, write-once datasets |
+| **EFS (Shared FS)** | 100–250 MB/s | ~2.3–5.8 minutes | ~9.3–23 minutes | ReadWriteMany shared dev environments |
+| **Node-Local NVMe RAID-0** | **15–30 GB/s** | **~1.2–2.5 seconds** | **~5–9 seconds** | **Production LLM serving & warm model caching** |
+
+#### Why GPU instances have local NVMe instance store
+
+AWS GPU instance families (`g5`, `g6e`, `p4d`, `p5`) come with physically attached, ephemeral NVMe SSDs included in the hourly instance price:
+- `g5.xlarge` / `g5.2xlarge`: 1x 450 GB NVMe SSD.
+- `g5.12xlarge`: 1x 3.8 TB NVMe SSD.
+- `p4d.24xlarge` / `p5.48xlarge`: 8x 3.8 TB NVMe SSDs (over 30 TB raw local storage).
+
+Leaving these local SSDs unformatted wastes their massive bus bandwidth. In production, platform teams format these drives on node boot via Karpenter `userData` or an init DaemonSet:
+
+```bash
+# Example node initialization script (userData / DaemonSet)
+# 1. Strip all local NVMe instance store disks into a RAID-0 array
+INSTANCE_DISKS=$(ls /dev/nvme*n1 | grep -v nvme0n1)
+mdadm --create /dev/md0 --level=0 --raid-devices=$(echo $INSTANCE_DISKS | wc -w) $INSTANCE_DISKS
+
+# 2. Format with XFS (optimized for large sequential reads)
+mkfs.xfs -f /dev/md0
+mkdir -p /mnt/k8s-local-nvme
+mount -o noatime,nodiratime /dev/md0 /mnt/k8s-local-nvme
+```
+
+Pods mount `/mnt/k8s-local-nvme` via `hostPath` or a `local` PersistentVolume, configuring `HF_HOME=/mnt/k8s-local-nvme/huggingface`.
+
+#### Safetensors and zero-copy memory mapping (`mmap`)
+
+Historically, PyTorch stored model weights as Python pickle files (`.bin`). Pickle required allocating host RAM, deserializing arbitrary Python bytecodes sequentially (a major security vulnerability), and copying the tensors to GPU memory.
+
+Modern models ship exclusively as Hugging Face **`safetensors`**:
+1. **Header + Raw Bytes**: A JSON metadata header describing tensor shapes and offsets, followed by an uncompressed, contiguous binary byte array of weights.
+2. **Zero-Copy `mmap`**: When vLLM loads a safetensors file, the operating system executes `mmap()` to map the disk file directly into virtual address space without copying it into user-space CPU RAM.
+3. **Direct PCIe DMA**: The NVIDIA CUDA driver streams bytes directly from the local NVMe controller over the PCIe Gen4/Gen5 bus straight into GPU VRAM at line rate (32–64 GB/s).
+
+#### Distributed data caching: Fluid and JuiceFS
+
+When clusters scale to hundreds of nodes, pre-populating every single node's NVMe drive can saturate S3 bucket egress. Modern AI platforms layer distributed data caching engines:
+- **Fluid (CNCF)**: A Kubernetes-native orchestration framework for data abstraction and tiered caching (Alluxio, JuiceFS). It automatically caches remote bucket objects on node-local NVMe storage and schedules pods to nodes that already hold the cached data shards.
+- **JuiceFS**: A POSIX file system built on top of object storage and Redis/metadata engines that automatically keeps hot chunks on local NVMe disks, delivering distributed RWX sharing at local NVMe read speeds.
+
 ## 4. Lab
 
 Layout:

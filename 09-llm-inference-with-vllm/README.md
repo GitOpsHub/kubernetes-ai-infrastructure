@@ -239,6 +239,63 @@ each other dozens of times per response. It only pays off when the alternative (
 one GPU) isn't possible at all, or when the extra GPUs' combined compute throughput outweighs that
 synchronization cost under heavy concurrent load.
 
+### 3.4 Production serving features: Chunked Prefill, Prefix Caching, Multi-LoRA, Speculative Decoding, and Quantization
+
+When serving LLMs at scale, standard single-model serving leaves immense performance and cost efficiency on the table. Modern production deployments configure several advanced vLLM capabilities:
+
+#### Chunked Prefill (`--enable-chunked-prefill=true`)
+
+LLM inference consists of two fundamentally distinct phases:
+- **Prefill phase (Compute-bound)**: The server takes the input prompt (e.g. 2,000 tokens) and evaluates it in a single forward pass. Matrix multiplications saturate GPU Tensor Cores, reaching high TFLOPS.
+- **Decode phase (Memory-bandwidth bound)**: The server generates output tokens autoregressively, one token at a time. The GPU must read all model weights and the entire KV cache from VRAM to compute just one token, leaving arithmetic units mostly idle.
+
+**The Head-of-Line Blocking Problem**: When a large prompt arrives while the engine is in the middle of streaming responses to 20 active users, the GPU switches to prefill mode for 500 ms – 2 seconds. During this window, all 20 ongoing streaming chats freeze. Users perceive sudden stuttering and erratic Time-Per-Output-Token (TPOT).
+
+**The Solution**: Chunked prefill slices incoming prompts into small chunks (e.g. 512 tokens) and interleaves them with decode tokens in the same forward-pass batch. This caps maximum prefill latency per step, keeping streaming token delivery smooth and predictable under bursty traffic.
+
+#### Automatic Prefix Caching (APC - `--enable-prefix-caching`)
+
+Real-world prompts almost always share identical prefixes:
+- A 1,500-token system prompt ("You are an enterprise support bot...").
+- A 2,000-token context document retrieved via RAG.
+- Prior conversation history in a multi-turn chat session.
+
+Without APC, vLLM re-evaluates those 3,500 prompt tokens from scratch on **every single request**, repeatedly paying the full prefill compute and latency penalty.
+
+With `--enable-prefix-caching`, vLLM maintains a Radix Tree of previously computed KV blocks in GPU memory:
+- When a new request arrives, vLLM matches the prompt tokens against the tree.
+- Any prefix already computed is reused directly from the KV cache without re-running the neural network.
+- **Result**: Time To First Token (TTFT) drops by 80%–95% (e.g. from 1,200 ms to 45 ms), and the GPU spends far less compute on redundant prefills.
+
+#### Dynamic Multi-LoRA Serving (`--enable-lora`)
+
+In enterprise settings, different teams often fine-tune low-rank adapters (LoRA) on the same foundation model (e.g. a `sql-generator` adapter, a `legal-reviewer` adapter, and a `customer-support` adapter, all built on `Qwen-2.5-7B`).
+
+- **The Naive Way**: Deploy 3 separate GPU pods, each hosting a merged model. Cost: 3x GPU hardware, with low average utilization.
+- **The Multi-LoRA Way**: Deploy 1 vLLM pod hosting the base model with `--enable-lora` and `--max-loras=8`. vLLM loads and manages LoRA adapters dynamically in CPU/GPU memory. Clients simply pass the desired adapter name in the OpenAI API request:
+  ```json
+  {
+    "model": "sql-generator",
+    "messages": [{"role": "user", "content": "SELECT * FROM users..."}]
+  }
+  ```
+  vLLM swaps the tiny LoRA adapter matrices into the base model computation dynamically, allowing one GPU pod to serve dozens of specialized models.
+
+#### Speculative Decoding (`--speculative-model`)
+
+Because decode is bottlenecked by memory bandwidth (reading weights for one token takes as long as reading weights for 5 tokens), speculative decoding pairs a small "draft model" with the larger "target model":
+1. The tiny draft model (e.g. `Qwen-0.5B`) rapidly generates $K$ candidate tokens (e.g. 4 tokens).
+2. The large target model (e.g. `Qwen-7B`) executes a single forward pass over all $K$ tokens simultaneously to verify which ones match its own output probabilities.
+3. If 3 tokens are accepted, the system generated 3 tokens in the time of a single target forward pass.
+4. **Result**: 2x–3x latency reduction for interactive chatbot workloads with zero degradation in mathematical output quality.
+
+#### Quantization in Production (FP8, AWQ, GPTQ)
+
+Model weights in BF16/FP16 take 2 bytes per parameter (a 70B model requires 140 GB VRAM just for weights). Quantization compresses weights and/or activations:
+- **FP8 (8-bit floating point)**: Supported in hardware by NVIDIA Ada Lovelace (L4, L40S) and Hopper (H100). Halves memory footprint (1 byte/param) with almost zero accuracy loss and native tensor core speedups.
+- **AWQ (Activation-aware Weight Quantization) & GPTQ (INT4)**: Compresses weights to 4 bits (0.5 bytes/param). A 70B model fits into ~40 GB VRAM across two L4/A10G cards instead of needing an 8-GPU node.
+- **Marlin / FlashInfer kernels**: Specialized GPU kernels that perform dequantization on-the-fly during matrix multiply, delivering both memory savings and high decode throughput.
+
 ## 4. Lab
 
 ```bash

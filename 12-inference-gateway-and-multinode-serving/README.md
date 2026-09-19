@@ -237,17 +237,53 @@ flowchart TD
   the model and exchange activations with the leader over Ray/NCCL, which is why the diagram shows
   the client arrow pointing only at `L0`.
 
-### 3.3 llm-d (overview only — not deployed in this lab)
+### 3.3 Prefill-Decode Disaggregation (Split Serving) and llm-d
 
-[llm-d](https://llm-d.ai/) is a Kubernetes-native reference architecture built **on top of** the
-same primitives this chapter teaches (Gateway API Inference Extension, LWS) plus
-**prefill/decode disaggregation** (splitting the compute-bound prompt-processing phase from the
-memory-bound token-generation phase onto different Pods/hardware) and KV-cache-aware routing
-across a fleet. It's the production answer to "what do I do once one InferencePool isn't enough."
-Treat this chapter as the primitives llm-d is assembled from; adopting llm-d itself is a platform
-decision beyond a 3-hour lab — see their [architecture docs](https://llm-d.ai/docs/architecture)
-before evaluating it. # VERIFY: llm-d's own manifests move fast; if you deploy it, re-verify
-CRDs/Helm values against the pinned llm-d release, not this description.
+In conventional LLM serving (chapters 09 and 11), a single vLLM pod handles both the prompt processing (prefill) and the token generation (decode) for every request. In high-volume production environments, this co-location creates a fundamental architectural compromise known as the **Prefill-Decode Interference Problem**.
+
+#### The fundamental asymmetry of LLM inference
+
+| Dimension | Prefill Phase (Prompt Evaluation) | Decode Phase (Token Generation) |
+|---|---|---|
+| **Workload Type** | Matrix-Matrix multiplication (GEMM) | Matrix-Vector multiplication (GEMV) |
+| **Hardware Bottleneck** | **Compute-bound** (Tensor Core TFLOPS) | **Memory-bandwidth-bound** (HBM GB/s) |
+| **Arithmetic Intensity** | High (>100 FLOPs/byte) | Low (<5 FLOPs/byte) |
+| **GPU Utilization** | 80%–95% compute saturation | 10%–25% compute saturation |
+| **Optimal Tensor Parallelism** | High ($TP=4$ or $TP=8$) to parallelize GEMM | Low ($TP=1$ or $TP=2$) to avoid NCCL latency per token |
+| **Latency Characteristic** | Decides Time To First Token (TTFT) | Decides Time Per Output Token (TPOT / Inter-token latency) |
+
+When co-located on the same GPU:
+1. **Head-of-Line Blocking**: When a user submits a 6,000-token prompt, the GPU halts token generation for all other 30 concurrently streaming users for ~1–2 seconds to process the prompt's forward pass.
+2. **Conflicting Hardware Requirements**: To make prefill fast on large models, you want high Tensor Parallelism ($TP=4$). But high TP penalizes the decode phase because every single generated token requires an all-reduce synchronization across all 4 GPUs.
+
+#### How Disaggregated Serving works
+
+```mermaid
+flowchart LR
+  Client[Client] --> GW[Inference Gateway / Router]
+  subgraph PrefillPool["Prefill Workers (Compute Optimized, TP=4/8)"]
+    P1["Prefill Pod 1<br/>Processes Prompt<br/>Computes KV Cache"]
+  end
+  subgraph DecodePool["Decode Workers (Memory Optimized, TP=1)"]
+    D1["Decode Pod 1<br/>Streams Output Tokens<br/>Maintains KV Cache"]
+  end
+  GW -- "1. Dispatch Prompt" --> P1
+  P1 -- "2. Transfer KV Cache<br/>(RDMA / EFA / Mooncake)" --> D1
+  GW -- "3. Stream Tokens" --> D1
+  D1 -- "4. SSE Stream" --> Client
+```
+
+1. **Prompt Ingestion**: The Inference Gateway routes the incoming prompt to an available **Prefill Worker** configured with high compute capacity (e.g. $TP=4$).
+2. **KV Generation**: The prefill worker runs the full forward pass on the prompt, generating the initial Key-Value activation tensors.
+3. **KV Cache Transfer**: The prefill worker transfers the computed KV blocks directly across the network to an assigned **Decode Worker** using high-speed network protocols (such as AWS EFA RDMA, UCX, or distributed memory stores like Mooncake).
+4. **Autoregressive Decoding**: The decode worker (running at $TP=1$ to eliminate cross-GPU synchronization latency) loads the KV blocks and streams output tokens back to the client via Server-Sent Events (SSE).
+
+**The Operational Benefits**:
+- **Zero Head-of-Line Blocking**: Long document summarization or large RAG prefills never cause jitter or stuttering in active user chat streams.
+- **Independent Scaling**: Scale prefill workers based on incoming prompt token rate ($tokens_{in}/s$) and decode workers based on output token rate ($tokens_{out}/s$).
+- **Cost Reduction**: Prefill nodes can be run on compute-heavy spot instances (e.g. H100 or L40S) while decode nodes run on cost-effective, high-memory cards.
+
+[llm-d](https://llm-d.ai/) is a Kubernetes-native reference architecture built **on top of** the same primitives this chapter teaches (Gateway API Inference Extension, LWS) that implements this disaggregated architecture with KV-cache-aware routing across a fleet. Treat this chapter as the foundation; adopting full disaggregated serving is the standard architecture for multi-million-token/day production platforms.
 
 ## 4. Lab
 

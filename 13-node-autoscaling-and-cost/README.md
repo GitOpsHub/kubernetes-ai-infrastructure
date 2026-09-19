@@ -253,6 +253,49 @@ fixes:
 Chapter 05's storage-preloading pattern for model weights applies the same idea to container
 images: bake it into the AMI instead of pulling it every cold start.
 
+### 3.4 Spot Interruption & Rebalance Architecture (EventBridge + SQS)
+
+Running GPU workloads on EC2 Spot capacity delivers 60%–70% cost savings, but comes with one ironclad rule: **AWS can reclaim any spot instance at any time with exactly two minutes' notice**.
+
+Without automated interruption handling, those two minutes tick away unnoticed. AWS abruptly cuts power to the instance, causing hard connection resets for serving clients and catastrophic NCCL ring stalls for training jobs.
+
+#### The 2-minute interruption lifecycle
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant AWS as AWS EC2
+  participant EB as Amazon EventBridge
+  participant SQS as Interruption SQS Queue
+  participant K as Karpenter Controller
+  participant K8s as Kubernetes API
+  participant Node as GPU Worker Node
+
+  AWS->>EB: Emits EC2 Spot Interruption Warning (T - 120s)
+  EB->>SQS: Routes event JSON to Karpenter SQS queue
+  K->>SQS: Polls queue (sub-second latency)
+  K->>K8s: Taints node (karpenter.sh/disruption: NoSchedule)
+  par Parallel Actions at T - 110s
+    K->>AWS: Launches replacement GPU node ahead of eviction
+    K->>K8s: Evicts pods on terminating node (honors PDBs)
+  end
+  Node->>Node: vLLM / Pod executes graceful preStop & SIGTERM
+  AWS->>Node: Force terminates EC2 instance (T = 0s)
+  Note over Node,K8s: Replacement node is already booting!
+```
+
+#### The three events Karpenter handles
+
+1. **Spot Interruption Warning (`aws.ec2 SpotInterruptionWarning`)**: The hard 2-minute termination notice. Karpenter immediately begins graceful draining and provisions a replacement node.
+2. **Rebalance Recommendation (`aws.ec2 EC2InstanceRebalanceRecommendation`)**: A proactive signal emitted by AWS when a spot pool is experiencing elevated reclaim probability, often sent **minutes before** a formal interruption notice. Karpenter uses this to preemptively launch replacement capacity and migrate workloads before the hard countdown starts.
+3. **Scheduled Change / Health Events (`aws.health AWS_EC2_PERSISTENT_INSTANCE_RETIREMENT_SCHEDULED`)**: Hardware retirement or planned host maintenance.
+
+#### Why parallel provisioning matters
+
+In a naive setup, draining happens first, and only after the instance disappears does the autoscaler notice `Pending` pods and start an EC2 instance. That adds another 3–5 minutes of downtime on top of the termination!
+
+Karpenter initiates **parallel provisioning**: the moment the SQS message is consumed, it provisions replacement capacity while the terminating node is draining. By the time the old node is terminated, the new GPU node is already pulling images or warming weights, cutting failover downtime by over 80%.
+
 ## 4. Lab
 
 ```bash

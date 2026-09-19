@@ -127,6 +127,10 @@ By the end you can:
    handling + JobSet's gang-recreate bring the run back to the last complete checkpoint.
 5. Layer the `kueue/<cloud>` overlay on top and explain what changes once Kueue's ResourceFlavor,
    not a hardcoded nodeSelector, decides spot vs on-demand placement.
+6. Calculate training memory footprints (weights, gradients, AdamW optimizer states) and justify
+   when to switch from DDP to PyTorch FSDP or DeepSpeed ZeRO-1/2/3.
+7. Explain AWS EFA hardware acceleration (OS bypass, SRD, GPUDirect RDMA) and configure critical
+   production NCCL environment variables for Kubernetes.
 
 | Block | Time | What |
 |---|---|---|
@@ -246,6 +250,121 @@ overlay that lists its own parent directory as a resource ("cycle detected") —
 ```bash
 kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks
 ```
+
+### 3.5 Real-world distributed training architectures: DDP vs. FSDP vs. DeepSpeed ZeRO
+
+This chapter's lab runs standard PyTorch DDP (`DistributedDataParallel`). DDP is the right baseline to learn first because it is straightforward: every GPU holds a full copy of the model, and GPUs only exchange averaged gradients at each step. But in modern production LLM engineering, **DDP hits a hard ceiling when models exceed ~2–3 billion parameters**. Here is why, and what production teams use instead.
+
+#### The memory math of training: why large models OOM on DDP
+
+When training an LLM, GPU memory is consumed by four distinct components:
+
+1. **Model parameters**: In half-precision (FP16 or BF16), each parameter takes 2 bytes. A 7B model takes $7 \times 10^9 \times 2 = 14\text{ GB}$ of VRAM just to store the weights.
+2. **Gradients**: Gradients match parameter precision, taking another 2 bytes per parameter ($14\text{ GB}$).
+3. **Optimizer states (the biggest memory hog)**: Production training uses the AdamW optimizer. AdamW maintains:
+   - An FP32 master copy of weights (4 bytes/param) to prevent underflow during weight updates.
+   - First momentum vector $m$ in FP32 (4 bytes/param).
+   - Second momentum vector $v$ in FP32 (4 bytes/param).
+   - Total optimizer state: $4 + 4 + 4 = 12\text{ bytes per parameter}$ (or 16 bytes/param if tracking FP32 gradients). For a 7B model, optimizer states alone take $7 \times 10^9 \times 12 = 84\text{ GB}$ of VRAM!
+4. **Activations and KV buffers**: Memory needed to store intermediate layer outputs during the forward pass for backward backpropagation (proportional to sequence length, hidden dimension, and batch size).
+
+$$
+\text{Total Static State} = \text{Weights (2B)} + \text{Gradients (2B)} + \text{Optimizer States (12B)} = 16\text{ bytes per parameter}
+$$
+
+For a 7B model: $16 \times 7 = 112\text{ GB}$ of GPU memory is required **before computing a single token's activations**. On a standard 24 GB GPU (like an NVIDIA L4 or A10G), DDP cannot even load the model into memory.
+
+#### PyTorch FSDP (Fully Sharded Data Parallel)
+
+PyTorch FSDP (`torch.distributed.fsdp`) solves this by **sharding model states across all participating GPUs** rather than replicating them:
+
+- **`FULL_SHARD` (ZeRO-3 equivalent)**: Parameters, gradients, and optimizer states are sharded across all ranks. If you have 8 GPUs, each GPU holds only $\frac{1}{8}$ of the weights, gradients, and optimizer states.
+  - *Forward pass*: Rank $i$ issues an `all-gather` collective to temporarily reconstruct full layer weights for the current layer, computes the forward activations, and immediately discards the full weights.
+  - *Backward pass*: Rank $i$ all-gathers the layer weights again, calculates gradients, performs a `reduce-scatter` to send gradient shards to their respective owners, and frees the weights.
+- **`SHARD_GRAD_OP` (ZeRO-2 equivalent)**: Shards optimizer states and gradients across ranks, but retains full model weights on each GPU. Great when weights fit in memory but optimizer states cause OOM.
+- **`HYBRID_SHARD`**: Shards parameters across GPUs *within the same physical node* (where ultra-fast NVLink is available), but runs standard DDP replication *across physical nodes* over the network. This minimizes cross-node network bandwidth while eliminating intra-node memory duplication.
+
+#### DeepSpeed ZeRO (Zero Redundancy Optimizer)
+
+DeepSpeed (by Microsoft) pioneered this sharding hierarchy:
+- **ZeRO-Stage 1**: Shards AdamW optimizer states ($4\times$ memory reduction, zero extra communication volume).
+- **ZeRO-Stage 2**: Shards optimizer states + gradients ($8\times$ memory reduction, zero extra communication volume).
+- **ZeRO-Stage 3**: Shards optimizer states + gradients + model parameters (linear memory reduction with world size; introduces ~50% communication overhead due to all-gather in forward/backward passes).
+- **ZeRO-Offload**: Offloads optimizer states or model parameters to host system CPU RAM or node-local NVMe SSDs via PCIe. This enables fine-tuning a 13B model on a single 24 GB consumer/L4 GPU.
+
+| Paradigm | Model Weights | Gradients | Optimizer States | Extra Communication | Max Model on 8x 24GB GPUs |
+|---|---|---|---|---|---|
+| **DDP** | Replicated | Replicated | Replicated | None (standard all-reduce) | ~1.5B params |
+| **FSDP / ZeRO-2** | Replicated | Sharded | Sharded | None | ~3B params |
+| **FSDP / ZeRO-3** | Sharded | Sharded | Sharded | +50% (all-gather layers) | ~14B–20B params |
+| **ZeRO-3 + Offload** | Sharded (CPU/NVMe) | Sharded | Sharded (CPU/NVMe) | High (PCIe transfer) | ~30B+ params |
+
+In Kubeflow Trainer v2, you can switch from plain DDP to FSDP or DeepSpeed by configuring the PyTorch plugin in your `TrainingRuntime` or specifying an `accelerate_config.yaml` with `plugin: fsdp`.
+
+---
+
+### 3.6 High-performance network fabric: AWS EFA & NCCL production tuning
+
+In distributed training, every backward pass must synchronize gradients across all nodes. On an 8-node cluster, a single step triggers hundreds of megabytes of collective network transfers (`all-reduce` or `reduce-scatter`). 
+
+On standard cloud networking, traffic passes through the Linux TCP/IP kernel stack, causing high packet latency, CPU interrupts, and jitter. If node 7 experiences a 20 ms network hiccup, **every other node in the cluster stops and waits at the NCCL barrier**. This turns training into an expensive bottleneck where GPUs sit at 30% compute utilization waiting on network packets.
+
+#### What AWS EFA (Elastic Fabric Adapter) adds
+
+AWS EFA is a custom network interface card engineered specifically for scale-out HPC and machine learning workloads on EC2:
+
+1. **OS-Bypass (Libfabric / `fi_provider="efa"`)**: Applications write network buffers directly to the EFA hardware without kernel context switches or copying data into Linux OS sockets.
+2. **SRD (Scalable Reliable Datagram)**: Instead of TCP (which binds a stream to a single network path, causing head-of-line blocking on packet loss), AWS SRD spreads packets across hundreds of multi-path network routes simultaneously. It reorders packets in hardware at the receiver, delivering consistently low p99 tail latency.
+3. **GPUDirect RDMA**: On high-end GPU instances (`p4d.24xlarge`, `p5.48xlarge`, `g6e.8xlarge+`), EFA bypasses the host CPU and system RAM completely. Data flows directly from the sending GPU's VRAM across the PCIe/NVLink bus to the EFA NIC, over the network fabric, and directly into the remote GPU's VRAM.
+
+#### EKS cluster prerequisites for EFA
+
+To leverage EFA in an EKS distributed training cluster:
+
+1. **EC2 Placement Groups**: You must launch the GPU worker nodes inside an EC2 Placement Group with `strategy: cluster`. This guarantees nodes are placed physically adjacent in the AWS datacenter on the same network spine, eliminating inter-AZ and inter-switch latency.
+2. **AWS EFA Device Plugin**: Deploy `aws-efa-k8s-device-plugin` on your EKS cluster so the kubelet can advertise `vpc.amazonaws.com/efa` resources:
+   ```yaml
+   resources:
+     limits:
+       nvidia.com/gpu: 8
+       vpc.amazonaws.com/efa: 4   # Requests 4 EFA interfaces per pod
+   ```
+3. **HugePages and Shared Memory**: Mount `/dev/shm` (`emptyDir: { medium: Memory }`) and configure `ipcMode: host` if required by your MPI/NCCL stack.
+
+#### Critical production NCCL environment variables
+
+When running multi-node PyTorch training on Kubernetes, configure these environment variables in your container spec or `TrainingRuntime`:
+
+```yaml
+env:
+  # 1. Output NCCL diagnostics at startup: verify which transport is selected
+  - name: NCCL_DEBUG
+    value: "INFO"
+  - name: NCCL_DEBUG_SUBSYS
+    value: "INIT,ENV,NET"
+  # 2. Tell NCCL which network interface to bind (prevent picking docker0 or cilium_net)
+  - name: NCCL_SOCKET_IFNAME
+    value: "eth0"
+  # 3. Libfabric and EFA configuration
+  - name: FI_PROVIDER
+    value: "efa"
+  - name: FI_EFA_USE_DEVICE_RDMA
+    value: "1"                  # 1 = GPUDirect RDMA enabled
+  # 4. Tune NCCL ring buffer size (default 4MB; 8MB helps saturate 400G+ links)
+  - name: NCCL_BUFFSIZE
+    value: "8388608"
+  # 5. Prevent peer-to-peer over PCIe if NVLink is absent or broken
+  - name: NCCL_P2P_DISABLE
+    value: "0"
+  # 6. NCCL Watchdog Timeout (prevent silent hung processes on spot preemption)
+  - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+    value: "120"
+```
+
+> [!TIP]
+> **How to verify EFA is actually active**: In the pod startup logs, look for:
+> `NCCL INFO NET/OFI: Using provider efa` and `NCCL INFO Using network AWS Libfabric`.
+> If you see `NCCL INFO Using network Socket`, your pods have silently fallen back to standard Linux TCP sockets, and your distributed training speed will be throttled by network latency.
 
 ## 4. Lab
 
@@ -617,6 +736,25 @@ addition and doesn't exercise cross-node NCCL at all.
 A `Component` can be layered into an existing Kustomization's `components:` list without owning
 the base `resources:` — the same `common/kueue` component is reused unmodified by `kueue/eks`,
 which combines it with the `../../eks` base rather than needing a near-duplicate overlay file.
+</details>
+
+<details><summary>9. Why does an AdamW training run on a 7B parameter model require ~112 GB VRAM before batch activations, and why does FSDP FULL_SHARD solve this?</summary>
+
+In half-precision (FP16/BF16), model weights take 2 bytes/param (14 GB) and gradients take 2 bytes/param (14 GB).
+AdamW maintains an FP32 master weight copy (4 bytes/param) plus first and second momentum vectors (8 bytes/param),
+adding 12 bytes/param (84 GB). The total static state is 16 bytes per parameter (112 GB). DDP replicates this
+entire 112 GB on every single GPU, causing immediate OOM. FSDP `FULL_SHARD` shards the weights, gradients, and
+optimizer states across all participating GPUs (e.g. across 8 GPUs, each holds only 14 GB), gathering layers
+on-demand during forward/backward passes and freeing them immediately.
+</details>
+
+<details><summary>10. What role does AWS EFA (Elastic Fabric Adapter) and GPUDirect RDMA play in multi-node training, and why is an EC2 cluster placement group necessary?</summary>
+
+Standard cloud networking uses TCP/IP kernel stacks with jitter and latency, bottlenecking NCCL `all-reduce`
+gradient exchanges. EFA provides OS-bypass with Libfabric and SRD (Scalable Reliable Datagram) multi-path routing,
+while GPUDirect RDMA copies data directly between GPU VRAM across physical hosts without CPU/RAM staging.
+An EC2 `cluster` placement group ensures all training instances are placed in the same physical datacenter rack
+on the same network switch, eliminating inter-switch latency and achieving full line-rate inter-node bandwidth.
 </details>
 
 ## 9. Further reading

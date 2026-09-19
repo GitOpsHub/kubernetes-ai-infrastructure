@@ -340,6 +340,87 @@ secret" — that's the point: it replaces "a long-lived AWS key baked into a Sec
 thing you'd need another layer of protection for) with a short-lived, automatically-rotated token
 tied to the Pod's own identity.
 
+### 3.7 AI Workload Security: Sandboxing untrusted LLM code execution (gVisor and Kata Containers)
+
+In modern enterprise AI platforms, security goes beyond stopping human engineers from stepping on each other's toes. Today's AI platforms run **autonomous AI agents** (LangGraph, AutoGen, CrewAI, Code Interpreter tools) that **dynamically write and execute arbitrary Python code** at runtime.
+
+#### The threat model: why standard containers (`runc`) are insufficient
+
+Standard Kubernetes containers are not sandboxes. They use standard Linux cgroups and namespaces running on a shared host kernel via the default OCI runtime (`runc`):
+- A malicious prompt injection or jailbroken LLM can generate code designed to exploit Linux kernel vulnerabilities (e.g. dirty COW, cgroup breakout exploits).
+- The untrusted code shares the host kernel's system call interface with every other container on that GPU node.
+- A breakout allows an attacker to dump GPU memory belonging to other tenants, tamper with host devices, or access cloud metadata services (`169.254.169.254`).
+
+#### Sandboxed container runtimes: gVisor vs. Kata Containers
+
+To safely execute AI-generated code, production Kubernetes platforms deploy **sandboxed container runtimes** exposed via Kubernetes `RuntimeClass`:
+
+```mermaid
+flowchart TD
+  subgraph Standard["Standard Container (runc)"]
+    APP1[Agent Code] -->|Direct Syscalls| KERNEL1[Shared Host Linux Kernel]
+  end
+  subgraph gVisor["gVisor (runsc)"]
+    APP2[Agent Code] -->|Intercepted Syscalls| SENTRY["Sentry (Go-based Userspace Kernel)"]
+    SENTRY -->|Filtered Syscalls| KERNEL2[Host Linux Kernel]
+  end
+  subgraph Kata["Kata Containers"]
+    APP3[Agent Code] --> KERNEL3["Guest Linux Kernel (Dedicated microVM)"]
+    KERNEL3 --> HYPERVISOR["QEMU / Cloud Hypervisor"]
+    HYPERVISOR --> KERNEL4[Host Linux Kernel]
+  end
+```
+
+| Security Dimension | Standard (`runc`) | gVisor (`runsc`) | Kata Containers |
+|---|---|---|---|
+| **Isolation Level** | Linux namespaces + cgroups | **Process-level virtualization** (Go userspace kernel) | **Hardware virtualization** (dedicated microVM per pod) |
+| **Kernel Boundary** | **Shared with host** (vulnerable to kernel 0-days) | **Independent userspace kernel** (`Sentry`) | **Dedicated guest Linux kernel** |
+| **GPU Acceleration** | Direct pass-through | Supported (gVisor GPU proxy) | Supported (PCIe VFIO pass-through) |
+| **Startup Overhead** | ~100 ms | ~150 ms | ~500 ms – 1 s |
+| **Memory Overhead** | ~10–20 MB | ~30–50 MB | ~150–300 MB per pod |
+| **Best Used For** | Trusted microservices, internal pipelines | **AI Agent code execution, untrusted python scripts** | **Hostile multi-tenant untrusted compute, financial/medical models** |
+
+#### Configuring sandboxed execution in Kubernetes
+
+Platform teams install the gVisor or Kata containerd shim on worker nodes and register a `RuntimeClass`:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+```
+
+Workloads that execute untrusted LLM-generated code simply reference the sandbox in their Pod spec:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-code-interpreter
+  namespace: ch14-team-a
+spec:
+  template:
+    spec:
+      runtimeClassName: gvisor        # Enforces gVisor userspace kernel sandbox
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      containers:
+        - name: python-sandbox
+          image: python:3.11-slim
+          command: ["python", "-c", "import sys; print('Executing untrusted code safely!')"]
+          resources:
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+```
+
+If the Python script attempts an illegal kernel operation, memory corruption exploit, or unauthorized hardware access, the gVisor `Sentry` userspace kernel intercepts and rejects the system call, protecting the physical host and all neighboring workloads.
+
 ## 4. Lab
 
 Layout:

@@ -240,6 +240,53 @@ regardless of whether you ever look at it, and it's a second AWS service to unde
 (IAM permissions, VPC networking for the collector — see Step 4's `# VERIFY` on subnet/security
 group flags).
 
+### 3.3 Production reliability: Critical XID Error taxonomy, Silent Data Corruption (SDC), and Automated Remediation
+
+In large-scale AI infrastructure, GPUs are consumer-density silicon pushed to maximum thermal and electrical limits. In a cluster with 500+ GPUs, **hardware faults are daily occurrences, not exceptional incidents**.
+
+#### The production XID taxonomy: fatal vs transient
+
+When an NVIDIA GPU encounters a fault, the kernel driver emits an **Xid message** to `dmesg` and increments `DCGM_FI_DEV_XID_ERRORS`. Not all XIDs are equal:
+
+| XID Code | Description | Root Cause | Can a Pod Restart Fix It? | Automated Action Required |
+|---|---|---|---|---|
+| **31** | GPU memory page fault | User container illegal memory access or corrupt pointer | **Yes** (workload bug) | Restart pod; alert developer if recurring |
+| **48 / 64** | Uncorrectable double-bit ECC error / Page retirement failed | Physical DRAM defect on the GPU die (flipped bit that ECC cannot heal) | **No** (hardware degradation) | Cordon node, retire memory page, reboot or RMA |
+| **62** | Internal micro-controller halt | Firmware or GSP micro-controller crash inside the GPU | **No** (GPU is frozen) | Node reboot / warm reset |
+| **79** | **GPU has fallen off the bus** | PCIe bus link drop, severe power rail sag, or silicon thermal shutdown | **No** (GPU completely disappeared from OS) | **Fatal**: Cordon immediately, terminate EC2 instance |
+
+> [!CAUTION]
+> **The XID 79 Trap**: When XID 79 occurs, `nvidia-smi` hangs or returns `Unable to determine the device handle for GPU...`. Pods fail with `CUDA error: all CUDA-capable devices are busy or unavailable`. 
+> Kubernetes' default behavior is to restart the container, which fails repeatedly, landing in `CrashLoopBackOff`. Meanwhile, the rest of the node's healthy GPUs sit idle and blocked. **A container restart can never recover a fallen-off-the-bus GPU**.
+
+#### Silent Data Corruption (SDC)
+
+Silent Data Corruption occurs when a hardware defect or cosmic ray flips a bit inside an arithmetic unit (ALU), tensor core, or internal cache **without triggering an ECC error or XID exception**.
+
+- **How it manifests**: The GPU happily continues calculating, but its mathematical calculations are subtly wrong.
+  - In training: Loss suddenly explodes to `NaN` or spikes erratically after thousands of steps.
+  - In inference: The LLM outputs gibberish, hallucinated characters, or fails safety filters.
+- **Detection**: Production platforms run lightweight, periodic diagnostic canary jobs (e.g. running an exact GEMM matrix multiply verification on idle cards) or monitor loss gradient norms across all training ranks. If one node consistently produces diverging gradients, it is cordoned for hardware diagnostics (`dcgmproftester`).
+
+#### Automated node remediation with Node Problem Detector (NPD)
+
+Production teams cannot rely on manual pager alerts to cordon broken GPU nodes at 3 AM. Instead, they run an automated self-healing loop:
+
+```mermaid
+flowchart LR
+  Kernel[Linux Kernel / dmesg] -->|XID 79 / 62 event| NPD[Node Problem Detector]
+  NPD -->|Sets Condition:<br/>GPUHardwareFailure=True| K8sAPI[Kubernetes API]
+  K8sAPI --> Controller[Remediation Controller<br/>e.g. Draino / Karpenter]
+  Controller -->|1. Cordon & Taint| Node[Faulty GPU Node]
+  Controller -->|2. Evict Pods| Pods[User Pods]
+  Controller -->|3. Terminate EC2 Instance| AWS[AWS Auto Scaling / EC2]
+```
+
+1. **Detection**: **Node Problem Detector (NPD)** runs as a DaemonSet with a custom system log monitor watching `/dev/kmsg` for `NVRM: Xid (PCI:...): 79`.
+2. **Flagging**: NPD posts a Node Condition to the Kubernetes API: `GPUHardwareFailure: True`.
+3. **Cordon & Taint**: The node is immediately tainted `node.kubernetes.io/unschedulable:NoSchedule` so no new training or serving pods can land on the broken hardware.
+4. **Drain & Replace**: A remediation controller (such as Draino, Medkit, or Karpenter's automated health checks) drains existing workloads to healthy nodes and instructs AWS to terminate the underlying EC2 instance, triggering the launch of a fresh, verified replacement.
+
 ## 4. Lab
 
 ```bash

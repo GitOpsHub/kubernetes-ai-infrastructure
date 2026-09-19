@@ -261,6 +261,63 @@ request is acceptable. This is why `activationThreshold`, `cooldownPeriod`, and 
 `stabilizationWindowSeconds` in `common/keda/scaledobject-vllm.yaml` are all tuned conservatively —
 flapping between 0 and 1 replicas is far more expensive here than on a typical microservice.
 
+### 3.4 Real-world cold-start mitigation: Headroom over-provisioning and KV-cache saturation scaling
+
+In production, waiting 5–12 minutes for a cold node launch during peak user traffic breaks customer SLAs. Production platform teams combine two essential patterns to solve this:
+
+#### Pattern 1: Warm GPU Headroom / Over-Provisioning (Pause Pods)
+
+To give users sub-minute scale-outs without permanently paying for idle vLLM replicas, production platforms maintain **headroom** using Kubernetes `PriorityClass` preemption:
+
+```mermaid
+flowchart TD
+  subgraph Cluster["Warm GPU Node (Booted, Cached Weights)"]
+    PAUSE["Dummy Pause Pod<br/>(priority: -10, requests: 1 GPU)"]
+  end
+  SCALE["Scale Event:<br/>vLLM pod arrives<br/>(priority: 1000)"] -->|Preempts Pause Pod| Cluster
+  PAUSE -->|Evicted to Pending| KARPENTER["Karpenter launches<br/>next replacement node (bg)"]
+  SCALE --> VLLM["vLLM pod starts on warm node<br/>(0s node wait!)"]
+```
+
+1. **Define two PriorityClasses**:
+   - `high-priority-workload` (`value: 1000`): Assigned to user-facing serving pods (vLLM).
+   - `gpu-headroom` (`value: -10`): Assigned to a dummy over-provisioning pod.
+2. **Run a low-priority Headroom Deployment**:
+   Deploy a minimal pod running `registry.k8s.io/pause:3.9` that requests `nvidia.com/gpu: 1` and has `priorityClassName: gpu-headroom`.
+3. **Instant Preemption**:
+   - The pause pod sits on a live, warm GPU instance.
+   - When KEDA triggers a scale-out, the new vLLM replica (`priority: 1000`) cannot fit, but the Kubernetes scheduler immediately **preempts/evicts** the pause pod.
+   - The vLLM pod schedules onto the already-running GPU node **instantly** (0-second EC2 launch time).
+   - The evicted pause pod drops into `Pending`, which triggers node autoscaling (Karpenter) in the background to provision a fresh buffer node at leisure.
+
+#### Pattern 2: Scaling on KV Cache Saturation (`gpu_cache_usage_factor`)
+
+While queue depth (`vllm:num_requests_waiting`) is an excellent reactive signal, relying on it alone means **scaling starts only after requests are already delayed**. 
+
+vLLM allocates 90% of GPU memory for KV blocks (`gpu_memory_utilization: 0.90`). When concurrent sessions generate long replies, the KV cache fills up. If the cache reaches 100%, vLLM has no room for new tokens and is forced to either:
+- Queue new requests (latency spike).
+- Or abort/re-compute in-flight requests (request preemption).
+
+In high-concurrency production, KEDA `ScaledObject` is configured with a **dual-metric trigger**:
+```yaml
+triggers:
+  # 1. Proactive saturation trigger: scale out when KV cache exceeds 80%
+  - type: prometheus
+    metadata:
+      serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+      metricName: vllm_gpu_cache_usage_factor
+      query: max(vllm:gpu_cache_usage_factor{namespace="ch09-vllm"})
+      threshold: "0.80"
+  # 2. Reactive queue depth trigger: scale out if any requests are waiting
+  - type: prometheus
+    metadata:
+      serverAddress: http://kube-prometheus-stack-prometheus.monitoring:9090
+      metricName: vllm_num_requests_waiting
+      query: sum(vllm:num_requests_waiting{namespace="ch09-vllm"})
+      threshold: "5"
+```
+Scaling on `vllm:gpu_cache_usage_factor > 0.80` starts provisioning new replicas *before* the queue begins backing up, ensuring smooth p99 latency under traffic surges.
+
 ## 4. Lab
 
 ```bash
