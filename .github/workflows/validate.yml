@@ -1,7 +1,8 @@
 # Quality gate every real platform team runs on manifest changes: does every kustomize
-# overlay in the repo still render, are core K8s resources schema-valid, and are the
-# scripts syntactically sound. See scripts/validate-all.sh for what this actually checks
-# (and why CRDs are intentionally skipped, not failed).
+# overlay in the repo still render (for chapters not yet migrated to plain YAML), are core
+# K8s resources -- rendered or plain -- schema-valid, and are the scripts syntactically
+# sound. See scripts/validate-all.sh for what this actually checks (and why CRDs are
+# intentionally skipped, not failed).
 name: validate
 
 on:

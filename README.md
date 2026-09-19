@@ -52,7 +52,7 @@ source env.sh && source versions.env
 | **AWS account** | Admin/owner-level IAM access to create EKS clusters, EC2 instances, and IAM roles |
 | **Budget** | ~$20-50/month for labs (spot discount applies; run cleanup after every session) |
 | **OS** | macOS or Linux (Windows via WSL2) |
-| **Tools** | `kubectl`, `helm`, `kustomize`, `aws` CLI v2, `eksctl`, `k9s`, `jq` -- chapter 00 installs all of these |
+| **Tools** | `kubectl`, `helm`, `aws` CLI v2, `eksctl`, `k9s`, `jq` -- chapter 00 installs all of these |
 | **Python** | Basic familiarity only (chapter 19 has Python sources) |
 
 ---
@@ -71,13 +71,16 @@ source env.sh && source versions.env
 3. **Everything is copy-pasteable** -- each chapter README's Lab section inlines every command with
    an explanation before it and an expected output snippet after it. You never need to open a
    separate script file.
-4. **Apply manifests with kustomize**: `kubectl apply -k NN-chapter/eks` -- the `eks/` overlay adds
-   node selectors, tolerations, and storage classes on top of the cloud-agnostic `common/` base.
+4. **Apply manifests directly**: `kubectl apply -f NN-chapter/eks/some-manifest.yaml` -- every
+   manifest under a chapter's `eks/` folder is plain, self-contained Kubernetes YAML (node selectors,
+   tolerations, and storage classes are written directly into the file); no templating or overlay
+   tool needed. (A handful of chapters haven't been converted from the old kustomize layout yet --
+   CONVENTIONS.md tracks migration status.)
 5. **Clean up after every session.** Each chapter ends with a Cleanup section. Run it. Forgotten
    spot GPU nodes cost real money.
 
 Read [CONVENTIONS.md](CONVENTIONS.md) for the full folder layout and README section contract. Every
-kustomize overlay and shell script in this repo is checked on every PR by
+manifest and shell script in this repo is checked on every PR by
 [`scripts/validate-all.sh`](scripts/validate-all.sh) -- run it locally before you push:
 
 ```bash

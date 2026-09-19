@@ -31,40 +31,49 @@ them on macOS and Linux:
 |---|---|---|
 | `kubectl` | Applying and inspecting Kubernetes resources | **Yes** |
 | `helm` | Installing operators and stacks via Helm charts | **Yes** |
-| `kustomize` | Building chapter overlays (`kubectl apply -k`) | **Yes** |
 | `aws` CLI v2 | AWS account, IAM, quota, budget commands | **Yes** |
 | `eksctl` | Creating and managing EKS clusters and node groups | **Yes** |
 | `jq` / `yq` | Parsing JSON/YAML output in shell snippets | **Yes** |
+| `envsubst` (`gettext`) | Filling `${EKS_CLUSTER}`/`${AWS_REGION}` into `eksctl` config files | **Yes** |
 | `k9s` | Interactive terminal UI for cluster browsing | Optional |
-| `kubeconform` | Schema-validates rendered Kubernetes manifests in CI | Optional (CI uses it) |
+| `kubeconform` | Schema-validates Kubernetes manifests in CI | Optional (CI uses it) |
 | `shellcheck` | Lints shell scripts in CI | Optional (CI uses it) |
 | `terraform` | Required only for chapter 18 (Infrastructure as Code) | Ch18 only |
 
+> **Migration note:** this repo is moving from kustomize base+overlay manifests to plain,
+> self-contained Kubernetes YAML (see below) -- chapter 00 is fully converted and is the reference
+> implementation. Chapters not yet converted still use `kustomize` (`kubectl apply -k`) and a
+> `cpu-lab/` variant; treat kustomize as legacy tooling being phased out, not the current convention.
+
 ---
 
-## Chapter layout
+## Chapter layout (target convention)
 
 ```
 NN-chapter-slug/
 ├── README.md          # theory + lab walkthrough (start here) -- every command is inlined, copy-pasteable
-├── common/            # cloud-agnostic Kubernetes manifests (kustomize base)
-│   └── kustomization.yaml
-├── eks/               # EKS: kustomize overlay, Helm values, eksctl/patch YAML referenced by the README
-└── cpu-lab/           # (optional) no-GPU variant so you can learn before GPU quota arrives
+└── eks/               # plain, self-contained Kubernetes YAML + Helm values + eksctl config referenced by the README
 ```
 
-- Apply a chapter's workloads with `kubectl apply -k NN-slug/eks`. The overlay adds node selectors,
-  tolerations, storage classes, annotations.
+- Every file under `eks/` is a complete, standalone Kubernetes manifest you apply directly with
+  `kubectl apply -f path/to/file.yaml` (or `-f eks/` for a whole directory) -- no templating or overlay
+  tool renders or patches it first. Where a manifest needs an EKS-specific setting (node selector,
+  toleration, storage class), that value is written directly into the file, not layered on by a patch.
+- There is no `cpu-lab/` fallback variant. This course targets real GPU hardware throughout: every
+  chapter's lab runs against the actual EKS cluster from chapter 00, GPU node group included.
 - Helm/eksctl/kubectl operations are inlined directly in each README's Lab section as copy-pasteable
   bash blocks, always with `--version` pinned from [`versions.env`](versions.env) -- there are no
   separate `install.sh`/`create-*.sh` script files to open.
 - Every chapter's README ends with a Cleanup section -- **GPU and spot nodes cost money; tear down when
   done.** (Chapter 18's `eks/cleanup.sh` stays a script: it's a guarded `terraform destroy` wrapper with
   real safety logic, since its `eks/` folder is a Terraform module.)
-- A chapter that needs application code (chapter 19) keeps it under `common/src/`: code built into an
-  image by a build step, and/or scripts mounted into pods via `configMapGenerator`. It lives inside
-  `common/` because kustomize can't reference files outside the kustomization root. Python there is run
-  with [uv](https://docs.astral.sh/uv/) (`uv run` / `uv pip`), never pip, with every dependency pinned.
+- A chapter that needs application code (chapter 19) keeps it under `eks/src/`: code built into an
+  image by a build step, and/or scripts mounted into pods via a plain `ConfigMap` manifest generated
+  ahead of time (`kubectl create configmap ... --from-file --dry-run=client -o yaml`) rather than
+  kustomize's `configMapGenerator`. Python there is run with [uv](https://docs.astral.sh/uv/)
+  (`uv run` / `uv pip`), never pip, with every dependency pinned.
+- Legacy (not-yet-migrated) chapters keep their old `common/` (kustomize base) + `eks/` (kustomize
+  overlay) + `cpu-lab/` (no-GPU variant) layout until converted.
 
 ---
 
@@ -114,9 +123,10 @@ README for the full list of values to substitute.
 
 ## Validation
 
-Every kustomize overlay and shell script in the repo is checked by
-[`scripts/validate-all.sh`](scripts/validate-all.sh) -- the same script CI runs on every PR
-([`.github/workflows/validate.yml`](.github/workflows/validate.yml)). Run it before you push:
+Every manifest (plain YAML or, for not-yet-migrated chapters, kustomize overlay) and every shell
+script in the repo is checked by [`scripts/validate-all.sh`](scripts/validate-all.sh) -- the same
+script CI runs on every PR ([`.github/workflows/validate.yml`](.github/workflows/validate.yml)). Run
+it before you push:
 
 ```bash
 ./scripts/validate-all.sh
@@ -124,13 +134,16 @@ Every kustomize overlay and shell script in the repo is checked by
 
 The script runs four checks:
 
-1. **kustomize build** -- every overlay renders without error (`kubectl kustomize`)
-2. **kubeconform** -- schema-validates core Kubernetes resources in the rendered output; CRDs are
-   intentionally skipped (see script header for why). Install: `brew install kubeconform` or
-   https://github.com/yannh/kubeconform (optional but recommended).
+1. **kustomize build** -- every remaining overlay renders without error (`kubectl kustomize`); plain
+   YAML chapters have no `kustomization.yaml` and are skipped in this step (they're covered in step 2
+   instead)
+2. **kubeconform** -- schema-validates core Kubernetes resources, both from rendered overlay output
+   and directly from plain-YAML manifest files; CRDs are intentionally skipped (see script header for
+   why). Install: `brew install kubeconform` or https://github.com/yannh/kubeconform (optional but
+   recommended).
 3. **Shell scripts** -- `bash -n` syntax check + `shellcheck` lint (shellcheck optional:
    `brew install shellcheck`). Every `.sh` file tracked by git must also be executable (`chmod +x`).
 4. **Terraform** -- `terraform fmt -check` and `terraform validate` for chapter 18's module
    (optional if you haven't touched chapter 18; install: https://developer.hashicorp.com/terraform/install).
 
-It renders every overlay (`kubectl kustomize`) and never touches a live cluster or cloud account.
+It never touches a live cluster or cloud account.

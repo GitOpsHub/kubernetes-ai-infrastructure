@@ -8,17 +8,19 @@ A hands-on course teaching Kubernetes for AI workloads (GPU scheduling, training
 autoscaling, cost) to a DevOps audience. It is not an application in the product sense — there's no app
 to build or ship — but the repo does carry a real CI/validation layer (see below), so "no test suite"
 no longer applies. The "product" is a sequence of 20 numbered chapters (`00-prerequisites-and-cluster-setup`
-through `19-llm-pipelines-huggingface-langchain`), each a self-contained lab with Kubernetes manifests,
-Helm values, and an **EKS**-only overlay. Every operational step (cluster/nodegroup creation, Helm
-installs, scale/cleanup) is inlined as copy-pasteable bash in the chapter's README — there are no
-per-chapter `create-*.sh`/`install-*.sh` script files to open. Chapter 18 is the one exception — its
-`eks/` folder is a Terraform module instead of a kustomize overlay, see its README for why (it also
-keeps a real `cleanup.sh`, a guarded `terraform destroy` wrapper — that one stays a script because the
-safety guard is the point). Chapter 19 is the only chapter that carries Python sources: `common/src/`
-holds the trainer code (built into an image) and PEP 723 `uv run` scripts (mounted into pods via
-kustomize `configMapGenerator`, which is why they live inside the chapter's `common/` kustomization
-root). Read [README.md](README.md) for the course map and [CONVENTIONS.md](CONVENTIONS.md) for the
-full chapter layout contract before adding or editing a chapter.
+through `19-llm-pipelines-huggingface-langchain`), each a self-contained lab with **plain, self-contained
+Kubernetes YAML manifests** (no kustomize, no templating), Helm values, and an **EKS**-only `eks/`
+folder. Every operational step (cluster/nodegroup creation, Helm installs, scale/cleanup) is inlined as
+copy-pasteable bash in the chapter's README — there are no per-chapter `create-*.sh`/`install-*.sh`
+script files to open. Chapter 18 is the one exception — its `eks/` folder is a Terraform module instead
+of plain manifests, see its README for why (it also keeps a real `cleanup.sh`, a guarded
+`terraform destroy` wrapper — that one stays a script because the safety guard is the point). Chapter 19
+is the only chapter that carries Python sources: `eks/src/` holds the trainer code (built into an image)
+and PEP 723 `uv run` scripts (mounted into pods via a plain `ConfigMap` manifest, not kustomize's
+`configMapGenerator`). Read [README.md](README.md) for the course map and
+[CONVENTIONS.md](CONVENTIONS.md) for the full chapter layout contract before adding or editing a
+chapter — CONVENTIONS.md also tracks which chapters are still on the legacy kustomize+`cpu-lab/` layout
+pending migration (only `00-prerequisites-and-cluster-setup` is converted so far).
 
 The repo also publishes a Docusaurus docs site from `website/` (see "Docs website" below) and a
 research/notes file, [AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md](AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md),
@@ -40,10 +42,14 @@ together — don't let them drift.
 
 ```bash
 # Repo-wide check — same thing CI runs on every PR touching yaml/yml/sh
-# (kustomize build, kubeconform on core resources, shellcheck/bash -n, terraform fmt+validate for ch18)
+# (kustomize build for legacy chapters, kubeconform on core resources — both rendered and plain
+# YAML —, shellcheck/bash -n, terraform fmt+validate for ch18)
 ./scripts/validate-all.sh
 
-# Validate a single chapter overlay renders without error
+# Validate a single plain-YAML chapter's manifest (e.g. chapter 00)
+kubeconform -summary -ignore-missing-schemas <chapter>/eks/*.yaml
+
+# Validate a single not-yet-migrated chapter's overlay renders without error
 kubectl kustomize <chapter>/<cloud>       # cloud = common | eks | cpu-lab
 
 # Validate a Helm values file against the real chart (don't hand-verify field names from memory)
@@ -67,20 +73,27 @@ cost real money the moment they're created.
 
 ## Repo-wide invariants (see CONVENTIONS.md for full detail)
 
-- **Every hands-on resource targets EKS**: a cloud-agnostic `common/` kustomize base, overlaid by `eks/`
-  (node selectors, tolerations, storage classes). Most chapters also ship a `cpu-lab/` variant so the
-  mechanics can be learned without GPU quota.
+- **Every hands-on resource targets EKS**: plain, self-contained Kubernetes YAML under each chapter's
+  `eks/` folder (node selectors, tolerations, storage classes written directly into the manifest, no
+  overlay/patch layer). There is no `cpu-lab/` fallback variant — this course targets real GPU hardware
+  throughout. **Migration in progress**: only `00-prerequisites-and-cluster-setup` is converted so far;
+  chapters not yet migrated still use the legacy `common/` kustomize base + `eks/` overlay + `cpu-lab/`
+  layout described below until they're converted — check CONVENTIONS.md for current status before
+  assuming either layout for a given chapter.
 - **Spot capacity is the default**, on-demand is the documented fallback. EKS does not auto-taint spot
   node groups — add the taint yourself if you want workloads to require an explicit toleration. Get this
   wrong and pods silently stay Pending, or land on spot nodes unintentionally.
-- **Chapter layout is fixed**: `README.md`, `common/`, `eks/`, optional `cpu-lab/`. The README's Lab
-  section inlines every command (no separate `install.sh`/`create-*.sh` files). New chapters must follow
-  this shape exactly — see CONVENTIONS.md's directory tree and the required README sections (Why it
-  matters, objectives + time plan, concepts with a diagram, lab steps, spot considerations,
-  troubleshooting, cleanup/cost notes, checkpoint questions, further reading + versions tested).
-- **Kustomize file references must stay inside the kustomization root.** `configMapGenerator`/`secretGenerator`
-  `files:` cannot point outside the directory containing `kustomization.yaml` (kustomize's security
-  policy rejects it) — copy the file in rather than reaching up with `../../`.
+- **Chapter layout (target convention) is fixed**: `README.md`, `eks/` only. The README's Lab section
+  inlines every command (no separate `install.sh`/`create-*.sh` files) and applies manifests directly
+  with `kubectl apply -f`. New chapters must follow this shape — see CONVENTIONS.md's directory tree and
+  the required README sections (Why it matters, objectives + time plan, concepts with a diagram, lab
+  steps, spot considerations, troubleshooting, cleanup/cost notes, checkpoint questions, further reading
+  + versions tested).
+- **Legacy chapters** (not yet migrated) keep `README.md`, `common/` (kustomize base), `eks/` (kustomize
+  overlay), optional `cpu-lab/`. Kustomize file references there must stay inside the kustomization
+  root — `configMapGenerator`/`secretGenerator` `files:` cannot point outside the directory containing
+  `kustomization.yaml` (kustomize's security policy rejects it) — copy the file in rather than reaching
+  up with `../../`. Don't add new kustomize usage to a chapter already converted to plain YAML.
 - **Accuracy over recall for API versions/flags.** Several pinned components are on APIs newer or more
   volatile than typical training data (Kueue `kueue.x-k8s.io/v1beta2`, Kubeflow Trainer v2 `TrainJob`/
   `ClusterTrainingRuntime`, KServe's alpha `LLMInferenceService`, Gateway API Inference Extension

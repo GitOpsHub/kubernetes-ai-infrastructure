@@ -54,25 +54,23 @@ surprise bill, or the spot pool can't get capacity. This chapter handles that up
   actually stop the spend. Treat "set up the budget alert" as mandatory, not optional, especially if
   this is a personal account with a card attached to it.
 
-## 2. Learning objectives and time plan (~3 h)
+## 2. Learning objectives and time plan (~2.5 h)
 
 By the end you can:
 
-1. Install and check the CLI toolchain (kubectl, helm, kustomize, aws/eksctl, k9s).
+1. Install and check the CLI toolchain (kubectl, helm, aws/eksctl, k9s).
 2. Explain which EC2 quotas limit **spot** GPUs and file increase requests.
 3. Create a spot-first EKS cluster: a spot CPU node group plus a spot GPU node group at 0 nodes.
 4. Set up an AWS Budget alert.
-5. Advertise a fake `nvidia.com/gpu` on a CPU node and explain what the scheduler does with it and
-   what it can't do.
+5. Scale the GPU node group up from zero and confirm a real GPU node joins the cluster.
 
 | Time | Activity |
 |---|---|
 | 0:00–0:30 | Read sections 3–4. Install and verify tools (Step 1) |
 | 0:30–1:00 | Quota check + request (do this first; it takes time to approve) |
 | 1:00–1:15 | Budget (Step 3) |
-| 1:15–2:15 | Create the cluster, then run the spot smoke test |
-| 2:15–2:45 | Fake-GPU lab (`cpu-lab/`) |
-| 2:45–3:00 | Checkpoint questions, cleanup |
+| 1:15–2:15 | Create the cluster, spot smoke test, scale the GPU group up and back down |
+| 2:15–2:30 | Checkpoint questions, cleanup |
 
 ## 3. Concepts
 
@@ -218,8 +216,6 @@ touch a cloud API. A quick who's-who, since none of these names are self-explana
   inspect, delete resources). This is the tool you'll type most often in this entire course.
 - **`helm`** — a package manager for Kubernetes, similar in spirit to `apt`/`brew` but for Kubernetes
   applications ("charts"). Later chapters install things like monitoring stacks via Helm.
-- **`kustomize`** — a way to compose/patch plain Kubernetes YAML files without templating (this repo
-  uses it for every chapter's manifests, including this one's `eks/` and `cpu-lab/` folders).
 - **`aws` (AWS CLI v2)** — the general-purpose command line for AWS itself (IAM, quotas, budgets, EC2
   — anything that isn't specifically Kubernetes).
 - **`eksctl`** — a higher-level CLI, maintained by AWS, specifically for creating/managing EKS
@@ -230,20 +226,27 @@ touch a cloud API. A quick who's-who, since none of these names are self-explana
 
 macOS (Homebrew):
 ```bash
-brew install kubernetes-cli helm kustomize k9s jq yq awscli eksctl
+brew install kubernetes-cli helm k9s jq yq awscli eksctl gettext
 ```
 Linux: follow the official installers —
 [kubectl](https://kubernetes.io/docs/tasks/tools/), [helm](https://helm.sh/docs/intro/install/),
-[kustomize](https://kubectl.docs.kubernetes.io/installation/kustomize/),
 [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html),
 [eksctl](https://eksctl.io/installation/), [k9s](https://k9scli.io/topics/install/) (optional).
+`gettext` provides `envsubst`, used in Step 4 below; most Linux distros already have it.
+
+> This course ships **plain Kubernetes YAML** — every manifest under `eks/` is a complete,
+> self-contained file you apply directly with `kubectl apply -f`. There's no templating or overlay tool
+> to install for the manifests themselves (only `envsubst`, used once in Step 4 to fill in your cluster
+> name/region inside `eks/cluster.yaml`, which is an `eksctl` config file, not a Kubernetes manifest).
+> This course targets real GPU hardware throughout, so there's no CPU-only fallback lab either — every
+> chapter's lab runs against the actual EKS cluster you create in Step 4.
 
 Now verify every tool actually landed on your shell's `PATH` (the list of directories your shell
 searches when you type a command name) — it's much cheaper to catch a missing/misnamed tool here than
 three steps into cluster creation:
 
 ```bash
-for t in kubectl helm kustomize aws eksctl k9s jq; do
+for t in kubectl helm aws eksctl k9s jq; do
   command -v "$t" >/dev/null 2>&1 && printf "%-10s OK   %s\n" "$t" "$(command -v "$t")" \
                                    || printf "%-10s MISSING\n" "$t"
 done
@@ -395,12 +398,13 @@ group is still at 0 nodes on purpose (see section 3.1).
 
 What you're about to do: deploy a trivial workload and try to scale it past what the CPU node group
 can hold, to see with your own eyes what "no autoscaler" actually looks like before you rely on that
-fact in later chapters. `kubectl apply -k <dir>` means "apply the kustomize-built manifests in this
-directory" — `-k` tells `kubectl` to run them through `kustomize` first (see section 4, Step 1, tool
-list).
+fact in later chapters. Every manifest in this course is plain Kubernetes YAML — no templating or
+overlay tool involved — so you apply the namespace first, then the workload, with plain `kubectl apply
+-f`:
 
 ```bash
-kubectl apply -k 00-prerequisites-and-cluster-setup/eks
+kubectl apply -f 00-prerequisites-and-cluster-setup/eks/namespace.yaml
+kubectl apply -f 00-prerequisites-and-cluster-setup/eks/spot-smoke-deployment.yaml
 kubectl -n ch00-setup get pods -o wide
 # Ask for 12 copies of the same tiny Pod - far more than the 1-4 node CPU pool can actually fit.
 kubectl -n ch00-setup scale deploy/spot-smoke --replicas=12
@@ -412,88 +416,44 @@ beyond what already-running nodes can fit will sit in `Pending` state indefinite
 instances will appear on their own. That's the exact mechanism you'll rely on being *fixed* once you
 install an autoscaler in chapter 13 — for now, seeing it *not* happen is the point of this smoke test.
 
-### Step 6: Fake-GPU scheduling lab (works on any cluster, even kind/minikube)
+### Step 6: Scale the GPU node group up (and back down)
 
-Based on the official task [Advertise Extended Resources for a Node](https://kubernetes.io/docs/tasks/administer-cluster/extended-resource-node/).
-Extended resources are **opaque integers** to the scheduler — Kubernetes doesn't know or care that
-`nvidia.com/gpu` means "a GPU"; it just treats it as a countable thing a node has some quantity of, and
-matches Pod requests against it, the same way it matches `cpu`/`memory` requests. The device plugin
-(chapter 01) normally reports `nvidia.com/gpu` through the kubelet automatically; here we write it into
-node status **by hand**, so you can practice GPU scheduling mechanics (taints, requests, `Pending`
-reasons) today, on a plain CPU node, without waiting for GPU quota approval or paying for a GPU
-instance.
-
-What you're about to do: patch a CPU node's status to advertise a fake `nvidia.com/gpu: 2`, label and
-taint it like a real GPU node, then schedule pods against it.
+This course targets real GPU clusters end to end — this step proves the `spot-gpu` node group
+actually works before you build on it in chapter 01, by manually scaling it from 0 to 1 the same way
+you'll do throughout this chapter's "no autoscaler yet" world (see the diagram in section 3.1).
+Chapter 01 is where you install the NVIDIA device plugin and actually request `nvidia.com/gpu` from a
+Pod — this step only proves the node group can launch a node at all, so a quota or spot-capacity
+problem (section 3.2/5) surfaces here, in a throwaway step, rather than mid-way through chapter 01.
 
 ```bash
-NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
-COUNT=2
-RESOURCE=nvidia.com/gpu
-ESCAPED="${RESOURCE//\//~1}"   # JSON Pointer escaping: "/" -> "~1"
-
-# Safety: refuse to touch a node that already looks like a real GPU node.
-kubectl get node "$NODE" -o jsonpath='{.metadata.labels}' | grep -qE 'nvidia.com/gpu.present|workload":"gpu' \
-  && { echo "Refusing: $NODE looks like a real GPU node."; exit 1; }
-
-# --subresource=status: node "status" (what capacity/condition a node reports) is a separate
-# sub-resource from node "spec" (what it's configured to be). Normally only the kubelet is allowed
-# to write status; we're impersonating it here for the sake of the exercise.
-# --type=json with an "add" op is a JSON Patch: a precise, surgical edit to one field, as opposed to
-# replacing the whole object.
-kubectl patch node "$NODE" --subresource=status --type=json \
-  -p "[{\"op\":\"add\",\"path\":\"/status/capacity/${ESCAPED}\",\"value\":\"${COUNT}\"}]"
-kubectl label node "$NODE" fake-gpu=true --overwrite
-# Add the same taint a real GPU node group carries (section 3.1), so scheduling behaves the same way
-# a real GPU node would: only Pods with a matching toleration are allowed onto it.
-kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule --overwrite
-kubectl get node "$NODE" -o jsonpath="{.status.capacity}{'\n'}{.status.allocatable}{'\n'}"
+: "${EKS_CLUSTER:?}" "${AWS_REGION:?}"
+# Raise both desired and min so the node group actually launches an instance and won't be
+# immediately scaled back down by eksctl reconciling to the old desired count.
+eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" \
+  --name spot-gpu --nodes 1 --nodes-min 1
+# Node boot + the AL2023 NVIDIA AMI's driver init + image pulls take a few minutes on first launch
+# (section 5) - keep watching until the new node shows Ready.
+kubectl get nodes -L eks.amazonaws.com/nodegroup,eks.amazonaws.com/capacityType -w
 ```
+Expected output (Ctrl-C once you see it):
 ```
-{"cpu":"4","ephemeral-storage":"...","memory":"...","nvidia.com/gpu":"2","pods":"110"}
-{"cpu":"3920m",...,"nvidia.com/gpu":"2",...}
+NAME                           STATUS   NODEGROUP   CAPACITYTYPE
+ip-192-168-77-21.ec2.internal  Ready    spot-gpu    SPOT
 ```
+How to tell this worked: a third node appears with `NODEGROUP=spot-gpu`. Confirm the taint from
+section 3.1 landed too:
 ```bash
-kubectl apply -k 00-prerequisites-and-cluster-setup/cpu-lab
-kubectl -n ch00-setup get pods -l app=fake-gpu-consumer
-kubectl -n ch00-setup describe pod -l app=fake-gpu-consumer | grep -A3 Events
-kubectl describe node "$NODE" | grep -A8 "Allocated resources"
+kubectl describe node -l eks.amazonaws.com/nodegroup=spot-gpu | grep -A1 Taints
 ```
-```
-fake-gpu-consumer-7c9d8-2x4mz   1/1   Running
-fake-gpu-consumer-7c9d8-8kq2n   1/1   Running
-fake-gpu-consumer-7c9d8-tl5vw   0/1   Pending
-  Warning  FailedScheduling  0/3 nodes are available: 1 Insufficient nvidia.com/gpu, 2 node(s) didn't match Pod's node affinity/selector.
-  nvidia.com/gpu     2          2
-```
-Two Pods land (you advertised `nvidia.com/gpu: 2`, and this manifest's Pods each request 1), the third
-is `Pending` for exactly the reason a real over-subscribed GPU node would reject it: not enough of the
-resource left. This is the scheduler's normal bin-packing behavior — nothing here is fake except the
-resource itself.
-
-Things to try: delete the toleration (the pod is rejected by the taint), request `nvidia.com/gpu: 0.5`
-(the API server rejects it because extended resources must be integers), set `requests` ≠ `limits`
-(rejected: no overcommit).
-
-Cleanup (always run this when finished):
+Expected: `nvidia.com/gpu=present:NoSchedule`. Now scale it back to 0 — you're not running any GPU
+workload yet, so there's no reason to keep paying for it:
 ```bash
-kubectl delete -k 00-prerequisites-and-cluster-setup/cpu-lab
-# Remove the fake capacity/label/taint so the node goes back to being an ordinary CPU node — otherwise
-# it stays marked as a "GPU" node indefinitely and later chapters' scheduling could get confused by it.
-kubectl patch node "$NODE" --subresource=status --type=json \
-  -p "[{\"op\":\"remove\",\"path\":\"/status/capacity/${ESCAPED}\"}]" || true
-kubectl label node "$NODE" fake-gpu- || true
-kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule- || true
+eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" \
+  --name spot-gpu --nodes 0 --nodes-min 0
+kubectl get nodes -L eks.amazonaws.com/nodegroup -w
 ```
-
-**Caveats: what doesn't carry over**
-- No device is injected. `nvidia-smi` and CUDA fail. Only the scheduling mechanics (requests, taints, Pending reasons, bin-packing) carry over.
-- The patch lives in node status only. Replacing a node (spot preemption, autoscaler scale-down, upgrade, node
-  re-registration) loses it. A kubelet restart may zero extended resources it doesn't own.
-- Don't use this on a node that runs a real device plugin. The kubelet will overwrite it, and you'd corrupt accounting.
-- The autoscaler doesn't know the "GPU" exists, so a Pending fake-GPU pod **won't** trigger a scale-up.
-  On a managed cluster, prefer a custom name such as `RESOURCE=example.com/fake-gpu` if you don't want
-  any tool (e.g. cost dashboards) to treat the node as a GPU node.
+How to tell this worked: the `spot-gpu` node disappears from `kubectl get nodes` within a minute or
+two of the instance terminating.
 
 ## 5. Spot considerations for this chapter
 
@@ -512,7 +472,7 @@ kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule- || true
 |---|---|---|
 | Nodegroup `CREATE_FAILED` `MaxSpotInstanceCountExceeded` / `VcpuLimitExceeded` | Your account's `L-3819A6DF` spot G/VT vCPU quota (section 3.2) is lower than what the GPU node group is trying to launch — most commonly it's still the default `0`. | Request an increase (Step 2); meanwhile keep GPU group at 0 so cluster creation itself still succeeds |
 | Spot group stuck `desired 1 / 0 running`, `InsufficientInstanceCapacity` | Quota is fine, but AWS currently has no spare spot capacity for those instance types in your AZs — this is a supply problem, not a permissions problem, and can resolve itself minutes later or persist for hours. | Add more instance types (`g6.2xlarge`, `g5.xlarge`), try other AZs/regions, or fall back to on-demand (section 5) |
-| Fake GPU vanished | The node it was patched onto was replaced (spot interruption, upgrade) or the kubelet reconciled/overwrote node status on restart — the patch in Step 6 was never persistent, by design. | Re-run the fake-GPU patch (Step 6) |
+| `eksctl scale nodegroup` for `spot-gpu` succeeds but no node appears | Quota or spot-capacity problem — see the troubleshooting rows above; a scale command can return immediately even though the underlying ASG can't actually launch an instance. | `eksctl get nodegroup --cluster "$EKS_CLUSTER" --name spot-gpu` and check the ASG's activity history in the EC2 console for the real error |
 | `eksctl create cluster` fails with an IAM/permissions error | The AWS identity you're using doesn't have enough IAM permission to create the VPC/IAM roles/EKS resources eksctl needs. | Use an admin/owner role, or ask whoever manages the account for the missing permissions; re-run once granted (eksctl is safe to re-run — it picks up where CloudFormation left off) |
 | `kubectl` commands hang or say "Unable to connect to the server" | Your local kubeconfig (section 3.0) doesn't point at this cluster, or your AWS credentials used to authenticate have expired. | Re-run `aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"`, and re-authenticate (`aws configure sso login` or re-run `aws configure`) if your session token expired |
 
@@ -524,9 +484,10 @@ kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule- || true
 > most common way a learning account ends up with a surprise charge.
 
 ```bash
-kubectl delete -k 00-prerequisites-and-cluster-setup/eks --ignore-not-found
+kubectl delete -f 00-prerequisites-and-cluster-setup/eks/spot-smoke-deployment.yaml --ignore-not-found
+kubectl delete -f 00-prerequisites-and-cluster-setup/eks/namespace.yaml --ignore-not-found
 # Belt-and-suspenders: explicitly force the GPU node group back to 0 running nodes even if it already
-# should be, in case you scaled it up manually while experimenting.
+# should be, in case you left it scaled up after Step 6.
 eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name spot-gpu --nodes 0 --nodes-min 0
 ```
 Full teardown (control plane costs ~USD 0.10/h even with zero nodes — that's a small but real,
@@ -549,9 +510,8 @@ them by hand in the AWS console or CLI.
 1. Why is a spot GPU node group configured with min 0, and what latency does that add?
 2. Which EC2 quota must be ≥1 to start one spot G/VT GPU node, and what unit is it measured in?
 3. EKS: the GPU node group has `minSize: 0`. What scales it up when a GPU pod is Pending in this chapter's setup?
-4. What exactly does the fake-GPU patch change, and which component normally writes that field?
-5. Name two things that silently remove a fake extended resource.
-6. Why must `nvidia.com/gpu` requests equal limits and be integers?
+4. What taint does the `spot-gpu` node group carry, and what stops it from blocking the device plugin DaemonSet chapter 01 installs?
+5. Why do we scale `spot-gpu` back to 0 immediately after Step 6, instead of leaving it at 1 for chapter 01?
 
 <details>
 <summary>Answers</summary>
@@ -559,9 +519,8 @@ them by hand in the AWS console or CLI.
 1. Idle GPUs are the biggest cost. Min 0 means you pay nothing when idle. The cost is a cold start: node provisioning, driver load (baked into the AMI) and image pull, often 3–10 minutes.
 2. `L-3819A6DF` (All G and VT Spot Instance Requests), measured in vCPUs — one `g6.xlarge`/`g4dn.xlarge` is 4 vCPUs.
 3. Nothing. EKS has no autoscaler by default. You scale the managed node group (`eksctl scale nodegroup`) or install Cluster Autoscaler/Karpenter (chapter 13).
-4. It adds `nvidia.com/gpu: N` to `.status.capacity` (and so to allocatable). Normally the kubelet sets it from what a device plugin registered.
-5. Node replacement (spot preemption, scale-down, upgrade) and kubelet re-registration/reconciliation. A real device plugin on the node would also overwrite it.
-6. Extended resources can't be overcommitted or split. The scheduler counts whole devices, so request must equal limit (or limit only) and be an integer.
+4. `nvidia.com/gpu=present:NoSchedule`. A DaemonSet (like the device plugin) can carry a matching toleration in its Pod spec so it still lands on every node regardless of taints — ordinary Deployments without that toleration are the ones kept off.
+5. It's still just an untainted-by-workload node group at this point — nothing in this chapter runs a GPU Pod, so leaving it at 1 would only accrue cost with no learning benefit. Chapter 01 scales it back up itself once it actually needs a GPU.
 </details>
 
 ## 9. Further reading and versions tested
@@ -570,7 +529,7 @@ them by hand in the AWS console or CLI.
 - Kubernetes: [Advertise Extended Resources for a Node](https://kubernetes.io/docs/tasks/administer-cluster/extended-resource-node/)
 - New to Kubernetes entirely? The official [Kubernetes Basics tutorial](https://kubernetes.io/docs/tutorials/kubernetes-basics/) and [Concepts overview](https://kubernetes.io/docs/concepts/overview/) are good, vendor-neutral background before or alongside this course.
 
-**Versions tested** (2026-09-16): Kubernetes 1.35 (EKS `version: "1.35"`), eksctl v0.230.0 schema, kubectl 1.36 client / kustomize v5.8.1, images `registry.k8s.io/pause:3.10.1`, `busybox:1.37.0`.
+**Versions tested** (2026-09-19): Kubernetes 1.35 (EKS `version: "1.35"`), eksctl v0.230.0 schema, kubectl 1.36 client, image `registry.k8s.io/pause:3.10.1`.
 
 ---
 

@@ -1,10 +1,11 @@
 # Tiny workload used to prove that (a) the spot CPU pool accepts pods and
 # (b) the cluster autoscaler adds a node when requests don't fit.
-# Overlays add the cloud-specific spot nodeSelector / toleration.
+# nodeSelector below pins it to spot nodes specifically (see README section 3.1/4 Step 5).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: spot-smoke
+  namespace: ch00-setup
   labels:
     app: spot-smoke
 spec:
@@ -17,6 +18,8 @@ spec:
       labels:
         app: spot-smoke
     spec:
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
       terminationGracePeriodSeconds: 25   # spot notice is ~30s on all three clouds
       containers:
       - name: pause
