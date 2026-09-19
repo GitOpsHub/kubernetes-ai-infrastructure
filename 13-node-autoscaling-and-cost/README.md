@@ -141,8 +141,8 @@ By the end you can:
 | Time | Activity |
 |---|---|
 | 0:00–0:35 | Read section 3. Read `eks/nodepool.yaml` and `eks/ec2nodeclass.yaml` |
-| 0:35–1:15 | Install Karpenter. Deploy `common/`, scale `scale-demo` up, time the Pending→Running gap |
-| 1:15–1:45 | Force a spot-exhausted scenario (limit instance types to 1, request more GPUs than available) and watch fallback |
+| 0:35–1:15 | Install Karpenter. Apply `eks/namespace.yaml` + `eks/scale-demo.yaml`, scale `scale-demo` up, time the Pending→Running gap |
+| 1:15–1:45 | Force a spot-exhausted scenario (limit instance types to 1, request more GPUs than available) and watch fallback; force a second GPU node (Step 4) |
 | 1:45–2:15 | Image streaming/preloading (section 6): compare cold-start with/without |
 | 2:15–2:45 | Cost visibility tour (section 7): label-based cost allocation, the tools each cloud gives you |
 | 2:45–3:00 | Checkpoint questions, cleanup (scale to 0, confirm nodes actually disappear) |
@@ -211,7 +211,7 @@ side by side with this table — every field either object sets and why it's the
 | `nodepool.yaml` | `nodeClassRef` | Which `EC2NodeClass` supplies the AMI/IAM/networking for nodes from this pool — both pools here point at the same `gpu` class |
 | `nodepool.yaml` | `requirements[karpenter.sh/capacity-type]` | Restricts this pool to `spot` (in `gpu-spot`) or `on-demand` (in `gpu-ondemand`) — this is what makes "spot-first" a ranked choice between two pools rather than a single flag |
 | `nodepool.yaml` | `requirements[node.kubernetes.io/instance-type]` | The allowed instance shapes — `gpu-spot` lists two (`g6.xlarge`, `g4dn.xlarge`) for diversification; `gpu-ondemand` lists one, since it's a guaranteed fallback, not trying to be cheap |
-| `nodepool.yaml` | `taints` | Every node this pool launches carries `nvidia.com/gpu=present:NoSchedule` so only Pods with the matching toleration (chapter 01's pattern) land on an expensive GPU node — `common/scale-demo.yaml`'s Pod spec has this toleration already |
+| `nodepool.yaml` | `taints` | Every node this pool launches carries `nvidia.com/gpu=present:NoSchedule` so only Pods with the matching toleration (chapter 01's pattern) land on an expensive GPU node — `eks/scale-demo.yaml`'s Pod spec has this toleration already |
 | `nodepool.yaml` | `disruption.consolidationPolicy` / `consolidateAfter` | Controls the "Consolidate" arrow in the diagram above — `WhenEmptyOrUnderutilized` + `5m` means Karpenter looks for bin-packing opportunities, not just fully-idle nodes, and waits 5 minutes of idleness before acting |
 | `nodepool.yaml` | `limits` | A **hard cap** (CPU and GPU count) on how much this pool can ever provision at once — section 6 explains why this is the cheapest insurance policy in the whole chapter |
 | `nodepool.yaml` | `weight` | Tie-breaks which pool Karpenter tries first when both could satisfy a Pod — higher wins; `gpu-spot: 10` beats `gpu-ondemand: 1` |
@@ -311,8 +311,8 @@ back here — it almost always means a fresh shell that never sourced `env.sh`.
 ### Step 1: Install Karpenter and apply the NodePool/EC2NodeClass pair
 
 What you're about to do: install the Karpenter controller via Helm (pinned from `versions.env`),
-then apply the `EC2NodeClass`/`NodePool` pair — cluster-scoped, so applied directly here rather
-than via `kubectl apply -k`, after `envsubst` fills in `${EKS_CLUSTER}`. This assumes the
+then apply the `EC2NodeClass`/`NodePool` pair — cluster-scoped, so applied directly with
+`kubectl apply -f`, after `envsubst` fills in `${EKS_CLUSTER}`. This assumes the
 Karpenter IAM role/instance profile + SQS interruption queue already exist (out of scope for a
 manifests-only chapter; see the Karpenter EKS getting-started guide in Further Reading for
 `eksctl create iamserviceaccount` / CloudFormation prerequisites, or use
@@ -335,7 +335,8 @@ helm upgrade --install karpenter oci://public.ecr.aws/karpenter/karpenter \
 
 envsubst < 13-node-autoscaling-and-cost/eks/ec2nodeclass.yaml | kubectl apply --server-side -f -
 envsubst < 13-node-autoscaling-and-cost/eks/nodepool.yaml     | kubectl apply --server-side -f -
-kubectl apply -k 13-node-autoscaling-and-cost/eks
+kubectl apply -f 13-node-autoscaling-and-cost/eks/namespace.yaml
+kubectl apply -f 13-node-autoscaling-and-cost/eks/scale-demo.yaml
 
 kubectl get nodepools.karpenter.sh
 ```
@@ -354,14 +355,16 @@ What each part of that block is doing, in order:
   in the repo instead of your account-specific cluster name. `--server-side` asks the API server (not
   your local `kubectl`) to compute the merge/patch, which handles Karpenter's CRDs more reliably than
   client-side apply.
-- These two objects are applied directly with `kubectl apply -f -` rather than through
-  `kubectl apply -k eks` because they're cluster-scoped (no namespace) and need the `envsubst`
-  substitution step first — kustomize's `configMapGenerator`/patches aren't the right tool for
-  "replace this one placeholder with an env var," so the repo just pipes them through `envsubst`
-  directly, the same pattern chapter 05 uses for its cloud-specific scripts.
-- `kubectl apply -k 13-node-autoscaling-and-cost/eks` applies everything else in this chapter's EKS
-  overlay (the namespace and the `scale-demo` workload, imported from `common/`) — ordinary
-  namespaced kustomize apply, no `envsubst` needed for those.
+- These two objects are applied directly with `kubectl apply -f -` rather than through a plain
+  `kubectl apply -f eks/` sweep because they're cluster-scoped (no namespace) and need the `envsubst`
+  substitution step first — plain YAML doesn't have a templating mechanism of its own, so the repo
+  just pipes them through `envsubst` directly, the same pattern chapter 05 uses for its
+  cloud-specific scripts.
+- `kubectl apply -f 13-node-autoscaling-and-cost/eks/namespace.yaml` then
+  `kubectl apply -f 13-node-autoscaling-and-cost/eks/scale-demo.yaml` apply everything else in this
+  chapter's EKS manifests (the namespace, then the `scale-demo` workload) — every remaining file
+  under `eks/` is a complete, standalone manifest with its `metadata.namespace` set, so the
+  namespace has to exist first, same order as chapter 00's Step 5.
 
 **Expected output**: Karpenter `${KARPENTER_VERSION}` installed; a `kubectl get nodepools.karpenter.sh`
 table showing `gpu-spot` (weight 10) and `gpu-ondemand` (weight 1).
@@ -375,7 +378,7 @@ controller `Running`.
 What you're about to do: scale the idle `scale-demo` Deployment from 0 to 2 replicas and watch a
 brand-new GPU node get provisioned from scratch — this is the number section 3.3 and chapter 10's
 cold-start math build on. `scale-demo` starts at `replicas: 0` on purpose (see
-`common/scale-demo.yaml`) precisely so that scaling it up is the trigger you control by hand.
+`eks/scale-demo.yaml`) precisely so that scaling it up is the trigger you control by hand.
 
 ```bash
 date; kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=2
@@ -444,46 +447,40 @@ Revert the patch (`envsubst < 13-node-autoscaling-and-cost/eks/nodepool.yaml | k
 --server-side -f -`) before continuing — otherwise `gpu-spot` stays stuck on the huge instance type
 for the rest of the chapter.
 
-### Step 4: CPU lab (no GPU quota, no provisioner install)
+### Step 4: Force a second real GPU node (bin-packing, not just one-node scale-from-zero)
 
-What you're about to do: exercise the SAME "Pending Pod → new node → Pod schedules → idle node
-removed" loop, but with a plain CPU workload so you don't need GPU quota, a Karpenter install, or
-any of this chapter's IAM prerequisites to see the shape of the pattern.
-
-**Read this before you run it**: as chapter 00 showed you directly, a stock EKS cluster has **no
-autoscaler running by default** — a managed node group only grows when you (or a script) tell
-`eksctl` to scale it. This step only produces a new node if *something* is watching for Pending
-Pods and can add capacity — either Karpenter (already installed from Step 1, which will happily
-provision a plain CPU-only node for a Pod that doesn't ask for a GPU, since neither `NodePool` here
-restricts non-GPU requests away, though it also doesn't specifically target them) or a separately
-installed AWS **Cluster Autoscaler** add-on if you have one. If neither is present, you should
-expect to see exactly what chapter 00's smoke test showed: Pods stay `Pending` indefinitely and no
-node appears — which is itself the point this whole chapter exists to fix, so don't treat that
-outcome as a failure of this step.
+What you're about to do: revert Step 3's patch, then scale `scale-demo` past what a single GPU
+node can hold, so you watch Karpenter provision a **second** GPU node from scratch instead of just
+the first scale-from-zero node Step 2 already showed you. Step 2 proves "0 → 1 node"; this step
+proves the same mechanism keeps working at "1 → 2 nodes," which is the actual shape of a real
+training/serving traffic spike (demand keeps growing, not just going from none to some).
 
 ```bash
-kubectl apply -k 13-node-autoscaling-and-cost/cpu-lab
-kubectl scale -n ch13-autoscale deploy/scale-demo-cpu --replicas=4
-kubectl get pods -n ch13-autoscale -o wide --watch
+# Revert Step 3's patch first, if you haven't already, so gpu-spot is back to its normal shape.
+envsubst < 13-node-autoscaling-and-cost/eks/nodepool.yaml | kubectl apply --server-side -f -
+kubectl -n ch13-autoscale scale deploy/scale-demo --replicas=0
+kubectl get nodeclaims   # confirm you're starting from 0 GPU NodeClaims
+
+date; kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=4
+kubectl get nodeclaims --watch   # Ctrl-C once you see 2 NodeClaims reach Initialized
 ```
 
-`kubectl apply -k .../cpu-lab` applies the CPU-only variant of the same idea (`scale-demo-cpu`, a
-`busybox` container requesting 1.5 CPU each — deliberately sized so 4 replicas add up to more CPU
-than one small node typically has free). Scaling to 4 replicas is the same "make it Pending on
-purpose" trigger as Step 2, just without any GPU involved.
+Each `scale-demo` Pod requests exactly 1 GPU, and `g6.xlarge`/`g4dn.xlarge` each expose exactly 1
+GPU, so 4 replicas cannot fit on one node — Karpenter has to launch a second GPU `NodeClaim` to
+schedule the overflow Pods, the same event-driven loop from section 3.1's diagram, triggered twice
+in a row.
 
-**Expected output**: `scale-demo-cpu` Pods `Pending` briefly (much shorter than the GPU case — no
-GPU driver/accelerator attach step), then `Running`, possibly on a newly-added CPU node if your
-default pool didn't already have 4x 1.5 vCPU of headroom, and *if* an autoscaler (Karpenter or
-Cluster Autoscaler) is actually watching this cluster, per the caveat above.
+**Expected output**: `kubectl get nodeclaims` shows two GPU `NodeClaim`s reach `Initialized`
+(likely a few minutes apart, not simultaneously — Karpenter provisions greedily as Pods go
+`Pending`, it doesn't batch multiple nodes into one launch), and `kubectl get pods -n
+ch13-autoscale -o wide` shows all 4 Pods `Running`, split across two different `NODE` values.
 
-**How to tell this worked**: `kubectl get pods -n ch13-autoscale -l app.kubernetes.io/name=scale-demo-cpu`
-shows `4/4 Running`, and `kubectl get nodes` shows more nodes than before the scale-up if your
-default pool was tight on capacity.
-
-**What doesn't carry over**: no ComputeClass/NodePool ranked spot-then-on-demand preference (this
-just uses whatever autoscaler your cluster already has, or none), no GPU-specific
-scheduling/taints, no meaningful image-pull cold-start story (`busybox` is tiny).
+**How to tell this worked**: `kubectl get nodes -l karpenter.sh/nodepool=gpu-spot` (or
+`gpu-ondemand`, if spot was exhausted) lists 2 nodes, and no `scale-demo` Pod stays `Pending`.
+Scale back down afterwards so you're not paying for 2 idle GPU nodes:
+```bash
+kubectl -n ch13-autoscale scale deploy/scale-demo --replicas=0
+```
 
 ## 5. Spot considerations
 
@@ -550,7 +547,8 @@ workloads and the `NodePool`.
 
 ```bash
 kubectl -n ch13-autoscale scale deploy/scale-demo --replicas=0
-kubectl delete -k 13-node-autoscaling-and-cost/eks --ignore-not-found
+kubectl delete -f 13-node-autoscaling-and-cost/eks/scale-demo.yaml --ignore-not-found
+kubectl delete -f 13-node-autoscaling-and-cost/eks/namespace.yaml --ignore-not-found
 kubectl delete -f 13-node-autoscaling-and-cost/eks/nodepool.yaml --ignore-not-found
 ```
 

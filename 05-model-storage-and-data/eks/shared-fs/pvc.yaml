@@ -1,0 +1,13 @@
+# Pattern (d): a ReadWriteMany PVC dynamically provisioned by the efs-models StorageClass
+# (one EFS access point per PVC).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: ch05-models
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: efs-models
+  resources:
+    requests:
+      storage: 100Gi

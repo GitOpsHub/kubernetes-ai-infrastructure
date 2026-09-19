@@ -42,7 +42,7 @@ By the end you can:
 | Block | Time | What |
 |---|---|---|
 | Theory | 45 min | §3 concepts, cold-start math, pattern comparison |
-| Lab A (any cluster) | 30 min | cpu-lab: init-container download, then RWO PVC cache |
+| Lab A (chapter 00 cluster) | 30 min | init-container download, then RWO PVC cache |
 | Lab B (your cloud) | 60 min | bucket + IAM, upload Job, serve from mount |
 | Lab C (optional) | 30 min | RWX shared file system |
 | Review | 15 min | spot notes, troubleshooting, checkpoint questions |
@@ -352,47 +352,56 @@ Layout:
 
 ```
 05-model-storage-and-data/
-├── common/
-│   ├── base/             namespace ch05-models, ConfigMap model-coordinates, SAs model-writer/model-reader
-│   ├── object-storage/   upload-model Job + qwen-from-bucket Deployment (expects PVC "model-bucket")
-│   ├── shared-fs/        model-cache PVC + populate Job + qwen-from-pvc Deployment (2 replicas)
-│   └── init-container/   qwen-init-download Deployment
-├── eks/                  object-storage overlay + kustomize resources; shared-fs/ sub-overlay
-└── cpu-lab/              init-container (default) and pvc-cache/ – any cluster, no IAM
+└── eks/
+    ├── namespace.yaml                    ch05-models
+    ├── serviceaccounts.yaml              model-writer, model-reader
+    ├── model-coordinates-configmap.yaml  pinned MODEL_ID/MODEL_REVISION/MODEL_SUBDIR
+    ├── init-container-deployment.yaml    pattern (a): qwen-init-download
+    ├── pvc-cache.yaml                    pattern (b): RWO model-cache PVC + populate Job + qwen-from-pvc-rwo
+    ├── nodegroup-ch05.yaml                eksctl config for this chapter's CPU node group
+    ├── pv-pvc-mountpoint.yaml            pattern (c): S3 Mountpoint PV/PVC (bucket name via envsubst)
+    ├── upload-model-job.yaml             pattern (c): loader Job
+    ├── qwen-from-bucket.yaml             pattern (c): serving Deployment
+    └── shared-fs/                        pattern (d), optional
+        ├── storageclass-efs.yaml         efs-models StorageClass (file system id via envsubst)
+        ├── pvc.yaml, populate-job.yaml, serve-deployment.yaml
 ```
 
-All serving pods use `vllm/vllm-openai-cpu:v0.29.0`, so these labs need **no GPU**. The storage path is exactly what a GPU pod
-would use. Chapter `09-llm-inference-with-vllm` swaps the image and adds `nvidia.com/gpu`.
+Every file under `eks/` is a complete, standalone Kubernetes manifest you can `kubectl apply -f`
+directly — there's no kustomize overlay or `cpu-lab/` variant in this chapter any more. All serving
+pods use `vllm/vllm-openai-cpu:v0.29.0`, so these labs need **no GPU**. The storage path is exactly
+what a GPU pod would use. Chapter `09-llm-inference-with-vllm` swaps the image and adds
+`nvidia.com/gpu`.
 
 `source env.sh && source versions.env` loads the AWS account/region and pinned component versions
 you set up in chapter 00, so every command below can reference `${AWS_REGION}`, `${EKS_CLUSTER}`,
-etc. without you retyping them. The namespace command below is intentionally written as
-`create ... --dry-run=client -o yaml | kubectl apply -f -` rather than a plain `kubectl create
-namespace` — that idiom is idempotent (safe to re-run; `apply` won't error if the namespace already
-exists, whereas a second `kubectl create` would). `Qwen/Qwen3-0.6B` is a public model and doesn't
+etc. without you retyping them. `Qwen/Qwen3-0.6B` is a public model and doesn't
 need a token, but Hugging Face gated/private models do, so every loader in this chapter references
 the `hf-token` Secret as *optional* — create it now if you plan to reuse this lab layout for a gated
 model later; skip it and nothing breaks for this chapter's public model.
 
 ```bash
 source env.sh && source versions.env
+kubectl apply -f 05-model-storage-and-data/eks/namespace.yaml
+kubectl apply -f 05-model-storage-and-data/eks/serviceaccounts.yaml
+kubectl apply -f 05-model-storage-and-data/eks/model-coordinates-configmap.yaml
 # Optional (only for gated models): the Secret is referenced as optional by every loader.
-kubectl create namespace ch05-models --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n ch05-models create secret generic hf-token --from-literal=HF_TOKEN="${HF_TOKEN}"
 ```
 
-### Step 1 · CPU lab: pattern (a), then (b)
+### Step 1 · Pattern (a), then (b)
 
-This step runs entirely on whatever cluster you already have (no AWS-specific IAM or storage
-needed) so you can *feel* the two worst-performing patterns from the table in §3.2 before spending
-any AWS setup effort on the good one. `kubectl apply -k ...` applies the kustomize overlay in
-`cpu-lab/` (pattern (a): an init container that downloads the model into `emptyDir` before the vLLM
-container starts). The `logs -f` command follows the init container's own log output live so you
-can watch the download happen — an init container's logs are only visible while it's running or
-briefly after, so run this before it finishes rather than after.
+This step only needs the CPU node group you already have from chapter 00 (no AWS-specific IAM or
+bucket needed) so you can *feel* the two worst-performing patterns from the table in §3.2 before
+spending any setup effort on the good one. `kubectl apply -f` applies
+[`eks/init-container-deployment.yaml`](eks/init-container-deployment.yaml) (pattern (a): an init
+container that downloads the model into `emptyDir` before the vLLM container starts). The `logs -f`
+command follows the init container's own log output live so you can watch the download happen — an
+init container's logs are only visible while it's running or briefly after, so run this before it
+finishes rather than after.
 
 ```bash
-kubectl apply -k 05-model-storage-and-data/cpu-lab
+kubectl apply -f 05-model-storage-and-data/eks/init-container-deployment.yaml
 kubectl -n ch05-models logs deploy/qwen-init-download -c fetch-model -f
 ```
 
@@ -429,18 +438,18 @@ download every start" row from the pattern table made concrete.
 Next, pattern (b) with an RWO PVC on the default StorageClass. "RWO" (ReadWriteOnce) means the
 underlying disk can only be attached to one node at a time — fine for a single replica, but (as
 you'll rediscover in Step 1's own troubleshooting and §3.2's table) a poor fit once spot moves that
-single replica to a different zone. `delete -k` tears down pattern (a) first so the two Deployments
-don't compete for the same Service name/port; `apply -k .../pvc-cache` brings up a Job that
-downloads the model once into a PVC-backed volume, and a separate Deployment that serves from that
-same PVC. `wait --for=condition=complete` blocks until the populate Job's Pod finishes successfully
-— Jobs (unlike Deployments) run to completion once and stop, so "complete" is the condition to wait
-on, not "ready".
+single replica to a different zone. `delete -f` tears down pattern (a) first so the two Deployments
+don't compete for the same Service name/port; `apply -f .../pvc-cache.yaml` brings up a Job that
+downloads the model once into a PVC-backed volume, and a separate Deployment (`qwen-from-pvc-rwo`)
+that serves from that same PVC. `wait --for=condition=complete` blocks until the populate Job's Pod
+finishes successfully — Jobs (unlike Deployments) run to completion once and stop, so "complete" is
+the condition to wait on, not "ready".
 
 ```bash
-kubectl delete -k 05-model-storage-and-data/cpu-lab
-kubectl apply -k 05-model-storage-and-data/cpu-lab/pvc-cache
+kubectl delete -f 05-model-storage-and-data/eks/init-container-deployment.yaml
+kubectl apply -f 05-model-storage-and-data/eks/pvc-cache.yaml
 kubectl -n ch05-models wait --for=condition=complete job/populate-model-cache --timeout=15m
-kubectl -n ch05-models delete pod -l app=qwen-from-pvc   # restart: no download, loads from disk
+kubectl -n ch05-models delete pod -l app=qwen-from-pvc-rwo   # restart: no download, loads from disk
 ```
 
 ### Step 2 · Object storage
@@ -566,24 +575,32 @@ exact association §3.4's sequence diagram assumes already exists when a Pod sta
 by writing the bucket name to `eks/bucket.env` so later steps (and cleanup) don't have to re-derive
 it.
 
-Now apply the overlay, upload the model with the loader Job, and let the serving Deployment pick it
-up from the mount. `kubectl kustomize ... | less` renders the final YAML without applying it, so you
-can read exactly what's about to be created before it touches the cluster — a good habit any time an
-overlay is unfamiliar. `apply -k` then actually creates those resources: the `ch05-models` namespace
-resources from `common/base`, the PV/PVC pair that uses the Mountpoint CSI driver
-(`eks/pv-pvc-mountpoint.yaml`), the `upload-model` Job (using the `model-writer` ServiceAccount and
-its writer role from the script above), and the `qwen-from-bucket` serving Deployment (using
-`model-reader`). Checking `mount-s3` namespace Pods confirms the Mountpoint CSI driver actually
-launched a FUSE process alongside your workload — recall from §3.3 that Mountpoint runs as a
-*separate* Pod next to your container, not inside it. Watching the upload Job's logs and then
-listing the bucket with `aws s3 ls` both confirm the same fact from two different angles: the Job's
-own log line and the object actually landing in S3.
+Now render the PV's bucket name, apply the manifests, upload the model with the loader Job, and let
+the serving Deployment pick it up from the mount. [`eks/pv-pvc-mountpoint.yaml`](eks/pv-pvc-mountpoint.yaml)
+carries an `${S3_BUCKET}` placeholder; `envsubst` fills it in from `bucket.env` the same way chapter
+00's Step 4 renders `${EKS_CLUSTER}`/`${AWS_REGION}` into `cluster.yaml` — a quick `cat` of the
+rendered file first is a good habit any time you're about to apply something you haven't read.
+`apply -f` then actually creates those resources: the PV/PVC pair that uses the Mountpoint CSI
+driver, the `upload-model` Job (using the `model-writer` ServiceAccount and its writer role from the
+script above), and the `qwen-from-bucket` serving Deployment (using `model-reader`). Checking
+`mount-s3` namespace Pods confirms the Mountpoint CSI driver actually launched a FUSE process
+alongside your workload — recall from §3.3 that Mountpoint runs as a *separate* Pod next to your
+container, not inside it. Watching the upload Job's logs and then listing the bucket with `aws s3
+ls` both confirm the same fact from two different angles: the Job's own log line and the object
+actually landing in S3.
 ```bash
-kubectl kustomize 05-model-storage-and-data/eks | less  # review first
-kubectl apply -k 05-model-storage-and-data/eks
+# shellcheck disable=SC1091
+source 05-model-storage-and-data/eks/bucket.env
+export S3_BUCKET
+envsubst '${S3_BUCKET}' < 05-model-storage-and-data/eks/pv-pvc-mountpoint.yaml \
+  > 05-model-storage-and-data/eks/.pv-pvc-mountpoint.rendered.yaml
+cat 05-model-storage-and-data/eks/.pv-pvc-mountpoint.rendered.yaml   # review first
+kubectl apply -f 05-model-storage-and-data/eks/.pv-pvc-mountpoint.rendered.yaml
+kubectl apply -f 05-model-storage-and-data/eks/upload-model-job.yaml
+kubectl apply -f 05-model-storage-and-data/eks/qwen-from-bucket.yaml
 kubectl -n mount-s3 get pods -o wide        # Mountpoint pods run beside your workload pods
 kubectl -n ch05-models logs job/upload-model -f
-aws s3 ls "s3://$(grep S3_BUCKET 05-model-storage-and-data/eks/bucket.env | cut -d= -f2)/models/qwen3-0.6b/" --recursive --human-readable
+aws s3 ls "s3://${S3_BUCKET}/models/qwen3-0.6b/" --recursive --human-readable
 kubectl -n ch05-models rollout status deploy/qwen-from-bucket --timeout=15m
 ```
 
@@ -694,15 +711,23 @@ rm -rf "${TMP}"
 echo "EFS ${FS_ID} ready"
 ```
 
-Apply the overlay and serve from the shared file system. This overlay includes the `efs-models`
-StorageClass, so the PVC it creates is **dynamically provisioned**: unlike Step 2's hand-written PV
-for the S3 mount, here the EFS CSI driver's controller reacts to the PVC and creates a matching
-EFS access point automatically (the mechanism described in §3.0's PV/PVC/StorageClass explanation).
-The populate Job fills that shared volume once; then two serving replicas mount the same PVC
-read-write at the same time — something pattern (b)'s RWO PVC could never do, and the whole reason
-to reach for EFS in the first place.
+Render the StorageClass's file system id, apply it and the rest of the shared-fs manifests, and
+serve from the shared file system. `efs-models` makes the `model-cache` PVC **dynamically
+provisioned**: unlike Step 2's hand-written PV for the S3 mount, here the EFS CSI driver's
+controller reacts to the PVC and creates a matching EFS access point automatically (the mechanism
+described in §3.0's PV/PVC/StorageClass explanation). The populate Job fills that shared volume
+once; then two serving replicas mount the same PVC read-write at the same time — something pattern
+(b)'s RWO PVC could never do, and the whole reason to reach for EFS in the first place.
 ```bash
-kubectl apply -k 05-model-storage-and-data/eks/shared-fs
+# shellcheck disable=SC1091
+source 05-model-storage-and-data/eks/shared-fs/efs.env
+export EFS_FILE_SYSTEM_ID
+envsubst '${EFS_FILE_SYSTEM_ID}' < 05-model-storage-and-data/eks/shared-fs/storageclass-efs.yaml \
+  > 05-model-storage-and-data/eks/shared-fs/.storageclass-efs.rendered.yaml
+kubectl apply -f 05-model-storage-and-data/eks/shared-fs/.storageclass-efs.rendered.yaml
+kubectl apply -f 05-model-storage-and-data/eks/shared-fs/pvc.yaml
+kubectl apply -f 05-model-storage-and-data/eks/shared-fs/populate-job.yaml
+kubectl apply -f 05-model-storage-and-data/eks/shared-fs/serve-deployment.yaml
 kubectl -n ch05-models wait --for=condition=complete job/populate-model-cache --timeout=20m
 kubectl -n ch05-models get pods -l app=qwen-from-pvc -o wide   # 2 replicas, possibly on different nodes/zones
 ```
@@ -750,11 +775,12 @@ covered conceptually in chapter `13-node-autoscaling-and-cost`.
 
 ## 7. Cleanup & cost notes
 
-What you're about to do: delete the CPU-lab resources, then tear down the object-storage/shared-fs
-kustomize resources, IAM roles, Pod Identity associations and this chapter's node groups
-(`DELETE_BUCKET=true` also empties and deletes the S3 bucket — omit it to keep the model for ch09/ch10).
+What you're about to do: delete the Step 1 (pattern a/b) resources, then tear down the
+object-storage/shared-fs manifests, IAM roles, Pod Identity associations and this chapter's node
+groups (`DELETE_BUCKET=true` also empties and deletes the S3 bucket — omit it to keep the model for
+ch09/ch10).
 
-Order matters here: Kubernetes resources are deleted first (`kubectl delete -k ...`), then AWS-side
+Order matters here: Kubernetes resources are deleted first (`kubectl delete -f ...`), then AWS-side
 Pod Identity associations, then the IAM roles those associations pointed at, then the node groups —
 roughly the reverse of the order everything was created in, so nothing is left referencing an object
 that's already gone. The `for id in $(aws eks list-pod-identity-associations ...)` loop looks up and
@@ -765,14 +791,20 @@ that still has inline policies attached, which is why both appear even though th
 either way. `--ignore-not-found`/`|| true` throughout make the whole script safe to re-run if an
 earlier step already failed partway.
 ```bash
-kubectl delete -k 05-model-storage-and-data/cpu-lab --ignore-not-found
+kubectl delete -f 05-model-storage-and-data/eks/init-container-deployment.yaml --ignore-not-found
+kubectl delete -f 05-model-storage-and-data/eks/pvc-cache.yaml --ignore-not-found
 
 : "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}"
 # shellcheck disable=SC1091
 source 05-model-storage-and-data/eks/bucket.env
 
-kubectl delete -k 05-model-storage-and-data/eks/shared-fs --ignore-not-found || true
-kubectl delete -k 05-model-storage-and-data/eks --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/shared-fs/serve-deployment.yaml --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/shared-fs/populate-job.yaml --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/shared-fs/pvc.yaml --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/shared-fs/.storageclass-efs.rendered.yaml --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/qwen-from-bucket.yaml --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/upload-model-job.yaml --ignore-not-found || true
+kubectl delete -f 05-model-storage-and-data/eks/.pv-pvc-mountpoint.rendered.yaml --ignore-not-found || true
 
 for id in $(aws eks list-pod-identity-associations --cluster-name "${EKS_CLUSTER}" --region "${AWS_REGION}" \
       --namespace ch05-models --query 'associations[].associationId' --output text); do

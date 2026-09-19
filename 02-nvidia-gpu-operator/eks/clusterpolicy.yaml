@@ -1,0 +1,85 @@
+# Cluster-scoped CR that the gpu-operator Helm chart's own values normally render and create for you
+# (templates/clusterpolicy.yaml) via `helm upgrade --install` in the README's Step 2 (the real,
+# supported install path for this chapter). This file is a hand-maintained mirror of exactly what
+# `values-eks.yaml` produces, kept here for offline reading/diffing without touching a cluster or
+# running Helm -- it is not applied directly in the lab. Schema and defaults verified against the
+# nvidia/gpu-operator chart ${GPU_OPERATOR_VERSION} (v26.7.0) CRD and
+# `helm template --show-only templates/clusterpolicy.yaml`.
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  hostPaths:
+    rootFS: /
+    driverInstallDir: /run/nvidia/driver
+  operator:
+    runtimeClass: nvidia
+  daemonsets:
+    priorityClassName: system-node-critical
+    updateStrategy: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: "1"
+    tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  psa:
+    enabled: false
+  # CDI (Container Device Interface) is the supported device-injection mode on current driver/toolkit
+  # versions; legacy nvidia-container-runtime mode is deprecated upstream.
+  cdi:
+    enabled: true
+    default: true
+  mig:
+    strategy: single
+  validator:
+    repository: nvcr.io/nvidia
+    image: gpu-operator
+    version: "v26.7.0"
+  # --- Driver: disabled on EKS. The AL2023 NVIDIA-accelerated AMI (01-gpu-nodes-and-scheduling/eks
+  # node groups) already bakes the driver in via nodeadm before the node ever joins the cluster, so
+  # letting the Operator also install one would fight over the kernel module. ---
+  driver:
+    enabled: false
+    repository: nvcr.io/nvidia
+    image: driver
+    version: "595.91.07"
+    usePrecompiled: false
+    rdma:
+      enabled: false
+  # --- Toolkit: disabled for the same reason -- the AMI already installs nvidia-container-toolkit. ---
+  toolkit:
+    enabled: false
+    repository: nvcr.io/nvidia/k8s
+    image: container-toolkit
+    version: "v1.20.0"
+  devicePlugin:
+    enabled: true
+    repository: nvcr.io/nvidia
+    image: k8s-device-plugin
+    version: "v0.20.0"        # matches DEVICE_PLUGIN_VERSION in versions.env
+  # DCGM hostengine daemon: off by default upstream (dcgmExporter runs its own embedded hostengine).
+  # Turn on only if something else on the node (e.g. a separate monitoring stack) needs the DCGM socket.
+  dcgm:
+    enabled: false
+  dcgmExporter:
+    enabled: true
+    repository: nvcr.io/nvidia/k8s
+    image: dcgm-exporter
+    version: "4.6.0-4.8.3-distroless"   # DCGM 4.6.0 + dcgm-exporter 4.8.3, matches DCGM_EXPORTER_CHART_VERSION
+  gfd:
+    enabled: true
+    repository: nvcr.io/nvidia
+    image: gpu-feature-discovery
+    version: "v0.20.0"
+  migManager:
+    enabled: true
+    repository: nvcr.io/nvidia/cloud-native
+    image: k8s-mig-manager
+    version: "v0.15.0"
+  nodeStatusExporter:
+    enabled: true
+  # NFD is a separate chart dependency (nfd.enabled: true at the Helm values root, not a ClusterPolicy
+  # spec field) -- labels nodes with feature.node.kubernetes.io/pci-10de.present etc. so GFD/toolkit
+  # selectors work. See values-eks.yaml `nfd.enabled`.

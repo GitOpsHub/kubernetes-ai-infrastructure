@@ -1,7 +1,0 @@
-# No GPU-specific overlay: there is nothing meaningful to run without a real driver/toolkit stack.
-# This just lets `kubectl kustomize cpu-lab` succeed and render the same Namespace + ClusterPolicy
-# the other overlays use, for schema/offline inspection only. See README.md "cpu-lab" section.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- ../common

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Cordon + drain one node for planned maintenance, honoring PodDisruptionBudgets so a GPU workload
-# with a PDB (09-llm-inference-with-vllm/common/pdb.yaml, or the kserve-pdb this chapter adds for
+# with a PDB (09-llm-inference-with-vllm/eks/pdb.yaml, or the kserve-pdb.yaml this chapter adds for
 # chapter 11) gets a chance to keep minAvailable replicas up instead of all going down at once.
 # This does NOT touch a live cluster on its own -- it only runs when you invoke it with a real node
-# name, same read/mutate-only-what-you-ask-for shape as every other install.sh in this course.
+# name, same read/mutate-only-what-you-ask-for shape as every other install step in this course.
 #
 # Usage: ./drain-node.sh <node-name> [--dry-run]
 set -euo pipefail

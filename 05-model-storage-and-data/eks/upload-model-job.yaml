@@ -1,0 +1,90 @@
+# One-off loader: download a pinned model revision from Hugging Face into a scratch emptyDir,
+# then copy it file-by-file into the mounted bucket and write a _COMPLETE marker LAST.
+# Why not "hf download" straight into the mount? hf writes *.incomplete temp files and renames
+# them; Mountpoint for S3 doesn't support rename on general-purpose buckets, so a plain
+# sequential "cp" of new files is what actually works.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: upload-model
+  namespace: ch05-models
+  labels:
+    app.kubernetes.io/part-of: ch05-models
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 3600
+  # Spot: if the node is reclaimed mid-copy, don't burn a retry – just run again.
+  # The _COMPLETE marker is written last, so a half-copied model is never "ready".
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+  template:
+    metadata:
+      labels:
+        app: upload-model
+    spec:
+      serviceAccountName: model-writer
+      restartPolicy: Never
+      # Managed node group spot label. With Karpenter use karpenter.sh/capacity-type: spot instead.
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+      containers:
+        - name: upload
+          image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              DEST="/mnt/bucket/${MODEL_SUBDIR}"
+              if [ -f "${DEST}/_COMPLETE" ]; then
+                echo "model already present at ${DEST}"; exit 0
+              fi
+              echo "downloading ${MODEL_ID}@${MODEL_REVISION}"
+              time uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
+                --revision "${MODEL_REVISION}" \
+                --local-dir /scratch/model \
+                --exclude "*.md" --exclude ".gitattributes"
+              mkdir -p "${DEST}"
+              echo "copying to ${DEST}"
+              # skip hf's local metadata dir (.cache); copy regular files only
+              for f in /scratch/model/*; do
+                time cp "$f" "${DEST}/"
+              done
+              date -u +%Y-%m-%dT%H:%M:%SZ > "${DEST}/_COMPLETE"
+              ls -la "${DEST}"
+          envFrom:
+            - configMapRef:
+                name: model-coordinates
+          env:
+            - name: UV_CACHE_DIR
+              value: /scratch/uv-cache
+            - name: HF_HOME
+              value: /scratch/hf-home
+            - name: HF_TOKEN            # only needed for gated models
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: HF_TOKEN
+                  optional: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 4Gi
+            limits:
+              memory: 2Gi
+              ephemeral-storage: 8Gi
+          volumeMounts:
+            - name: scratch
+              mountPath: /scratch
+            - name: model-bucket
+              mountPath: /mnt/bucket
+      volumes:
+        - name: scratch
+          emptyDir:
+            sizeLimit: 8Gi
+        - name: model-bucket
+          persistentVolumeClaim:
+            claimName: model-bucket

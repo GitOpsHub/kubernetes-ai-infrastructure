@@ -1,0 +1,149 @@
+# Pattern (b): an RWO PVC on the default StorageClass (EKS: gp3 via the EBS CSI driver, if set as
+# default), populated once by a Job, served by a single replica. "RWO" (ReadWriteOnce) means the
+# underlying disk can only be attached to one node at a time — fine here, but a poor fit once spot
+# moves the replica to a different zone (see README §3.2/Troubleshooting).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: ch05-models
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Populate the cache. On a POSIX file system hf download can write in place
+# (temp file + rename is fine), so no scratch copy is needed – unlike object-storage mounts.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate-model-cache
+  namespace: ch05-models
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 3600
+  podFailurePolicy:
+    rules:
+      - action: Ignore                 # spot reclaim → retry without consuming backoffLimit
+        onPodConditions:
+          - type: DisruptionTarget
+  template:
+    metadata:
+      labels:
+        app: populate-model-cache
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+      containers:
+        - name: download
+          image: ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              DEST="/cache/${MODEL_SUBDIR}"
+              [ -f "${DEST}/_COMPLETE" ] && { echo "already cached"; exit 0; }
+              # hf download is resumable: a retried pod after a spot reclaim continues where it stopped
+              time uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
+                --revision "${MODEL_REVISION}" --local-dir "${DEST}" \
+                --exclude "*.md" --exclude ".gitattributes"
+              date -u +%Y-%m-%dT%H:%M:%SZ > "${DEST}/_COMPLETE"
+              du -sh "${DEST}"
+          envFrom:
+            - configMapRef:
+                name: model-coordinates
+          env:
+            - name: UV_CACHE_DIR
+              value: /tmp/uv-cache
+            - name: HF_HOME
+              value: /tmp/hf-home
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: hf-token, key: HF_TOKEN, optional: true}
+          resources:
+            requests: {cpu: "1", memory: 1Gi}
+            limits: {memory: 2Gi}
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: model-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-from-pvc-rwo
+  namespace: ch05-models
+  labels:
+    app: qwen-from-pvc-rwo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen-from-pvc-rwo
+  template:
+    metadata:
+      labels:
+        app: qwen-from-pvc-rwo
+    spec:
+      serviceAccountName: model-reader
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+      initContainers:
+        - name: wait-for-model
+          image: busybox:1.37
+          command: ["/bin/sh", "-c"]
+          args:
+            - until [ -f "/models/${MODEL_SUBDIR}/_COMPLETE" ]; do echo waiting; sleep 10; done
+          envFrom:
+            - configMapRef: {name: model-coordinates}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+          volumeMounts:
+            - {name: cache, mountPath: /models, readOnly: true}
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.29.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - exec vllm serve "/models/${MODEL_SUBDIR}" --served-model-name "${MODEL_NAME}" --host 0.0.0.0 --port 8000 --max-model-len 4096 --dtype bfloat16
+          envFrom:
+            - configMapRef: {name: model-coordinates}
+          env:
+            - {name: VLLM_CPU_KVCACHE_SPACE, value: "2"}
+            - {name: HF_HUB_OFFLINE, value: "1"}
+          ports:
+            - {name: http, containerPort: 8000}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {memory: 10Gi}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          volumeMounts:
+            - {name: cache, mountPath: /models, readOnly: true}
+            - {name: dshm, mountPath: /dev/shm}
+      volumes:
+        - name: cache
+          persistentVolumeClaim: {claimName: model-cache, readOnly: true}
+        - name: dshm
+          emptyDir: {medium: Memory, sizeLimit: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-from-pvc-rwo
+  namespace: ch05-models
+spec:
+  selector:
+    app: qwen-from-pvc-rwo
+  ports:
+    - {name: http, port: 8000, targetPort: http}

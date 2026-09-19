@@ -45,5 +45,5 @@ echo "  1. Read the target release's notes for a driver-version bump (nearly eve
 echo "  2. Check the diff above for changed default driver/toolkit/dcgm-exporter image tags."
 echo "  3. Roll out to ONE node pool/nodegroup first -- the driver DaemonSet restarts in place on"
 echo "     an upgrade, which interrupts any GPU workload on that node."
-echo "  4. Take a pre-upgrade Velero backup: common/velero/backup-manual-example.yaml, or"
+echo "  4. Take a pre-upgrade Velero backup: eks/velero-backup-manual-example.yaml, or"
 echo "     'velero backup create pre-gpu-operator-upgrade --from-schedule=platform-daily'."

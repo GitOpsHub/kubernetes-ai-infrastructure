@@ -1,0 +1,31 @@
+# Scrapes the dcgm-exporter DaemonSet that chapter 02's GPU Operator ClusterPolicy creates
+# (dcgmExporter.enabled: true -> Service "nvidia-dcgm-exporter" in ns gpu-operator, port
+# "gpu-metrics"/9400). This ServiceMonitor lives OUTSIDE the gpu-operator namespace (kube-prometheus-stack's
+# default serviceMonitorNamespaceSelector is {} = all namespaces, so that's fine), but it MUST carry
+# the `release: kube-prometheus-stack` label below: the chart's Prometheus CR only auto-discovers
+# ServiceMonitors/PrometheusRules with that label when serviceMonitorSelectorNilUsesHelmValues is
+# true (chart default) - a release name change means changing this label too.
+# VERIFY: confirm the exact Service name/labels/port for YOUR gpu-operator version before relying on
+# this: `kubectl get svc -n gpu-operator -l app=nvidia-dcgm-exporter -o yaml`. Names have been stable
+# across GPU Operator releases but are not part of its versioned public API.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dcgm-exporter
+  namespace: ch04-observability
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: gpu-observability
+spec:
+  namespaceSelector:
+    matchNames:
+      - gpu-operator
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  endpoints:
+    - port: gpu-metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 25s
+      honorLabels: true

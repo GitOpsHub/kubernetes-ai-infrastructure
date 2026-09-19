@@ -1,0 +1,217 @@
+# Generated from eks/src/train_ddp.py via:
+#   kubectl create configmap ddp-train-script --from-file=eks/src/train_ddp.py \
+#     --dry-run=client -o yaml -n ch07-training
+# Re-run that command and replace the data: block below if you edit eks/src/train_ddp.py.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ddp-train-script
+  namespace: ch07-training
+data:
+  train_ddp.py: |
+    """Chapter 07 - PyTorch DDP training script that survives spot preemption.
+
+    Launched by `torchrun` inside a Kubeflow Trainer TrainJob. torchrun reads its
+    settings from the PET_* env vars that the Trainer torch plugin injects:
+      PET_NNODES, PET_NPROC_PER_NODE, PET_NODE_RANK, PET_MASTER_ADDR, PET_MASTER_PORT
+    and then exports RANK / LOCAL_RANK / WORLD_SIZE / MASTER_ADDR / MASTER_PORT for
+    every worker process it starts.
+
+    What it demonstrates
+      * DDP with NCCL (GPU) or Gloo (CPU), picked automatically.
+      * DistributedSampler so every rank sees a different shard of the data.
+      * Periodic checkpoints to a bucket-backed mount (GCS FUSE / Mountpoint for S3 /
+        Azure Blob CSI) and automatic resume from the newest *complete* checkpoint.
+      * SIGTERM handling: spot VMs get a short warning (GKE ~30s, AWS 2 min, Azure
+        ~30s). All ranks agree via all_reduce, rank 0 writes a final checkpoint and
+        the process exits non-zero so the Job is restarted rather than marked done.
+
+    Object-store-friendly checkpoint layout (no renames, no in-place overwrite, so
+    it works on Mountpoint for S3 without allow-overwrite):
+      $CHECKPOINT_DIR/$RUN_ID/step-00000200.pt     <- the checkpoint
+      $CHECKPOINT_DIR/$RUN_ID/step-00000200.done   <- written *after* the .pt copy
+    """
+
+    import os
+    import re
+    import shutil
+    import signal
+    import sys
+    import tempfile
+    import time
+
+    import torch
+    import torch.distributed as dist
+    import torch.nn as nn
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data.distributed import DistributedSampler
+
+    # ----------------------------------------------------------------- config (env)
+    TOTAL_STEPS = int(os.environ.get("TOTAL_STEPS", "2000"))
+    CKPT_EVERY = int(os.environ.get("CHECKPOINT_EVERY", "200"))
+    KEEP_LAST = int(os.environ.get("KEEP_LAST_CHECKPOINTS", "3"))
+    BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "256"))
+    LR = float(os.environ.get("LEARNING_RATE", "0.001"))
+    STEP_SLEEP = float(os.environ.get("STEP_SLEEP_SECONDS", "0"))  # slow the lab down so you can preempt it
+    CKPT_ROOT = os.environ.get("CHECKPOINT_DIR", "/mnt/checkpoints")
+    RUN_ID = os.environ.get("RUN_ID", "ddp-demo")
+    CKPT_DIR = os.path.join(CKPT_ROOT, RUN_ID)
+
+    STOP_REQUESTED = False
+
+
+    def on_sigterm(signum, frame):  # noqa: ARG001
+        global STOP_REQUESTED
+        STOP_REQUESTED = True
+
+
+    def log(msg):
+        rank = int(os.environ.get("RANK", "0"))
+        if rank == 0 or os.environ.get("LOG_ALL_RANKS") == "1":
+            print(f"[rank {rank}] {msg}", flush=True)
+
+
+    # ----------------------------------------------------------------- model / data
+    class MLP(nn.Module):
+        """Small classifier: big enough to see gradient sync, small enough for CPU."""
+
+        def __init__(self, in_dim=64, hidden=512, classes=10):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(in_dim, hidden), nn.ReLU(),
+                nn.Linear(hidden, hidden), nn.ReLU(),
+                nn.Linear(hidden, classes),
+            )
+
+        def forward(self, x):
+            return self.net(x)
+
+
+    def make_dataset(n=200_000, in_dim=64, classes=10, seed=1234):
+        # Same seed on every rank -> identical dataset; DistributedSampler shards it.
+        g = torch.Generator().manual_seed(seed)
+        centers = torch.randn(classes, in_dim, generator=g) * 0.25  # overlapping clusters -> non-trivial loss
+        y = torch.randint(0, classes, (n,), generator=g)
+        x = centers[y] + torch.randn(n, in_dim, generator=g)
+        return TensorDataset(x, y)
+
+
+    # ----------------------------------------------------------------- checkpoints
+    STEP_RE = re.compile(r"step-(\d{8})\.done$")
+
+
+    def latest_checkpoint():
+        if not os.path.isdir(CKPT_DIR):
+            return None
+        steps = sorted(int(m.group(1)) for f in os.listdir(CKPT_DIR) if (m := STEP_RE.search(f)))
+        return steps[-1] if steps else None
+
+
+    def save_checkpoint(step, model, optimizer):
+        """Rank 0 only. Write locally first, then copy sequentially to the bucket mount."""
+        os.makedirs(CKPT_DIR, exist_ok=True)
+        state = {"step": step, "model": model.module.state_dict(), "optimizer": optimizer.state_dict()}
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
+            torch.save(state, tmp.name)
+        dst = os.path.join(CKPT_DIR, f"step-{step:08d}.pt")
+        t0 = time.time()
+        shutil.copyfile(tmp.name, dst)
+        os.remove(tmp.name)
+        with open(os.path.join(CKPT_DIR, f"step-{step:08d}.done"), "w") as f:
+            f.write(str(time.time()))
+        log(f"checkpoint saved: {dst} ({time.time() - t0:.1f}s)")
+        # Retention: delete older checkpoints (needs allow-delete on Mountpoint for S3).
+        done = sorted(int(m.group(1)) for f in os.listdir(CKPT_DIR) if (m := STEP_RE.search(f)))
+        for old in done[:-KEEP_LAST]:
+            for ext in (".done", ".pt"):
+                try:
+                    os.remove(os.path.join(CKPT_DIR, f"step-{old:08d}{ext}"))
+                except OSError:
+                    pass
+
+
+    def main():
+        signal.signal(signal.SIGTERM, on_sigterm)
+
+        use_cuda = torch.cuda.is_available()
+        backend = os.environ.get("DIST_BACKEND") or ("nccl" if use_cuda else "gloo")
+        dist.init_process_group(backend=backend)
+        rank, world = dist.get_rank(), dist.get_world_size()
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if use_cuda:
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device("cpu")
+        log(f"backend={backend} world_size={world} device={device} "
+            f"master={os.environ.get('MASTER_ADDR')}:{os.environ.get('MASTER_PORT')}")
+
+        torch.manual_seed(0)
+        model = MLP().to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
+
+        # ---- resume (every rank reads the same bucket-backed file)
+        start_step = 0
+        latest = latest_checkpoint()
+        if latest is not None:
+            path = os.path.join(CKPT_DIR, f"step-{latest:08d}.pt")
+            state = torch.load(path, map_location=device, weights_only=True)
+            model.load_state_dict(state["model"])
+            optimizer.load_state_dict(state["optimizer"])
+            start_step = state["step"]
+            log(f"RESUMED from {path} at step {start_step}")
+        else:
+            log(f"no checkpoint in {CKPT_DIR}, starting from scratch")
+
+        # DDP broadcasts rank 0's parameters to all ranks at construction time and
+        # all-reduces (averages) gradients during backward().
+        ddp_model = DDP(model, device_ids=[local_rank] if use_cuda else None)
+
+        dataset = make_dataset()
+        sampler = DistributedSampler(dataset, num_replicas=world, rank=rank, shuffle=True, seed=42)
+        loader = DataLoader(dataset, batch_size=BATCH_SIZE, sampler=sampler, drop_last=True)
+        loss_fn = nn.CrossEntropyLoss()
+
+        step = start_step
+        epoch = step // len(loader)
+        t_last = time.time()
+        while step < TOTAL_STEPS:
+            sampler.set_epoch(epoch)
+            for x, y in loader:
+                x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                loss = loss_fn(ddp_model(x), y)
+                loss.backward()
+                optimizer.step()
+                step += 1
+                if STEP_SLEEP:
+                    time.sleep(STEP_SLEEP)
+
+                # Agree across ranks whether anyone received SIGTERM.
+                stop = torch.tensor([1 if STOP_REQUESTED else 0], device=device)
+                dist.all_reduce(stop, op=dist.ReduceOp.MAX)
+
+                if step % 50 == 0:
+                    rate = 50 * BATCH_SIZE * world / (time.time() - t_last)
+                    t_last = time.time()
+                    log(f"step {step}/{TOTAL_STEPS} epoch {epoch} loss {loss.item():.4f} ({rate:.0f} samples/s)")
+
+                if stop.item() or step % CKPT_EVERY == 0 or step >= TOTAL_STEPS:
+                    if rank == 0:
+                        save_checkpoint(step, ddp_model, optimizer)
+                    dist.barrier()
+                if stop.item():
+                    log("SIGTERM received (spot preemption / pod deletion): checkpointed, exiting 143")
+                    dist.destroy_process_group()
+                    sys.exit(143)  # non-zero -> Job/JobSet restarts us instead of reporting success
+                if step >= TOTAL_STEPS:
+                    break
+            epoch += 1
+
+        log(f"training complete at step {step}")
+        dist.destroy_process_group()
+
+
+    if __name__ == "__main__":
+        main()

@@ -1,9 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - clusterrole-platform-admin.yaml
-  - serviceaccount-ci.yaml
-  - role-team-a-edit.yaml
-  - role-team-b-edit.yaml
-  - rolebinding-team-a.yaml
-  - rolebinding-team-b.yaml

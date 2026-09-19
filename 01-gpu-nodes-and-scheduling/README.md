@@ -12,9 +12,8 @@ unfamiliar, it was almost certainly defined in section 3 — jump back there rat
 
 Needs from [`00-prerequisites-and-cluster-setup`](../00-prerequisites-and-cluster-setup): a cluster
 with a spot CPU pool up (Step 4), tools verified (Step 1), `env.sh`/`versions.env` sourced, and GPU
-quota approved on at least one cloud (Step 2) — this chapter creates the first real GPU node pool, so
-without quota the pool stays at 0 nodes forever. If you only did the fake-GPU drill in chapter 00,
-this chapter's Step 2 (cpu-lab) works without any of that.
+quota approved (Step 2) — this chapter creates the first real GPU node pool, so without quota the pool
+stays at 0 nodes forever.
 
 If any of those terms are new — "cluster", "node group", "quota" — that's expected. This chapter
 assumes you have *done* chapter 00's steps, not that you already understand every Kubernetes concept;
@@ -52,12 +51,11 @@ By the end you can:
 
 | Time | Activity |
 |---|---|
-| 0:00–0:30 | Read section 3 (concepts). Skim `common/` manifests |
+| 0:00–0:30 | Read section 3 (concepts). Skim the `eks/` manifests |
 | 0:30–1:15 | Create a GPU node group, install the device plugin |
-| 1:15–1:45 | Run `nvidia-smi-pod` and `cuda-vectoradd-job`, read `kubectl describe node` |
-| 1:45–2:15 | `cpu-lab/scheduling-drills.yaml` — predict-then-run the taint/toleration/nodeSelector drills |
-| 2:15–2:45 | Break things on purpose (remove a toleration, request 0.5 GPU, scale to 2 replicas on a 1-GPU pool) |
-| 2:45–3:00 | Checkpoint questions, cleanup |
+| 1:15–2:00 | Run `nvidia-smi-pod` and `cuda-vectoradd-job`, read `kubectl describe node` |
+| 2:00–2:30 | Break things on purpose (remove a toleration, request 0.5 GPU, scale to 2 replicas on a 1-GPU pool) |
+| 2:30–3:00 | Checkpoint questions, cleanup |
 
 Don't skip the first 30 minutes even if you're eager to type commands. Every failure mode in section 6
 (Troubleshooting) traces back to one of the concepts in section 3 — 30 minutes of reading now saves you
@@ -104,10 +102,9 @@ is never scheduled there at all (hard requirement). `affinity`/`nodeAffinity` is
 form: it can express "must" rules (`requiredDuringSchedulingIgnoredDuringExecution`, functionally like
 `nodeSelector` but with `In`/`NotIn`/etc. operators) and "prefer" rules
 (`preferredDuringSchedulingIgnoredDuringExecution`, a weighted hint the scheduler tries to honor but
-won't refuse to schedule over). This chapter uses both: `common/`'s pods get a plain `nodeSelector`
-patched in by the `eks/` overlay so they land only on real GPU nodes; the Step 2 drill's
-`d-cpu-pod-on-gpu-node` pod uses a *preferred* affinity, which is precisely why it still schedules
-even though it doesn't strictly need the GPU node.
+won't refuse to schedule over). This chapter uses the simple form: both `eks/nvidia-smi-pod.yaml` and
+`eks/cuda-vectoradd-job.yaml` carry a plain `nodeSelector` and matching `tolerations` directly in the
+manifest, so they land only on real GPU nodes.
 
 **Managed node group — what "creating GPU nodes" actually means on EKS.** You never hand-provision an
 EC2 instance and join it to the cluster yourself in this course. An EKS **managed node group** is
@@ -239,10 +236,10 @@ the Lab and checkpoint question 3).
 | Spot label | `eks.amazonaws.com/capacityType=SPOT` |
 | Spot taint (automatic?) | No |
 
-Every pod in `common/` requests `nvidia.com/gpu: 1` with no cloud-specific fields; each cloud's
-`kustomization.yaml` applies a JSON6902 patch (`patch-pod.yaml`, `patch-job.yaml`) adding the right
-`nodeSelector` and `tolerations`. This mirrors how you'd do it for real workloads later in the course
-(vLLM Deployments, Kueue-managed Jobs, …) — cloud differences live in a thin overlay, not the base.
+Every workload manifest under `eks/` requests `nvidia.com/gpu: 1` and carries the EKS-specific
+`nodeSelector` (`eks.amazonaws.com/capacityType: SPOT`, `nvidia.com/gpu.present: "true"`) and matching
+`tolerations` directly inline — each file is a complete, standalone manifest you can `kubectl apply -f`
+on its own, no templating or overlay tool involved.
 
 Tying this back to 3.0: the **taint** row is what makes a random CPU pod unable to accidentally land
 on this node; the **GPU label** row is what a pod's `nodeSelector` matches against to *positively*
@@ -267,7 +264,7 @@ these environment variables rather than hardcoding values, so if either `source`
 comes back empty, every step after it will fail in confusing ways — run this first, always, in a fresh
 shell.
 
-### Step 1: What's in `common/`
+### Step 1: What's in `eks/`
 
 - `namespace.yaml` — `ch01-gpu`
 - `nvidia-smi-pod.yaml` — proves the whole chain: scheduler → device-plugin allocation → driver libs
@@ -275,8 +272,11 @@ shell.
   from the host driver, injected by the container runtime/CDI.
 - `cuda-vectoradd-job.yaml` — a real CUDA kernel (vector add) as a `Job` (`backoffLimit: 3`), so a
   spot preemption mid-run gets retried automatically.
+- `gpu-nodegroups.yaml` — the `eksctl` `ClusterConfig` for the GPU node group(s).
+- `values-device-plugin.yaml` — Helm values for the pinned NVIDIA device plugin chart.
 
-Read them before applying anything — this is the entire cloud-agnostic surface.
+Both workload manifests already carry the EKS-specific `nodeSelector`/`tolerations` inline (section
+3.3) — read them before applying anything, this is the entire workload surface for this chapter.
 
 These two workloads exist to exercise the whole chain from 3.1 in two different ways: `nvidia-smi-pod`
 is the simplest possible proof that a GPU is visible inside a container at all (if this doesn't work,
@@ -353,7 +353,9 @@ NG="${NG:-spot-gpu}"; NODES=1
 eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name "$NG" \
   --nodes "$NODES" --nodes-min 0 --nodes-max 1
 kubectl get nodes -l eks.amazonaws.com/nodegroup="$NG" -L node.kubernetes.io/instance-type,eks.amazonaws.com/capacityType
-kubectl apply -k 01-gpu-nodes-and-scheduling/eks
+kubectl apply -f 01-gpu-nodes-and-scheduling/eks/namespace.yaml
+kubectl apply -f 01-gpu-nodes-and-scheduling/eks/nvidia-smi-pod.yaml
+kubectl apply -f 01-gpu-nodes-and-scheduling/eks/cuda-vectoradd-job.yaml
 kubectl -n ch01-gpu get pods -w
 ```
 The node group was created with `desiredCapacity: 0` (see `gpu-nodegroups.yaml`) — on purpose, so
@@ -364,10 +366,10 @@ the single most important cost lever in this chapter — remember the mirror-ima
 lives in section 7 and you will use it every time you stop working. `kubectl get nodes -l ... -L ...`
 lists only nodes in this node group and adds two extra label columns to the output (`-L` = "also show
 this label's value per node") so you can see the instance type and spot/on-demand status at a glance
-without a separate `describe`. `kubectl apply -k 01-gpu-nodes-and-scheduling/eks` is where the actual
-workloads get created: it renders the `eks/` kustomize overlay (base manifests from `common/`, patched
-per 3.3 with the EKS-specific `nodeSelector`/`tolerations`) and applies the result — this is also the
-first point at which an incorrect toleration or nodeSelector would surface as a `Pending` pod. `kubectl
+without a separate `describe`. The three `kubectl apply -f` calls are where the actual workloads get
+created — the namespace first, then the two plain, self-contained manifests from `eks/`, each already
+carrying the EKS-specific `nodeSelector`/`tolerations` inline (3.3) — this is also the first point at
+which an incorrect toleration or nodeSelector would surface as a `Pending` pod. `kubectl
 -n ch01-gpu get pods -w` watches the namespace's pods update live; `-w` ("watch") keeps the command
 running and streaming new lines rather than exiting after one snapshot, so you can see a pod go from
 nothing to `Pending` (waiting on the node/scheduler) to `Running`/`Completed` in real time. Press
@@ -392,98 +394,48 @@ sections — you should see the GPU taint, the `nvidia.com/gpu.present=true` lab
 `eks.amazonaws.com/capacityType=SPOT` label, and `nvidia.com/gpu: 1` under `Allocatable`, all matching
 what 3.2 and 3.3 described in the abstract.
 
-### Step 2: Fake-GPU scheduling drills (no GPU needed, any cluster)
+### Step 2: Break things on purpose, on the real GPU node
 
-What you're about to do: run five pods with different taint/toleration/selector combinations against
-a fake `nvidia.com/gpu` node, and predict each one's fate before you look at the answer — this builds
-scheduling intuition without spending on a real GPU. Run this whether or not your cloud GPU pool is
-up. There is no real GPU here — Kubernetes tracks GPUs as an "extended resource" (a number attached
-to the node's status, exactly like CPU or memory), so nothing stops us from lying to the scheduler
-and telling it a plain CPU node has GPUs. That is all the three commands below do: patch the node's
-reported capacity, taint it so only pods that explicitly tolerate `nvidia.com/gpu` land there, and
-label it so pods can select it by name.
-
-This step is deliberately cheap and safe — it runs against any node in any cluster (even a laptop
-`kind`/`minikube` cluster) because it never touches real hardware, and it is the fastest way to build
-the intuition from 3.0 (taint = restriction, toleration = permission, nodeSelector = actual choice)
-before you spend real spot-instance money finding out the hard way.
+What you're about to do: with the real `spot-gpu` node still up from Step 1, deliberately break each
+of the three independent mechanisms from 3.0 (toleration, nodeSelector, resource request) one at a
+time and watch the real scheduler react — this builds the same intuition the old CPU-only drill did,
+but against actual hardware instead of a faked node, since this course targets real GPU clusters
+throughout.
 
 ```bash
-NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
-COUNT=2
+# 1. Remove the toleration -> untolerated taint, Pending.
+kubectl -n ch01-gpu run no-toleration --image=busybox:1.37.0 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"c","image":"busybox:1.37.0","command":["sleep","3600"],
+  "resources":{"limits":{"nvidia.com/gpu":"1","memory":"16Mi"},"requests":{"cpu":"10m","memory":"16Mi"}}}]}}'
+kubectl -n ch01-gpu get pod no-toleration
+kubectl -n ch01-gpu describe pod no-toleration | grep -A2 Events
 
-# 1. Lie to the scheduler: tell it this node has 2 GPUs (capacity) it can hand out (allocatable).
-kubectl patch node "$NODE" --subresource=status --type=merge \
-  -p "{\"status\":{\"capacity\":{\"nvidia.com/gpu\":\"${COUNT}\"},\"allocatable\":{\"nvidia.com/gpu\":\"${COUNT}\"}}}"
+# 2. Request a fractional GPU -> rejected at admission, not even Pending.
+kubectl -n ch01-gpu run half-gpu --image=busybox:1.37.0 --restart=Never --dry-run=client -o yaml \
+  --overrides='{"spec":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}],
+  "containers":[{"name":"c","image":"busybox:1.37.0","command":["sleep","3600"],
+  "resources":{"limits":{"nvidia.com/gpu":"0.5","memory":"16Mi"},"requests":{"cpu":"10m","memory":"16Mi"}}}]}}' \
+  | kubectl apply -f - 2>&1 | tail -5
 
-# 2. Taint it the same way a real GPU node would be tainted (chapter 00 §3), so only pods that
-#    add a matching toleration can be scheduled here.
-kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule --overwrite
+# 3. Ask for 2 replicas on a 1-GPU pool -> the second stays Pending, no autoscaler (chapter 13).
+kubectl -n ch01-gpu scale job/cuda-vectoradd --replicas=1 2>/dev/null || true
+kubectl -n ch01-gpu get pods -o wide
 
-# 3. Label it so the drill pods below can target it with a nodeSelector, same idea as the real
-#    GFD/device-plugin labels you'll see for real in chapter 02.
-kubectl label node "$NODE" fake-gpu=true --overwrite
-
-kubectl apply -k 01-gpu-nodes-and-scheduling/cpu-lab
-kubectl -n ch01-gpu get pods -l drill=gpu-scheduling
+kubectl -n ch01-gpu delete pod no-toleration --ignore-not-found
 ```
-Line by line: `NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')` just grabs the name
-of whatever the first node in your cluster happens to be — it doesn't matter which one, since nothing
-here uses a real GPU. Command 1's `kubectl patch ... --subresource=status` writes directly to the
-node object's `status` subresource (normally only the kubelet/device-plugin would touch this) to fake
-the presence of 2 GPUs — this is the same field the real NVIDIA device plugin's `ListAndWatch` call
-updates in production, so patching it by hand here teaches you exactly what the plugin does under the
-hood without needing real hardware. Command 2's `kubectl taint` recreates the real GPU node's
-`NoSchedule` taint from `gpu-nodegroups.yaml` on this ordinary node, so the drill can exercise real
-toleration logic. Command 3's `kubectl label` adds an arbitrary `fake-gpu=true` label standing in for
-the real `nvidia.com/gpu.present=true` label a real AL2023 NVIDIA AMI node sets automatically. Only
-after all three are in place does `kubectl apply -k .../cpu-lab` create the five drill pods — applying
-it earlier would be pointless, since the taint/label they're designed to react to wouldn't exist yet.
-Expected output (after a few seconds):
-```
-NAME                          READY   STATUS    RESTARTS
-a-no-toleration-xxxxx         0/1     Pending   0
-b-wrong-model-xxxxx           0/1     Pending   0
-c-correct-xxxxx                1/1     Running   0
-d-cpu-pod-on-gpu-node-xxxxx    1/1     Running   0
-```
-How to tell this worked: `c-correct` and `d-cpu-pod-on-gpu-node` are `Running`, `a-no-toleration` and
-`b-wrong-model` stay `Pending` (`kubectl -n ch01-gpu describe pod a-no-toleration-xxxxx | grep -A2
-Events` shows the taint/selector reason). **Before** applying, predict each pod's fate — the file's
-comments have the answer:
-- `a-no-toleration` — `Pending`, untolerated taint
-- `b-wrong-model` — `Pending`, nodeSelector doesn't match (simulates a GFD label from chapter 02)
-- `c-correct` — `Running`
-- `d-cpu-pod-on-gpu-node` — `Running`, **on the fake-GPU node**, without ever requesting a GPU: a
-  toleration is *permission* to schedule there, not a request for the resource
-- `e-overcommit` (commented out) — uncomment it: the API server rejects `requests != limits` for
-  `nvidia.com/gpu` at admission time, before the scheduler ever sees it
+Each of these three reproduces one row of section 6 (Troubleshooting) live: (1) is the "untolerated
+taint" row — the pod never gets past the toleration check because it's missing the `tolerations` block
+`eks/nvidia-smi-pod.yaml` carries inline; (2) is the "integer-only" rule from 3.0 — the API server
+rejects `nvidia.com/gpu: 0.5` before the scheduler is ever involved; (3) shows the same "no autoscaler"
+lesson from chapter 00 §3.1, now with a real GPU resource instead of a generic CPU pod — a second GPU
+consumer has nowhere to go while the node group sits at one node, and stays `Pending` until you scale
+the node group up (costing more) or free the GPU that's already in use.
 
-If you predicted all five correctly before looking, you've internalized the single most important
-distinction in this chapter: **taint/toleration controls where a pod is *allowed*; nodeSelector/
-affinity controls where a pod is *chosen*; a resource `request` controls what a pod actually
-*consumes*.** These are three independent mechanisms and a pod's outcome depends on the combination of
-all three, not any one alone — `d-cpu-pod-on-gpu-node` is `Running` on the GPU node specifically
-*because* it satisfies the toleration check and expresses a node preference, while never touching the
-resource-request mechanism at all.
-
-Clean up the drill so it doesn't leave your node in a fake, tainted state (a real workload on that
-node would now need a `nvidia.com/gpu` toleration to schedule there — harmless in a lab cluster, but
-confusing if you forget you did this):
-```bash
-kubectl delete -k 01-gpu-nodes-and-scheduling/cpu-lab
-kubectl patch node "$NODE" --subresource=status --type=json \
-  -p '[{"op":"remove","path":"/status/capacity/nvidia.com~1gpu"}]' || true
-kubectl label node "$NODE" fake-gpu- || true
-kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule- || true
-```
-Each cleanup line reverses one of the three setup steps, in the same order: delete the drill pods
-first (so nothing is depending on the fake GPU while you remove it), then remove the faked capacity/
-allocatable field (`~1` is JSON-Pointer escaping for `/` inside the key `nvidia.com/gpu` — required
-because the path itself would otherwise be ambiguous), then the label, then the taint (the trailing
-`-` on `fake-gpu-` and `nvidia.com/gpu=present:NoSchedule-` is `kubectl`'s syntax for "remove this
-label/taint key" rather than set it). `|| true` on the last three means "don't fail the whole script
-if this one was already gone" — safe to re-run if you only did some of the steps.
+If you predicted each outcome correctly before running it, you've internalized the single most
+important distinction in this chapter: **taint/toleration controls where a pod is *allowed*;
+nodeSelector/affinity controls where a pod is *chosen*; a resource `request` controls what a pod
+actually *consumes*.** These are three independent mechanisms, and a pod's outcome depends on the
+combination of all three, not any one alone.
 
 ## 5. Spot considerations
 
@@ -520,11 +472,11 @@ reclaimed out from under you mid-demo.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Pod `Pending`: `0/N nodes are available: 1 Insufficient nvidia.com/gpu` | No node has an allocatable GPU yet — node group at 0, or device plugin not running | Scale the node group up; `kubectl -n nvidia-device-plugin get ds` |
-| Pod `Pending`: `node(s) had untolerated taint {nvidia.com/gpu: present}` | Missing toleration | Use the `eks` overlay (`kubectl apply -k .../eks`), not `common/` directly |
+| Pod `Pending`: `node(s) had untolerated taint {nvidia.com/gpu: present}` | Missing toleration | Use `eks/nvidia-smi-pod.yaml`/`eks/cuda-vectoradd-job.yaml` as-is — they carry the toleration inline — rather than stripping it out |
 | `nvidia-smi` pod: `command not found` or empty GPU list | Container runtime isn't injecting the device/driver (toolkit misconfigured, or driver not finished installing) | `kubectl describe node` → check `Allocatable`; wait for AMI init; re-check taints |
 | Two device-plugin DaemonSets running, GPUs double-counted or flapping | `eksctl create nodegroup` ran without `--install-nvidia-plugin=false` | `kubectl -n kube-system delete ds nvidia-device-plugin-daemonset`, keep only the pinned `nvdp` one |
 | Pod requesting `nvidia.com/gpu: 0.5` rejected at `kubectl apply` | Extended resources are integer-only | Request whole GPUs; see chapter 03 for MPS/time-slicing/MIG fractional sharing |
-| `nvidia.com/gpu` request accepted with `limits != requests` | It isn't — the API server always rejects this for extended resources | N/A, this is expected; see `cpu-lab` drill `e-overcommit` |
+| `nvidia.com/gpu` request accepted with `limits != requests` | It isn't — the API server always rejects this for extended resources | N/A, this is expected; see Step 2's fractional-GPU drill |
 
 Why these happen, mapped back to the 3.1 chain, so you can reason about a *new* failure that isn't in
 this table too:
@@ -535,9 +487,9 @@ this table too:
   plugin (the `DP` box in 3.1) isn't running/healthy, so that node never reports any allocatable GPUs
   at all no matter how many are physically installed.
 - **Row 2** ("untolerated taint") is a pure scheduling-restriction failure — nothing to do with drivers
-  or plugins at all. It means you applied a pod spec that never got the `nodeSelector`/`tolerations`
-  patch from the `eks/` overlay (3.3), most commonly because you applied `common/` directly instead of
-  `kubectl apply -k .../eks`.
+  or plugins at all. It means you applied a pod spec that's missing the `nodeSelector`/`tolerations`
+  block that `eks/nvidia-smi-pod.yaml` and `eks/cuda-vectoradd-job.yaml` already carry inline (3.3),
+  most commonly because you hand-rolled a pod spec without copying that block over — see Step 2.
 - **Row 3** is the one failure that happens *after* scheduling succeeds — the pod got a node, but
   something in the driver/runtime layer (the bottom of the 3.1 chain, below the device plugin) didn't
   finish or is misconfigured, so no device/library injection happened at container start.
@@ -569,15 +521,18 @@ YAML.
 > forgotten GPU node group left scaled up bills you continuously — see the cost note below.
 
 ```bash
-kubectl delete -k 01-gpu-nodes-and-scheduling/eks --ignore-not-found
+kubectl delete -f 01-gpu-nodes-and-scheduling/eks/cuda-vectoradd-job.yaml --ignore-not-found
+kubectl delete -f 01-gpu-nodes-and-scheduling/eks/nvidia-smi-pod.yaml --ignore-not-found
+kubectl delete -f 01-gpu-nodes-and-scheduling/eks/namespace.yaml --ignore-not-found
 for ng in spot-gpu ondemand-gpu; do
   eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name "$ng" --nodes 0 --nodes-min 0 2>/dev/null || true
 done
 helm -n nvidia-device-plugin uninstall nvdp   # if you'll let the GPU Operator (ch02) manage the same nodes
 ```
-In order: `kubectl delete -k .../eks --ignore-not-found` removes the workloads (namespace, pods/Job)
-created by the Lab's `kubectl apply -k .../eks` — `--ignore-not-found` means this is safe to run even
-if you already deleted them or never created them, so it's safe to run defensively. The `for ng in
+In order: the three `kubectl delete -f --ignore-not-found` calls remove the workloads (Job, Pod,
+namespace) created by the Lab's plain `kubectl apply -f` calls — `--ignore-not-found` means this is
+safe to run even if you already deleted them or never created them, so it's safe to run defensively.
+The `for ng in
 spot-gpu ondemand-gpu` loop scales **both** possible node groups back to 0 desired nodes regardless of
 which one(s) you actually created (`--include` earlier may have created only `spot-gpu`) — scaling to
 `--nodes 0` is what actually stops billing, since EKS does not automatically scale idle node groups
@@ -640,9 +595,8 @@ cloud with an NFD-less driver install (like AKS) can rely on that and has to set
 
 A toleration only removes a scheduling **restriction** — it does not request the resource. The pod
 never asked for `nvidia.com/gpu`, so nothing stopped it from landing on the (otherwise idle-looking)
-GPU node and consuming CPU/memory there, on your most expensive node type, silently. See
-`cpu-lab/scheduling-drills.yaml` pod `d-cpu-pod-on-gpu-node`. Guard against it later with
-admission policy (chapter 14) rather than trusting every pod author.
+GPU node and consuming CPU/memory there, on your most expensive node type, silently. Guard against it
+later with admission policy (chapter 14) rather than trusting every pod author.
 </details>
 
 <details>

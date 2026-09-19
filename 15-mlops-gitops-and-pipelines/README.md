@@ -15,13 +15,14 @@ chapter solves and why they're introduced together.
 
 This chapter assumes:
 
-- **Lab A (cpu-lab) needs only a working cluster** from
-  [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) — no GPU quota, no
-  Argo CD.
-- **Lab B needs an Argo CD instance you already run** (chart `argo-cd`, namespace `argocd`) — this
-  chapter never installs or reconfigures Argo CD itself (see the note at the top of this README
-  and in [CLAUDE.md](../CLAUDE.md)). If you don't run Argo CD, skip straight to Lab A/cpu-lab;
-  there's no GitOps-specific prerequisite chapter to go read first.
+- **A real EKS cluster** from
+  [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) — this course targets
+  real GPU hardware end to end, so there's no separate no-cluster/no-GPU quick-start path here;
+  every step below runs against your actual EKS cluster.
+- **An Argo CD instance you already run on that cluster** (chart `argo-cd`, namespace `argocd`) —
+  this chapter never installs or reconfigures Argo CD itself (see the note at the top of this
+  README and in [CLAUDE.md](../CLAUDE.md)). If you don't run Argo CD yet, install it yourself first
+  (out of scope for this chapter) before starting the Lab below.
 - **The chapters this app-of-apps wires together, if you want the synced Applications to actually
   do something**: [06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue) (`app-kueue.yaml`/
   `app-kueue-queues.yaml` reuse its values file and `team-a`/`team-b` ClusterQueue),
@@ -38,7 +39,7 @@ This chapter assumes:
 ## 0.1 If you've never heard of GitOps, start here
 
 Every chapter before this one taught you to change your cluster by typing a command on your own
-laptop: `helm install kueue ...`, `kubectl apply -k 09-llm-inference-with-vllm/eks`. That works,
+laptop: `helm install kueue ...`, `kubectl apply -f 09-llm-inference-with-vllm/eks/deployment.yaml`. That works,
 but it has a quiet cost: the *cluster's real state* and the *commands someone typed* are two
 different things that can silently drift apart. Six months from now, nobody can look at a git repo
 and know for certain what's actually running — they'd have to SSH around and diff by hand.
@@ -100,7 +101,7 @@ MLflow to run and record the *pipelines* that produce models on top of that infr
 
 ## 1. Why this matters
 
-Every chapter so far ended with a human running `helm install` / `kubectl apply -k` from a
+Every chapter so far ended with a human running `helm install` / `kubectl apply -f` from a
 laptop. That's fine for learning; it doesn't scale to "did team B's Friday change actually match
 what's in git" or "what exactly is running on the cluster right now, and who approved it." GitOps
 answers both: git is the source of truth, a controller (Argo CD) continuously reconciles the
@@ -136,10 +137,10 @@ alone. (2) Argo CD's controller (already running in your cluster, in the `argocd
 internal loop, on the order of every few minutes or on a webhook, that re-reads whatever path each
 `Application` object points at — that's the "polls/watches" arrow, and it never stops; it isn't a
 one-time deploy. (3) `ch15-app-of-apps` is the *only* `Application` object in this diagram a human
-creates directly (`kubectl apply -f eks/root-app.yaml`, §4 Step 2) — everything to its right is a
+creates directly (`kubectl apply -f eks/root-app.yaml`, §4 Step 1) — everything to its right is a
 consequence of that one action, not something you separately apply. (4) That root `Application`'s
 job is boring on purpose: its `source.path` points at a *directory* of eight more `Application`
-YAML files (`common/argocd-apps/apps-eks/`), and Argo CD applies whatever it finds there just like
+YAML files (`eks/apps/`), and Argo CD applies whatever it finds there just like
 it would any other manifest — it has no idea those files happen to describe more `Application`
 objects, which is the entire "app-of-apps" trick (spelled out fully in §3.1). (5) Each of those
 eight child Applications then reconciles *its own* piece of the real cluster — one installs Kueue,
@@ -154,7 +155,7 @@ HTTP to record what happened. Nothing in this bottom box is under Argo CD's cont
 reconciliation — it's the "run once, finish, record the result" layer GitOps intentionally doesn't
 try to own.
 
-## 2. Learning objectives & time plan (~3 h)
+## 2. Learning objectives & time plan (~2 h)
 
 By the end you can:
 
@@ -177,9 +178,8 @@ By the end you can:
 | Block | Time | What |
 |---|---|---|
 | Theory | 30 min | §3 concepts, app-of-apps, sync safety |
-| Lab A (any cluster) | 60 min | cpu-lab: Argo Workflows + MLflow directly via Helm, run the train→register pipeline |
-| Lab B (your cloud, if you run Argo CD) | 60 min | Review and apply the root Application against your own Argo CD; sync one child app |
-| Lab C (optional) | 20 min | Add a ninth child Application for a component this chapter didn't cover |
+| Lab A | 60 min | Review and apply the root Application against your own Argo CD; sync one child app |
+| Lab B (optional) | 20 min | Add a ninth child Application for a component this chapter didn't cover |
 | Review | 10 min | troubleshooting, checkpoint questions |
 
 ## 3. Concepts
@@ -268,10 +268,10 @@ chart and a second be a plain git repo providing values, referenced via `ref:` a
 in the chart source's `helm.valueFiles`. This is what makes `app-kueue.yaml`,
 `app-kube-prometheus-stack.yaml`, `app-argo-workflows.yaml` and `app-mlflow.yaml` work without
 forking the upstream chart into this repo: **the values files chapters `06` and `04` already
-wrote are the single source of truth**, reused instead of duplicated. Plain kustomize-path
+wrote are the single source of truth**, reused instead of duplicated. Plain directory-path
 Applications (`app-vllm.yaml`, `app-ch14-security.yaml`, `app-pipelines.yaml`) don't need this —
-they just point `source.path` at a chapter's own kustomize overlay, the same directory
-`kubectl apply -k` would use.
+they just point `source.path` at a chapter's own flat directory of plain Kubernetes YAML, the same
+directory `kubectl apply -f <file>` would use.
 
 Why this matters if you've only ever run `helm install -f values.yaml` by hand: without a
 multi-source `Application`, GitOps-managing a chart from someone else's Helm repository would

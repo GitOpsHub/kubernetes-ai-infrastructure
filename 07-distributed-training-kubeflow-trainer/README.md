@@ -14,10 +14,10 @@ This chapter assumes:
   `01-gpu-nodes-and-scheduling` and the NVIDIA GPU Operator from `02-nvidia-gpu-operator` already
   understood — this chapter creates its own dedicated GPU node pool (§4.3) but assumes you know
   why the driver/device-plugin steps happen.
-- Bucket-mount CSI drivers from `05-model-storage-and-data` (GCS FUSE / Mountpoint-S3 / Blob CSI)
-  if you want persisted checkpoints — the GPU lab path uses them; `cpu-lab/` doesn't.
+- Bucket-mount CSI drivers from `05-model-storage-and-data` (Mountpoint for S3) — this chapter's
+  checkpoints use them.
 - Optional: the `team-research` ClusterQueue from `06-batch-jobs-and-kueue` if you plan to run
-  §3.4/Lab C (`kueue/<cloud>` overlay) — not required for the base GPU or cpu-lab paths.
+  §3.4/Lab C — not required for the base GPU lab.
 - `env.sh` and `versions.env` sourced.
 
 ## 1. Why this matters
@@ -74,9 +74,9 @@ more sense once you know what problem it's solving.
   recreated (§3.2), you want the fresh set of pods to pick up from the last saved point in training
   rather than starting the whole run over from step 0. A **checkpoint** is a snapshot of the
   model's weights (and optimizer state) written to durable storage periodically during training.
-  Without one, a spot reclaim near the end of a long run throws away all of that run's progress.
-  The `cpu-lab/` variant in §4.6 deliberately skips persistent checkpoints so you can see this pain
-  first-hand before wiring up the real S3-backed version in the GPU lab.
+  Without one, a spot reclaim near the end of a long run throws away all of that run's progress —
+  §4.5 has you trigger exactly that scenario against the real S3-backed checkpoint volume this
+  chapter sets up in §4.3.
 
 A distributed training run is not a bag of independent pods — it's a **gang**: `torchrun` needs
 every rank up and rendezvoused before any of them can make progress, and if one rank dies the
@@ -87,7 +87,7 @@ gives you:
 - A **`TrainJob`** — the thing you submit, with `numNodes`, `numProcPerNode`, image, command and
   per-node resources, referencing a reusable **runtime**. Think of it as "run this training script
   across this many nodes/processes, using that runtime's rules for how to lay out and recover the
-  pods." You'll write one of these per training run (§3.1, `common/trainjob-ddp-gpu.yaml`).
+  pods." You'll write one of these per training run (§3.1, `eks/trainjob-ddp-gpu.yaml`).
 - A **`ClusterTrainingRuntime`** / namespaced **`TrainingRuntime`** — the "platform team" contract:
   a reusable template that says *how* any TrainJob referencing it should be run — which framework
   plugin to use (PyTorch here), what failure/restart behavior to apply, what the pod template looks
@@ -118,9 +118,9 @@ By the end you can:
 
 1. Explain the TrainJob → TrainingRuntime → JobSet chain and why gang failure handling
    (`failurePolicy.restartStrategy: Recreate`) is required for static-world-size DDP on spot.
-2. Read and extend `common/base/trainingruntime-torch-ddp-spot.yaml` and
-   `common/trainjob-ddp-gpu.yaml`.
-3. Explain what the `runtimePatches` overlay does and why the GPU-taint and spot-taint
+2. Read and extend `eks/trainingruntime-torch-ddp-spot.yaml` and
+   `eks/trainjob-ddp-gpu.yaml`.
+3. Explain what the `runtimePatches` block does and why the GPU-taint and spot-taint
    tolerations it adds aren't automatic (EKS auto-taints neither — see
    `01-gpu-nodes-and-scheduling`).
 4. Trigger a spot reclaim (or simulate one) mid-training and watch the DDP script's SIGTERM
@@ -152,7 +152,7 @@ flowchart TB
     subgraph platform["platform team ships"]
         TR["TrainingRuntime torch-ddp-spot<br/>mlPolicy.torch, failurePolicy.Recreate"]
     end
-    subgraph overlay["cloud overlay adds (runtimePatches)"]
+    subgraph overlay["TrainJob's own runtimePatches"]
         RP["nodeSelector / tolerations<br/>bucket-mount annotation"]
     end
     TJ -->|runtimeRef| TR
@@ -175,11 +175,10 @@ to bottom, then side to side at the bottom.
 - **Middle row (what the platform team already wrote)**: the `TrainingRuntime` it points at
   carries the actual pod template, image defaults, and — importantly — the failure-handling policy
   from §3.2. You didn't have to write any of that; you referenced it.
-- **Side box (what the cloud overlay adds)**: `eks/patch-trainjob-eks.yaml` layers a small patch
-  (via `runtimePatches`) on top with spot node selectors and taint tolerations, without changing
-  the shared runtime file itself. This is the same "base + overlay" idea used in every other
-  chapter's `common/` + `eks/` kustomize split, just expressed through a Trainer-native field
-  instead of kustomize.
+- **Side box (what the TrainJob itself adds)**: `eks/trainjob-ddp-gpu.yaml`'s own
+  `spec.runtimePatches[]` layers a small patch on top of the shared runtime with spot node
+  selectors and taint tolerations, without changing the runtime file itself — a Trainer-native
+  way to keep one reusable runtime and vary only the placement rules per TrainJob.
 - **The TrainJob + TrainingRuntime + patch together produce one JobSet** — this is the object
   Trainer actually creates in the cluster; you never write it by hand.
 - **The JobSet creates one Kubernetes `Job` per rank** (`node-0`, `node-1` in this 2-node example)
@@ -198,13 +197,13 @@ The Trainer **torch plugin** reads `numNodes`/`numProcPerNode` off the TrainJob 
 `PET_NNODES`, `PET_NPROC_PER_NODE`, `PET_NODE_RANK` (from the Job's completion index),
 `PET_MASTER_ADDR` (`<trainjob>-node-0-0.<trainjob>`, the JobSet headless Service) and
 `PET_MASTER_PORT=29500` into every pod — `torchrun /workspace/scripts/train_ddp.py` needs no
-rendezvous flags at all (see `common/trainjob-ddp-gpu.yaml`).
+rendezvous flags at all (see `eks/trainjob-ddp-gpu.yaml`).
 
 ### 3.2 Gang failure handling on spot
 
 DDP's process group has a **fixed world size**. If rank 1's pod is evicted, rank 0 doesn't
 degrade to "1 worker" — it hangs on the next `all_reduce` until NCCL's watchdog times out. Two
-settings in `common/base/trainingruntime-torch-ddp-spot.yaml` handle this:
+settings in `eks/trainingruntime-torch-ddp-spot.yaml` handle this:
 
 - `backoffLimit: 0` on each replicated Job — one failed pod fails that Job immediately instead of
   retrying it alone (which would leave the *other* rank waiting).
@@ -216,12 +215,12 @@ settings in `common/base/trainingruntime-torch-ddp-spot.yaml` handle this:
   docstring) — object stores have no atomic rename, so the `.pt` file is written first and the
   `.done` marker second; a reader only trusts a step once `.done` exists.
 
-### 3.3 The `eks/` overlay via `runtimePatches`
+### 3.3 The TrainJob's own `runtimePatches`
 
-`common/trainjob-ddp-gpu.yaml` and `common/base/trainingruntime-torch-ddp-spot.yaml` are
-completely cloud-agnostic. `eks/patch-trainjob-eks.yaml` adds one `spec.runtimePatches[]` entry (a
-strategic-merge patch the Trainer controller applies to the runtime's JobSet template at admission
-time) carrying the spot/GPU `nodeSelector` + `tolerations`.
+`eks/trainingruntime-torch-ddp-spot.yaml` is the reusable runtime; `eks/trainjob-ddp-gpu.yaml`
+carries its own `spec.runtimePatches[]` entry (a strategic-merge patch the Trainer controller
+applies to the runtime's JobSet template at admission time) with the spot/GPU `nodeSelector` +
+`tolerations` for this cloud.
 
 | | EKS |
 |---|---|
@@ -231,24 +230,28 @@ time) carrying the spot/GPU `nodeSelector` + `tolerations`.
 | Spot taint added by | nobody (opt-in) |
 | Checkpoint bucket | S3 via Mountpoint CSI (IRSA) |
 
-Apply the full lab with `kubectl apply -k 07-distributed-training-kubeflow-trainer/eks` — see §4.4
-for the explicit command sequence.
+Apply the full lab with plain `kubectl apply -f` against the files under `eks/` — see §4.4 for the
+explicit command sequence.
 
-### 3.4 Optional: Kueue admission (`kueue/eks`)
+### 3.4 Optional: Kueue admission
 
-`kueue/eks` layers the `common/kueue` Kustomize *Component* on top of the `eks` overlay: it labels
-the TrainJob `kueue.x-k8s.io/queue-name: ch07-queue` (Kueue's webhook then suspends the TrainJob
-until admitted) and adds a `LocalQueue` pointing at the `team-research` `ClusterQueue` from
-`06-batch-jobs-and-kueue`. Once admitted, Kueue's own ResourceFlavor patch decides spot vs
-on-demand — so the Kueue overlay also **removes** the hardcoded spot-only key from the `eks`
-overlay's `nodeSelector` (keeping the GPU-type selector and both tolerations), letting Kueue fall
-back to on-demand instead of the TrainJob just sitting `Pending` when spot is unavailable. This
-directory lives at the chapter root (`kueue/eks`, not `eks/kueue`) because Kustomize refuses an
-overlay that lists its own parent directory as a resource ("cycle detected") — see the comment in
-`kueue/eks/kustomization.yaml`.
+Layering Kueue admission on top of the base GPU lab needs two changes, both done with plain
+`kubectl` against the objects §4.4 already applied — no separate overlay directory:
+
+- `kubectl apply -f eks/localqueue.yaml` creates a `LocalQueue` in this chapter's namespace,
+  pointing at the `team-research` `ClusterQueue` from `06-batch-jobs-and-kueue`.
+- Labeling the TrainJob `kueue.x-k8s.io/queue-name: ch07-queue` makes Kueue's admission webhook
+  suspend it until the ClusterQueue has quota to admit it; once admitted, Kueue's own
+  `runtimePatch` decides spot vs on-demand, so you also remove the hardcoded
+  `eks.amazonaws.com/capacityType: SPOT` key from `eks/trainjob-ddp-gpu.yaml`'s `nodeSelector`
+  (keeping the GPU-type selector and both tolerations) — otherwise the TrainJob would just sit
+  `Pending` whenever spot is unavailable instead of falling back to on-demand.
 
 ```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks
+kubectl apply -f 07-distributed-training-kubeflow-trainer/eks/localqueue.yaml
+kubectl -n ch07-training label trainjob ddp-gpu kueue.x-k8s.io/queue-name=ch07-queue --overwrite
+kubectl -n ch07-training patch trainjob ddp-gpu --type=json \
+  -p='[{"op":"remove","path":"/spec/runtimePatches/0/trainingRuntimeSpec/template/spec/replicatedJobs/0/template/spec/template/spec/nodeSelector/eks.amazonaws.com~1capacityType"}]'
 ```
 
 ### 3.5 Real-world distributed training architectures: DDP vs. FSDP vs. DeepSpeed ZeRO
@@ -486,8 +489,9 @@ YAML
 ```
 
 Checkpoint storage — creates the S3 bucket, an IAM role for the Mountpoint for S3 CSI driver
-(IRSA), installs/updates the add-on so it tolerates the GPU taint, then writes
-`eks/storage/storage.env` so the kustomize overlay's `replacements:` can fill in the PV:
+(IRSA), installs/updates the add-on so it tolerates the GPU taint, then renders `eks/pv-pvc.yaml`'s
+`${BUCKET_NAME}`/`${AWS_REGION}` placeholders with `envsubst` (same render-then-apply pattern as
+`00-prerequisites-and-cluster-setup`'s `eks/cluster.yaml`):
 
 This is the step that turns §1.0's "checkpointing buys you resumability" from theory into a real
 volume the training pods can write to. Without it, a checkpoint written inside the pod would live
@@ -551,26 +555,38 @@ else
     --configuration-values '{"node":{"tolerateAllTaints":true}}'
 fi
 
-printf 'BUCKET_NAME=%s\nMOUNT_REGION=region %s\n' "${BUCKET}" "${AWS_REGION}" > "${HERE}/storage/storage.env"
-echo "Wrote ${HERE}/storage/storage.env"
+command -v envsubst >/dev/null || { echo "envsubst missing: brew install gettext"; exit 1; }
+BUCKET_NAME="${BUCKET}" envsubst '${BUCKET_NAME} ${AWS_REGION}' < "${HERE}/pv-pvc.yaml" \
+  > "${HERE}/.pv-pvc.rendered.yaml"
+echo "Wrote ${HERE}/.pv-pvc.rendered.yaml"
 ```
 
 ### 4.4 Run the lab
 
-What you're about to do: apply the `eks` overlay (TrainJob + patched runtime), watch the 2-rank
-DDP TrainJob rendezvous and start writing checkpoints.
+What you're about to do: apply the flat `eks/` manifests (namespace, service account, training
+script ConfigMap, checkpoint PV/PVC, patched runtime, TrainJob), watch the 2-rank DDP TrainJob
+rendezvous and start writing checkpoints.
 
-This is the moment everything from §3 and §4.2–4.3 comes together: `kubectl apply` submits the
-`TrainJob`, the Trainer controller resolves its `runtimeRef` against `torch-ddp-spot` and applies
-the `eks/` overlay's `runtimePatches`, then creates the underlying JobSet, which in turn creates
-one `Job` per rank and one pod per Job. The `-w` (watch) flag on the second command lets you see
-that transition happen live instead of guessing — you're watching Trainer's reconciliation, not
-just a static snapshot. The third command tails both ranks' logs at once (`--prefix` labels each
-line with its source pod) so you can see rank 0 and rank 1 progressing through training steps
-together, which is the visible proof that rendezvous succeeded and both ranks are synchronized.
+This is the moment everything from §3 and §4.2–4.3 comes together: `kubectl apply` creates the
+namespace and supporting objects, then submits the `TrainJob`; the Trainer controller resolves its
+`runtimeRef` against `torch-ddp-spot`, applies the TrainJob's own `runtimePatches`, then creates
+the underlying JobSet, which in turn creates one `Job` per rank and one pod per Job. Every file
+below is a complete, standalone manifest — order only matters because the namespace and the
+ConfigMap/PV/PVC the runtime references need to exist before the objects that use them. The `-w`
+(watch) flag on the second command lets you see that transition happen live instead of guessing —
+you're watching Trainer's reconciliation, not just a static snapshot. The third command tails both
+ranks' logs at once (`--prefix` labels each line with its source pod) so you can see rank 0 and
+rank 1 progressing through training steps together, which is the visible proof that rendezvous
+succeeded and both ranks are synchronized.
 
 ```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/eks
+HERE=07-distributed-training-kubeflow-trainer/eks
+kubectl apply -f "${HERE}/namespace.yaml"
+kubectl apply -f "${HERE}/serviceaccount.yaml" \
+  -f "${HERE}/configmap-train-script.yaml" \
+  -f "${HERE}/.pv-pvc.rendered.yaml" \
+  -f "${HERE}/trainingruntime-torch-ddp-spot.yaml" \
+  -f "${HERE}/trainjob-ddp-gpu.yaml"
 kubectl -n ch07-training get trainjob ddp-gpu -w   # Ctrl-C once JOBSSTATUS shows Running
 kubectl -n ch07-training logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f --prefix
 ```
@@ -609,29 +625,25 @@ How to tell this worked: rank 0's log picks up the newest `.done` checkpoint ste
 restarting from `step=0` — the Job's `backoffLimit: 0` fails that Job fast, and the JobSet's
 `Recreate` policy recreates **both** Jobs so all ranks re-rendezvous together.
 
-### 4.6 No GPU quota yet? Run it on CPU
+### 4.6 On-demand fallback if spot GPU capacity is unavailable
 
-If you don't have GPU quota approved yet (see §4.1's warning), don't skip the chapter — run this
-path instead so you can still learn the TrainJob/TrainingRuntime/JobSet mechanics, and come back to
-the GPU path once quota clears. `cpu-lab/` is a self-contained CPU-only variant of the same lab —
-same `TrainJob`/`TrainingRuntime` shape, same `train_ddp.py` (it already auto-selects the `gloo`
-backend, the CPU-only NCCL alternative, when `torch.cuda.is_available()` is `False`), just no
-`nvidia.com/gpu` requests and no bucket mount (checkpoints go to an `emptyDir`, an ephemeral
-volume tied to the pod's lifetime, so a pod recreate genuinely restarts from step 0 — a good
-contrast to see once, then go set up chapter 05's bucket-backed checkpoints for the real thing).
-It runs 2 nodes x 2 procs = 4 ranks on whatever spot CPU pool chapter 00 gave you:
+This course targets real GPU hardware throughout — there's no CPU-only fallback lab. If §4.3's
+spot node group can't get capacity (`InsufficientInstanceCapacity`, distinct from the quota problem
+in §4.1's warning), re-run §4.3 with `CAPACITY=on-demand` to create the `gpu-ondemand-l4` node
+group instead, then repeat §4.4 unchanged — the TrainJob's `nodeSelector` only pins
+`ch07.lab/gpu: l4` and the GPU-taint toleration, not a specific node group, so it schedules onto
+whichever GPU pool actually has running nodes:
 
 ```bash
-kubectl apply -k 07-distributed-training-kubeflow-trainer/cpu-lab/eks
-kubectl -n ch07-training-cpu get trainjob,jobset,pods -w
-kubectl -n ch07-training-cpu logs -l trainer.kubeflow.org/trainjob-ancestor-step=trainer -f
+CAPACITY=on-demand bash -c '
+: "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}"
+# same eksctl create nodegroup call as §4.3, but with spot: false and a different node-group name
+'
 ```
 
-How to tell this worked: 4 pods (2 nodes x 2 procs) go `Running`, and the log shows
-`world_size=4 device=cpu`. Do the same 4.5 "simulate a spot reclaim" drill against
-`ch07-training-cpu` and watch the resume logic restart from step 0 (no persistent checkpoint
-volume) — that's the concrete argument for wiring up real storage before you run this on spot
-GPUs for real.
+How to tell this worked: `kubectl get nodes -l ch07.lab/gpu=l4 -L eks.amazonaws.com/capacityType`
+shows a node with `CAPACITYTYPE=ON_DEMAND`, and §4.4's TrainJob pods schedule onto it exactly as
+they did on spot — just at 2-4x the hourly cost (§7), so switch back to spot once capacity returns.
 
 ## 5. Spot considerations
 
@@ -642,15 +654,16 @@ GPUs for real.
   (small demo model). Size this to your real checkpoint's upload time to the bucket — EKS gives
   ~2 minutes of spot notice, so you have room to grow this if a real checkpoint needs longer.
 - **`CHECKPOINT_EVERY`**: the more often you checkpoint, the less work a reclaim throws away, at
-  the cost of bucket PUT traffic — tune `common/trainjob-ddp-gpu.yaml`'s env for your model size.
-- **On-demand fallback**: the `eks` overlay here doesn't run mixed spot+on-demand — for that
-  layer `kueue/eks` (§3.4), which is what actually picks the flavor at admission time.
+  the cost of bucket PUT traffic — tune `eks/trainjob-ddp-gpu.yaml`'s env for your model size.
+- **On-demand fallback**: the plain `eks/trainjob-ddp-gpu.yaml` here doesn't run mixed
+  spot+on-demand — for that layer the Kueue admission steps in §3.4, which is what actually picks
+  the flavor at admission time. §4.6 covers the simpler manual on-demand fallback.
 
 ## 6. Troubleshooting
 
 | Symptom | Likely cause | Why this happens | Fix |
 |---|---|---|---|
-| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied `kueue/eks`) | Kueue's admission webhook suspends every TrainJob labeled with a `queue-name` until its `LocalQueue`/`ClusterQueue` has quota to admit it — if the ClusterQueue's ResourceFlavors don't map to any real, schedulable nodes (e.g. the GPU node group in §4.3 was never created), the TrainJob waits forever with no error, because from Kueue's perspective it's correctly waiting for capacity that simply never shows up | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
+| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied the §3.4 Kueue steps) | Kueue's admission webhook suspends every TrainJob labeled with a `queue-name` until its `LocalQueue`/`ClusterQueue` has quota to admit it — if the ClusterQueue's ResourceFlavors don't map to any real, schedulable nodes (e.g. the GPU node group in §4.3 was never created), the TrainJob waits forever with no error, because from Kueue's perspective it's correctly waiting for capacity that simply never shows up | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
 | Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node group scaled to 0 and nothing has scaled it up yet, or GPU quota exhausted | Kubernetes' scheduler can only place a pod on a node that already exists with the requested resource; a node group at `desiredCapacity: 0` (§4.3) has no such node until something (Cluster Autoscaler, or your own `eksctl scale nodegroup`) provisions one, and even then AWS itself will refuse to launch the instance if your account's EC2 GPU quota (§4.1) is exhausted | `kubectl get nodes -l ...`, check the EC2 quota console |
 | `clustertrainingruntimes` empty after install | Post-install hook Job hasn't finished | The Helm chart doesn't create the built-in runtime object directly in its templates — it runs a Kubernetes Job (a Helm post-install hook) that applies the runtime manifests after the controller is up, so there's a real (usually short) window where the CRDs exist but no runtime object does yet | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
 | Rank 0 hangs on `all_reduce` after a delete | Deleted rank 0 itself, or `Recreate` hasn't fired yet | Deleting rank 0 removes the peer every other rank's `PET_MASTER_ADDR` points at, so nobody can complete rendezvous until the JobSet notices the failure and recreates the whole gang (§3.2) — if you're watching immediately after the delete, you're just seeing the (expected) gap before `Recreate` kicks in, not a stuck state | `kubectl -n ch07-training get jobs` — both Jobs should show a new generation |
@@ -661,8 +674,14 @@ GPUs for real.
 
 ```bash
 : "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}"
+HERE=07-distributed-training-kubeflow-trainer/eks
 kubectl delete trainjobs --all -n ch07-training --ignore-not-found
-kubectl delete -k 07-distributed-training-kubeflow-trainer/eks --ignore-not-found
+kubectl delete -f "${HERE}/trainjob-ddp-gpu.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/trainingruntime-torch-ddp-spot.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/.pv-pvc.rendered.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-train-script.yaml" -f "${HERE}/serviceaccount.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/localqueue.yaml" --ignore-not-found   # only if you applied the §3.4 Kueue steps
+kubectl delete -f "${HERE}/namespace.yaml" --ignore-not-found
 for ng in gpu-spot-l4 gpu-ondemand-l4; do
   eksctl delete nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" --wait 2>/dev/null || true
 done
@@ -731,11 +750,14 @@ available and cheap on spot. Multi-GPU-per-node would use `numProcPerNode > 1` i
 addition and doesn't exercise cross-node NCCL at all.
 </details>
 
-<details><summary>8. `common/kueue/kustomization.yaml` is a Kustomize <em>Component</em>, not a plain overlay. What does that buy you here?</summary>
+<details><summary>8. §3.4 removes the hardcoded <code>eks.amazonaws.com/capacityType: SPOT</code> key from the TrainJob's <code>runtimePatches</code> before layering Kueue admission on top. Why is that removal necessary?</summary>
 
-A `Component` can be layered into an existing Kustomization's `components:` list without owning
-the base `resources:` — the same `common/kueue` component is reused unmodified by `kueue/eks`,
-which combines it with the `../../eks` base rather than needing a near-duplicate overlay file.
+The TrainJob's own `runtimePatches` entry hardcodes spot placement; if it stays in place, the pod's
+`nodeSelector` still demands spot capacity regardless of what Kueue decides, so the TrainJob would
+sit `Pending` if spot is unavailable even though Kueue's ClusterQueue has an on-demand
+ResourceFlavor with real capacity. Removing just that key (keeping the GPU-type selector and
+tolerations) leaves Kueue's own admission-time `runtimePatch` free to add back whichever capacity
+type it actually admitted the Workload into.
 </details>
 
 <details><summary>9. Why does an AdamW training run on a 7B parameter model require ~112 GB VRAM before batch activations, and why does FSDP FULL_SHARD solve this?</summary>

@@ -19,8 +19,9 @@ This chapter assumes:
   below shows the exact command; the multi-node LWS section in 4.6 needs both nodes up
   simultaneously, single-node section 4.3-4.5 only needs 1).
 - **Chapter 09's vLLM base** ([09-llm-inference-with-vllm](../09-llm-inference-with-vllm)) — this
-  chapter's `vllm-pool` imports `09-llm-inference-with-vllm/common` wholesale via kustomize rather
-  than re-defining the Deployment/Service/PDB; read 09 first if you haven't, especially its
+  chapter's `vllm-deployment.yaml`/`vllm-service.yaml`/`vllm-pdb.yaml` are copies of chapter 09's
+  Deployment/Service/PDB (with the EKS spot/GPU `nodeSelector` inlined) rather than re-defining
+  them from scratch; read 09 first if you haven't, especially its
   `kubectl create secret generic hf-token` step, which this chapter reuses verbatim (own namespace).
 - **A storage pattern for model weights** from
   [05-model-storage-and-data](../05-model-storage-and-data) if you want persistent caching across
@@ -72,10 +73,10 @@ different physical nodes), so those GPUs jointly hold one model that's too big f
 alone. A Deployment has no concept of "these N Pods together are one replica" — it only knows how
 to scale identical, independent Pods up or down. That gap is exactly what LeaderWorkerSet fills.
 
-This chapter composes rather than duplicates: the single-node vLLM workload is chapter 09's
-`vllm-deployment.yaml`, imported by kustomize directly; the multi-node variant reuses the same
-image, probes, and shutdown handling ideas, extended for a leader/worker group. Model weights
-caching follows chapter 05's patterns (PVC / object-storage — swap in either from there).
+This chapter composes rather than duplicates: the single-node vLLM workload is a copy of chapter
+09's `vllm-deployment.yaml` (plus its Service/PDB); the multi-node variant reuses the same image,
+probes, and shutdown handling ideas, extended for a leader/worker group. Model weights caching
+follows chapter 05's patterns (PVC / object-storage — swap in either from there).
 
 ## 2. Learning objectives and time plan (~3 h, can split into two sessions)
 
@@ -94,7 +95,7 @@ By the end you can:
 
 | Time | Activity |
 |---|---|
-| 0:00–0:35 | Read section 3 (concepts). Skim `common/` manifests, compare to ch09 |
+| 0:00–0:35 | Read section 3 (concepts). Skim `eks/` manifests, compare to ch09 |
 | 0:35–1:10 | Install Gateway API + GAIE CRDs, your cloud's Gateway controller. Deploy `vllm-pool` + `InferencePool`/EPP |
 | 1:10–1:40 | Send traffic through the Gateway, watch EPP routing decisions, break it (kill a Pod mid-request) |
 | 1:40–2:20 | Install LWS, deploy `multinode-lws`, watch the leader wait for the worker, verify TP=2 across nodes |
@@ -306,23 +307,44 @@ What you're about to do: install the Gateway API core CRDs (standard channel), t
 Inference Extension CRDs (`InferencePool`), and the LeaderWorkerSet controller. These are
 cluster-scoped and shared by every cloud overlay — run once, not per-cloud.
 
-Why cluster-scoped and not part of the `eks/` overlay: CRDs (`CustomResourceDefinition`) register
+Why cluster-scoped and not part of the `eks/` manifests: CRDs (`CustomResourceDefinition`) register
 new Kubernetes API types cluster-wide — they aren't namespaced, so they can't be scoped to one
 chapter's namespace the way the rest of this chapter's resources are. Applying them twice is
 harmless (idempotent), but they conceptually belong to the cluster, not to `ch12-gateway`, which
-is why they're separate scripts instead of being folded into `kubectl apply -k eks`.
+is why they're plain `kubectl apply --server-side` calls run once up front instead of being folded
+into `kubectl apply -f eks/`.
 
 ```bash
-./12-inference-gateway-and-multinode-serving/common/install-gateway-crds.sh
-./12-inference-gateway-and-multinode-serving/common/install-lws.sh
+: "${GATEWAY_API_VERSION:?}" "${GAIE_VERSION:?}" "${LWS_VERSION:?}"
+
+echo "Installing Gateway API ${GATEWAY_API_VERSION} (standard channel CRDs)..."
+kubectl apply --server-side -f \
+  "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+
+echo "Installing Gateway API Inference Extension ${GAIE_VERSION} CRDs..."
+# VERIFY: exact release-asset filename. Confirmed pattern (same layout as LWS releases) is
+#   https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/<tag>/manifests.yaml
+# If that 404s, install just the CRDs via the published Helm chart instead:
+#   helm template epp-crds oci://registry.k8s.io/gateway-api-inference-extension/charts/inferencepool \
+#     --version "${GAIE_VERSION}" --show-only crds/* | kubectl apply --server-side -f -
+kubectl apply --server-side -f \
+  "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${GAIE_VERSION}/manifests.yaml" # VERIFY
+kubectl wait --for=condition=Established --timeout=60s \
+  crd/inferencepools.inference.networking.k8s.io
+
+echo "Installing LeaderWorkerSet ${LWS_VERSION}..."
+kubectl apply --server-side -f \
+  "https://github.com/kubernetes-sigs/lws/releases/download/${LWS_VERSION}/manifests.yaml"
+kubectl wait --for=condition=Available --timeout=120s \
+  -n lws-system deployment/lws-controller-manager
 ```
 
-`install-gateway-crds.sh` runs two `kubectl apply --server-side` calls straight from the upstream
-Gateway API and Gateway API Inference Extension GitHub release assets (pinned via
-`GATEWAY_API_VERSION`/`GAIE_VERSION` in `versions.env`), then waits for the `InferencePool` CRD to
-report `Established`. `install-lws.sh` does the same for the LeaderWorkerSet controller, pinned
-via `LWS_VERSION`, and waits for its controller Deployment to become `Available`. Waiting instead
-of returning immediately means the next step never races an EPP/LWS deployment against a
+The two Gateway API `kubectl apply --server-side` calls come straight from the upstream Gateway
+API and Gateway API Inference Extension GitHub release assets (pinned via
+`GATEWAY_API_VERSION`/`GAIE_VERSION` in `versions.env`), then wait for the `InferencePool` CRD to
+report `Established`. The LWS install does the same for the LeaderWorkerSet controller, pinned via
+`LWS_VERSION`, and waits for its controller Deployment to become `Available`. Waiting instead of
+moving on immediately means the next step never races an EPP/LWS deployment against a
 still-registering CRD.
 
 **Expected output**: `Gateway API + Inference Extension CRDs installed.` then
@@ -384,40 +406,52 @@ installs the same way on every cloud, behind a `LoadBalancer` Service.
 ### Step 3: Create the HF secret and deploy the chapter's manifests
 
 What you're about to do: create the Hugging Face token Secret vLLM needs to pull
-`Qwen/Qwen3-0.6B`, then apply this chapter's `kubectl kustomize`-rendered EKS manifests (Gateway,
-HTTPRoute, InferencePool/EPP, the single-node vLLM pool imported from chapter 09, and the
-multi-node LWS group).
+`Qwen/Qwen3-0.6B`, then apply this chapter's plain Kubernetes YAML manifests under `eks/`
+(namespace, Gateway, HTTPRoute, InferencePool/EPP, the single-node vLLM Deployment, and the
+multi-node LWS group) directly with `kubectl apply -f`.
 
-Why create the Secret manually instead of letting kustomize generate it: a `secretGenerator` would
-bake your `HF_TOKEN` value into a ConfigMap/Secret hash that ends up versioned alongside the rest
-of the kustomize output, which is the wrong place for a credential. Creating it directly with
+Why create the Secret manually instead of committing it to a file: a Secret manifest on disk would
+bake your `HF_TOKEN` value into a file that ends up versioned alongside the rest of this chapter's
+YAML, which is the wrong place for a credential. Creating it directly with
 `kubectl create secret generic ... --dry-run=client -o yaml | kubectl apply -f -` keeps the token
 out of any file on disk and makes the command safely re-runnable (the `--dry-run`+`apply` pattern
 updates the Secret in place instead of erroring on "already exists," which a plain
 `kubectl create` would do the second time you run it).
 
+Every manifest in this course is plain Kubernetes YAML — no templating or overlay tool involved —
+so apply the namespace first, then the Secret, then the rest of the chapter's manifests:
+
 ```bash
 NAMESPACE=ch12-gateway
+kubectl apply -f 12-inference-gateway-and-multinode-serving/eks/namespace.yaml
 : "${HF_TOKEN:?export HF_TOKEN=hf_xxx, or skip — optional for the ungated Qwen3-0.6B}"
-kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl create secret generic hf-token \
   --namespace "$NAMESPACE" \
   --from-literal=HF_TOKEN="$HF_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -k 12-inference-gateway-and-multinode-serving/eks
+kubectl apply -f 12-inference-gateway-and-multinode-serving/eks/gateway.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/httproute.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/inferencepool.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/epp-rbac.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/epp-deployment.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/epp-service.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/vllm-deployment.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/vllm-service.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/vllm-pdb.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/multinode-leaderworkerset.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/multinode-service.yaml
 ```
 
-The final `kubectl apply -k .../eks` is where everything from section 3's diagrams actually gets
-created in one shot: kustomize renders the `eks/` overlay (which itself imports `common/` —
-Gateway, HTTPRoute, InferencePool, EPP RBAC/Deployment/Service, the multi-node LWS group, and
-chapter 09's vLLM Deployment) and applies the combined result. Because it's one `apply`, Kubernetes
-creates every object roughly together and lets each one's own readiness/dependency logic (e.g. the
-EPP watching for `InferencePool`, the Gateway watching for its GatewayClass) settle asynchronously
-— which is exactly why the next two steps are about *waiting* rather than assuming everything is
-instantly live.
+The final `kubectl apply -f ...` call is where everything from section 3's diagrams actually gets
+created in one shot: every object listed — Gateway, HTTPRoute, InferencePool, EPP RBAC/Deployment/
+Service, the multi-node LWS group, and vLLM's own Deployment/Service/PDB — is created roughly
+together, and each one's own readiness/dependency logic (e.g. the EPP watching for
+`InferencePool`, the Gateway watching for its GatewayClass) settles asynchronously — which is
+exactly why the next two steps are about *waiting* rather than assuming everything is instantly
+live.
 
-**Expected output**: a long list of `namespace/ch12-gateway created`, `gateway.gateway.networking.k8s.io/inference-gateway created`,
+**Expected output**: `gateway.gateway.networking.k8s.io/inference-gateway created`,
 `inferencepool.inference.networking.k8s.io/vllm-pool created`, `deployment.apps/vllm-epp created`,
 `deployment.apps/vllm created`, `leaderworkerset.leaderworkerset.x-k8s.io/vllm-multinode created`, etc.
 
@@ -538,44 +572,6 @@ kubectl get pods -n ch12-gateway -l app.kubernetes.io/name=vllm-multinode -o \
 prints two distinct node names — if both Pods land on the same node, tensor parallelism isn't
 actually spanning nodes and something's wrong with your node pool's scale-up.
 
-### Step 7: CPU lab (no cloud account, no GPU)
-
-What you're about to do: exercise the Gateway API and LWS mechanics without a GPU, using Ollama
-(chapter 09's CPU variant) behind a plain-`Service` HTTPRoute and a `busybox`-based LWS group.
-
-Why this still teaches something useful without a GPU: everything about *how* Gateway API and LWS
-work mechanically — GatewayClass/Gateway/HTTPRoute wiring, and the leader/worker group forming
-with `LWS_LEADER_ADDRESS`/`LWS_GROUP_INDEX` injected — is orthogonal to whether the workload
-behind them is a real GPU model server or a `busybox` sleep loop. What you don't get here is
-anything InferencePool/EPP-related, since that specifically depends on scraping vLLM's own
-Prometheus metrics (see "What doesn't carry over" below) — this section is for the plumbing, not
-the routing intelligence.
-
-```bash
-helm upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric --version 2.7.0 \
-  -n nginx-gateway --create-namespace
-./12-inference-gateway-and-multinode-serving/common/install-gateway-crds.sh
-./12-inference-gateway-and-multinode-serving/common/install-lws.sh
-kubectl apply -k 12-inference-gateway-and-multinode-serving/cpu-lab
-kubectl -n ch09-vllm-cpu port-forward svc/ollama 11434:11434 &
-kubectl get gateway inference-gateway -n ch09-vllm-cpu
-kubectl get pods -n ch09-vllm-cpu -l app.kubernetes.io/name=lws-demo
-```
-
-**Expected output**: the Gateway gets an `ADDRESS`; `lws-demo-0` (leader) and `lws-demo-0-1`
-(worker) reach `Running`; `kubectl logs -n ch09-vllm-cpu lws-demo-0` prints a line containing
-`LWS_LEADER_ADDRESS=...` and `LWS_GROUP_INDEX=0`.
-
-**How to tell this worked**: both `lws-demo` Pods are `Running` (busybox sleep loops don't exit)
-and their startup log line shows non-empty `LWS_LEADER_ADDRESS`/`LWS_GROUP_INDEX` values, proving
-LWS injected them correctly even without real Ray/vLLM underneath.
-
-**What doesn't carry over from the CPU lab**: no `InferencePool`/EPP (Ollama doesn't expose
-vLLM's Prometheus metrics, so there's nothing for the EPP to score — the HTTPRoute targets a
-plain `Service`); the LWS demo uses `busybox` sleep loops, not Ray/vLLM, so it shows group
-topology and env-var injection only, not real tensor parallelism; no spot GPU taints/tolerations
-to reason about.
-
 ## 5. Spot considerations
 
 - **EPP and Gateway controllers** should run on stable (non-spot) infrastructure — they're
@@ -624,7 +620,19 @@ console that the ELB/NLB is actually gone — a dangling ELB bills hourly even w
 `spot-gpu` node group is shared with chapter 01 and scales to 0 on its own.
 
 ```bash
-kubectl delete -k 12-inference-gateway-and-multinode-serving/eks --ignore-not-found
+kubectl delete -f 12-inference-gateway-and-multinode-serving/eks/multinode-service.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/multinode-leaderworkerset.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/vllm-pdb.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/vllm-service.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/vllm-deployment.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/epp-service.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/epp-deployment.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/epp-rbac.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/inferencepool.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/httproute.yaml \
+  -f 12-inference-gateway-and-multinode-serving/eks/gateway.yaml \
+  --ignore-not-found
+kubectl delete -f 12-inference-gateway-and-multinode-serving/eks/namespace.yaml --ignore-not-found
 ```
 
 The 2-node GPU pool from section 4 is the expensive part of this chapter (2x spot GPU nodes) —

@@ -1,0 +1,10 @@
+# The fallback flavor for work that must not be interrupted, or when the spot flavor's
+# quota is exhausted and flavorFungibility lets Kueue try the next flavor in the ClusterQueue.
+# nodeLabels matches the label EKS managed node groups apply automatically for capacityType: ON_DEMAND.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: on-demand
+spec:
+  nodeLabels:
+    eks.amazonaws.com/capacityType: ON_DEMAND

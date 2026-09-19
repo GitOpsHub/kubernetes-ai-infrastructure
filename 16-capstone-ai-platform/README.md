@@ -31,8 +31,8 @@ that a dependency below is missing. Concretely, you need:
 - Observability ([04-gpu-observability](../04-gpu-observability)) and model storage
   ([05-model-storage-and-data](../05-model-storage-and-data)) from Phase 1.
 - Kueue ([06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue)) from Phase 2 — this chapter's
-  `common/kueue-bridge` only makes sense on top of chapter 06's cohort/ResourceFlavors, it doesn't
-  replace them.
+  `eks/clusterqueue-team-research.yaml` bridge only makes sense on top of chapter 06's
+  cohort/ResourceFlavors, it doesn't replace them.
 - Training ([07-distributed-training-kubeflow-trainer](../07-distributed-training-kubeflow-trainer))
   and serving ([09-llm-inference-with-vllm](../09-llm-inference-with-vllm), optionally
   [11-kserve](../11-kserve)) from Phase 3.
@@ -42,11 +42,10 @@ that a dependency below is missing. Concretely, you need:
 - Security ([14-multi-tenancy-and-security](../14-multi-tenancy-and-security)) from Phase 5.
 - GitOps/pipelines ([15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines)) from Phase 6.
 
-If you don't have GPU quota on any cloud, skip straight to section 11 (CPU lab) — it reaches the
-same "train → register → promote → serve → verify" milestone using only chapters that already
-ship a `cpu-lab/`. Read section 10 ("Brief vs. reality") before filing a gap against your own run
-— it documents two known, deliberate scope boundaries (chapter 07 has no CPU `TrainingRuntime`;
-this chapter's own CPU lab reuses chapter 15's stand-in instead of patching chapter 07).
+This course targets real GPU hardware throughout — there is no CPU-only fallback for this chapter.
+Read section 10 ("Brief vs. reality") before filing a gap against your own run — it documents a
+known, deliberate scope boundary (chapter 07 has no CPU `TrainingRuntime`; this chapter's pipeline
+assumes chapter 07's real GPU TrainJob).
 
 ## 1. Why this matters
 
@@ -116,14 +115,14 @@ claims, and the gap between them is exactly where real platforms break:
 - Put them on the same cluster and nothing crashes — you just get a `TrainJob` that sits `Pending`
   forever, because `team-research` doesn't exist anywhere. No error message points you at the fix;
   you have to know to look at Kueue's admission status. **That silent gap is exactly what a
-  "kueue-bridge" fixes**: `common/kueue-bridge/clusterqueue-team-research.yaml` is a small,
+  "kueue-bridge" fixes**: `eks/clusterqueue-team-research.yaml` is a small,
   reviewable file whose only job is to create the missing `team-research` ClusterQueue, joined to
   chapter 06's existing cohort (so it still shares/borrows that cohort's CPU budget) and covering
   the one resource (`nvidia.com/gpu`) chapter 06 never needed.
 - Similarly, nothing in chapters 06–15 sequences the *business process* "train a model, register it
   if training succeeded, promote it to serving, then prove serving actually works" as one operation
   — each chapter proves its own step works, not that the steps chain together. The **pipeline**
-  (`common/pipeline/workflowtemplate-platform-e2e.yaml`, an Argo Workflows `WorkflowTemplate`) is
+  (`eks/workflowtemplate-platform-e2e.yaml`, an Argo Workflows `WorkflowTemplate`) is
   the thing that actually calls chapter 07's TrainJob, then chapter 15's MLflow, then patches
   chapter 09's Deployment, then curls through chapter 12's Gateway — in that order, with each step
   depending on the previous one succeeding. It's the executable version of the sentence "these
@@ -135,13 +134,14 @@ it's a small, explicit, separately-owned piece of glue that names the assumption
 know it was making. That is what `kueue-bridge` and `pipeline` are, and it's why they live in this
 chapter (`16-`) instead of being merged into chapter 06 or chapter 07's own files.
 
-This chapter is a **read-and-run playbook**, not a new set of from-scratch labs. `common/` and
-`eks/` ship the glue that earlier chapters deliberately don't own: a bridging `ClusterQueue`
-(`common/kueue-bridge/`) so chapter 07's GPU `TrainJob` actually gets admitted through chapter 06's
-Kueue setup, and an Argo Workflows `WorkflowTemplate` (`common/pipeline/`) that sequences a real
-`TrainJob` → MLflow registration → vLLM promotion → a live smoke test through the Gateway. You run
-it by applying each earlier chapter's own manifests in the order below, then this chapter's bridge
-on top.
+This chapter is a **read-and-run playbook**, not a new set of from-scratch labs. `eks/` ships the
+glue that earlier chapters deliberately don't own: a bridging `ClusterQueue`
+(`eks/clusterqueue-team-research.yaml`) so chapter 07's GPU `TrainJob` actually gets admitted
+through chapter 06's Kueue setup, and an Argo Workflows `WorkflowTemplate`
+(`eks/workflowtemplate-platform-e2e.yaml`, plus its RBAC in `eks/namespace-rbac.yaml`) that
+sequences a real `TrainJob` → MLflow registration → vLLM promotion → a live smoke test through the
+Gateway. You run it by applying each earlier chapter's own manifests in the order below, then this
+chapter's own flat YAML files on top.
 
 > **Cost warning up front:** this is the most expensive chapter in the course, because it is the
 > only one that runs *every* GPU-and-node-autoscaling chapter's resources at the same time instead
@@ -149,7 +149,7 @@ on top.
 > get a surprise cloud bill from this repo — read section 5 (Spot considerations) and section 9
 > (Cleanup) before you start, not after.
 
-## 2. Learning objectives and time plan (~3 h, GPU path; the CPU lab below is a separate ~2 h session)
+## 2. Learning objectives and time plan (~3 h)
 
 By the end you can:
 
@@ -168,9 +168,9 @@ By the end you can:
 
 | Time | Activity |
 |---|---|
-| 0:00–0:20 | Read section 3 (reference architecture); read `common/pipeline/workflowtemplate-platform-e2e.yaml` and `common/kueue-bridge/clusterqueue-team-research.yaml` in full — they're commented as design docs, not just manifests |
+| 0:00–0:20 | Read section 3 (reference architecture); read `eks/workflowtemplate-platform-e2e.yaml` and `eks/clusterqueue-team-research.yaml` in full — they're commented as design docs, not just manifests |
 | 0:20–1:30 | Build order (section 4): bring up phases 0–3 (cluster → observability/storage → Kueue → training/serving) on **one** cloud |
-| 1:30–2:00 | Build order phases 4–6 (gateway/autoscaling/node-autoscaling → security → GitOps/pipelines), then apply this chapter's `kubectl apply -k 16-capstone-ai-platform/<cloud>` |
+| 1:30–2:00 | Build order phases 4–6 (gateway/autoscaling/node-autoscaling → security → GitOps/pipelines), then apply this chapter's own `eks/*.yaml` files |
 | 2:00–2:20 | Run §4's "Validate everything at once" block, then submit the capstone pipeline (`argo submit --watch --from workflowtemplate/platform-e2e -n ch15-pipelines`) |
 | 2:20–2:50 | Game day (section 6): pick 2–3 scenarios, run them, write down what you observed |
 | 2:50–3:00 | Checkpoint questions, cleanup |
@@ -280,11 +280,12 @@ exactly two things, both deliberately small:
 
 | File | Why it exists |
 |---|---|
-| `common/kueue-bridge/clusterqueue-team-research.yaml` | Chapter 07's `TrainJob` LocalQueue points at a ClusterQueue named `team-research` that chapter 06 never defines (06 ships `team-a-cq`/`team-b-cq`, CPU-only). Without this, the TrainJob sits `Pending` forever. This ClusterQueue joins chapter 06's existing cohort and reuses its `spot`/`on-demand` ResourceFlavors by name — it does not redefine them. |
-| `common/pipeline/` (`namespace-rbac.yaml`, `workflowtemplate-platform-e2e.yaml`) | Nothing in chapters 06–15 sequences "train → register → promote → verify" as one operation across namespaces. This WorkflowTemplate does, using Argo Workflows (ch15) to submit a real TrainJob (ch07), register with MLflow (ch15), patch the vLLM Deployment (ch09), and curl through to prove it (ch12). |
+| `eks/clusterqueue-team-research.yaml` | Chapter 07's `TrainJob` LocalQueue points at a ClusterQueue named `team-research` that chapter 06 never defines (06 ships `team-a-cq`/`team-b-cq`, CPU-only). Without this, the TrainJob sits `Pending` forever. This ClusterQueue joins chapter 06's existing cohort and reuses its `spot`/`on-demand` ResourceFlavors by name — it does not redefine them. |
+| `eks/namespace-rbac.yaml`, `eks/workflowtemplate-platform-e2e.yaml` | Nothing in chapters 06–15 sequences "train → register → promote → verify" as one operation across namespaces. This WorkflowTemplate does, using Argo Workflows (ch15) to submit a real TrainJob (ch07), register with MLflow (ch15), patch the vLLM Deployment (ch09), and curl through to prove it (ch12). |
 
-No other chapter's files are modified. See `common/kueue-bridge/clusterqueue-team-research.yaml` and
-`common/pipeline/*.yaml` — both are commented as design rationale, read them before the lab.
+No other chapter's files are modified. See `eks/clusterqueue-team-research.yaml` and
+`eks/workflowtemplate-platform-e2e.yaml` — both are commented as design rationale, read them before
+the lab.
 
 ## 4. Lab: build order
 
@@ -378,13 +379,12 @@ actually makes chapter 07's `TrainJob` admissible later in Phase 3, so skipping 
 most common reason a learner's GPU TrainJob sits `Pending` with no obvious error:
 
 ```bash
-kubectl apply -k 16-capstone-ai-platform/eks   # applies common/kueue-bridge + common/pipeline too — see note below
+kubectl apply -f 16-capstone-ai-platform/eks/clusterqueue-team-research.yaml
 ```
 
-> `16-capstone-ai-platform/eks` bundles **all** of this chapter's resources (queueing bridge +
-> pipeline). Applying it here is fine — the pipeline's `WorkflowTemplate` is inert until you `argo
-> submit` it in phase 6 — but if you'd rather apply the bridge alone first, `kubectl apply -k
-> 16-capstone-ai-platform/common/kueue-bridge` targets just that piece.
+> The rest of this chapter's files (`eks/namespace-rbac.yaml`, `eks/workflowtemplate-platform-e2e.yaml`)
+> can be applied any time before phase 6 — the pipeline's `WorkflowTemplate` is inert until you `argo
+> submit` it there. Applying the bridge alone first, as shown above, is fine.
 
 **Acceptance criteria:** `kubectl get clusterqueue team-research -o yaml` shows
 `coveredResources: [cpu, memory, nvidia.com/gpu]`; `kubectl get cohort ch06-cohort` exists.
@@ -475,7 +475,7 @@ Run chapter 14 §4 (External Secrets + Kyverno install, then
 
 **Acceptance criteria:** `kubectl auth can-i create trainjobs -n ch07-training --as
 system:serviceaccount:ch16-capstone:capstone-pipeline` returns `no` (RBAC is scoped — the
-`capstone-pipeline` SA can only create in the namespaces `common/pipeline/namespace-rbac.yaml`
+`capstone-pipeline` SA can only create in the namespaces `eks/namespace-rbac.yaml`
 grants); a Pod without required labels is rejected by the ValidatingAdmissionPolicy from ch14.
 
 ### Phase 6 — GitOps, pipeline, registry (ch15, this chapter's bridge)
@@ -496,6 +496,8 @@ pass/fail:
 ./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh   # or via Argo CD app-of-apps, see ch15 README
 ./15-mlops-gitops-and-pipelines/cpu-lab/install-mlflow.sh
 kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab
+kubectl apply -f 16-capstone-ai-platform/eks/namespace-rbac.yaml
+kubectl apply -f 16-capstone-ai-platform/eks/workflowtemplate-platform-e2e.yaml
 argo submit --watch -n ch15-pipelines --from workflowtemplate/platform-e2e
 ```
 
@@ -570,7 +572,7 @@ its own:
 - **A spot reclaim during phase 3's TrainJob** triggers chapter 07's `TrainingRuntime` restart
   policy (`maxRestarts: 10`, `restartStrategy: Recreate`) — the *whole* 2-node gang is recreated and
   resumes from the last checkpoint on the storage from chapter 05. If your checkpoint interval
-  (`CHECKPOINT_EVERY` in `common/pipeline/workflowtemplate-platform-e2e.yaml`) is too coarse, you lose
+  (`CHECKPOINT_EVERY` in `eks/workflowtemplate-platform-e2e.yaml`) is too coarse, you lose
   more work per reclaim than necessary — this is the first thing to tune after your first game day.
 - **A spot reclaim under vLLM (phase 3/4)** drops in-flight requests (vLLM has no request
   checkpointing) — chapter 09's `PodDisruptionBudget` plus chapter 13's node autoscaler bringing up
@@ -603,7 +605,7 @@ force-deletes **do** cause real spot evictions/replacements which cost real (sma
 | **Spot preemption during training** | `kubectl delete pod -n ch07-training -l trainer.kubeflow.org/trainjob-ancestor-step=trainer --force --grace-period=25` (simulates the ~25–30 s reclaim notice chapter 07's `terminationGracePeriodSeconds` is sized for) | The JobSet's `failurePolicy` recreates the whole gang; both ranks re-rendezvous; training resumes from the last checkpoint, not from step 0 | `kubectl -n ch07-training get trainjob -w`; logs show `Resuming from checkpoint step <N>`, not `step 0` |
 | **Node drain under inference** | `kubectl drain <node-running-vllm> --ignore-daemonsets --delete-emptydir-data` | vLLM's `PodDisruptionBudget` (ch09) blocks the drain until a replacement is `Ready` elsewhere, or the node autoscaler (ch13) provisions a new spot node first | `kubectl get pdb -n ch09-vllm`; `kubectl get events -n ch09-vllm \| grep -i evict`; Gateway (ch12) request success rate during the drain |
 | **Model server crash** | `kubectl exec -n ch09-vllm deploy/vllm -- kill 1` | Pod restarts; `startupProbe` (multi-minute budget, ch09) gates readiness so the Gateway/InferencePool (ch12) and KEDA (ch10) don't route to or scale based on a still-booting pod | `kubectl get pods -n ch09-vllm -w`; confirm 5xxs stop once `Ready` flips, not before |
-| **ClusterQueue quota exhaustion** | Submit the capstone TrainJob twice concurrently, or run `06-batch-jobs-and-kueue/common/jobs/job-high-priority.yaml` against `team-research`'s quota at the same time | Second workload sits `Pending` with a clear `couldn't assign flavors` condition, or preempts a lower-`WorkloadPriorityClass` workload per `common/kueue-bridge/clusterqueue-team-research.yaml`'s `preemption` policy | `kubectl get workload -n ch07-training -o yaml \| grep -A5 conditions`; `kubectl describe clusterqueue team-research` |
+| **ClusterQueue quota exhaustion** | Submit the capstone TrainJob twice concurrently, or run `06-batch-jobs-and-kueue/common/jobs/job-high-priority.yaml` against `team-research`'s quota at the same time | Second workload sits `Pending` with a clear `couldn't assign flavors` condition, or preempts a lower-`WorkloadPriorityClass` workload per `eks/clusterqueue-team-research.yaml`'s `preemption` policy | `kubectl get workload -n ch07-training -o yaml \| grep -A5 conditions`; `kubectl describe clusterqueue team-research` |
 | **Gateway backend loses all pods** | Scale `vllm` Deployment to 0 in `ch09-vllm` | InferencePool (ch12) has no healthy endpoints; Gateway returns 503, not a hang; KEDA (ch10) should scale back up on the next request if `minReplicaCount: 0` is set, otherwise stays at 0 until you scale manually | `curl -w '%{http_code}'` through the Gateway; `kubectl -n ch09-vllm get scaledobject -o yaml` |
 
 Record, for each scenario you run: time-to-detect (when did a Prometheus alert or probe failure
@@ -647,10 +649,10 @@ pattern, most of platform troubleshooting is just "find the reference, confirm t
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| TrainJob stuck `Pending`, `Workload` shows no `ClusterQueue` match | Applied chapter 07 without this chapter's `common/kueue-bridge` (or applied it to the wrong cloud overlay). This happens because chapter 07's `LocalQueue` references a ClusterQueue named `team-research` by name, and that name only exists once *this chapter's* bridge is applied (section 1.2) — chapter 07 on its own has no way to know that name is missing | `kubectl apply -k 16-capstone-ai-platform/common/kueue-bridge`; confirm `kubectl get clusterqueue team-research` exists |
+| TrainJob stuck `Pending`, `Workload` shows no `ClusterQueue` match | Applied chapter 07 without this chapter's `eks/clusterqueue-team-research.yaml` bridge. This happens because chapter 07's `LocalQueue` references a ClusterQueue named `team-research` by name, and that name only exists once *this chapter's* bridge is applied (section 1.2) — chapter 07 on its own has no way to know that name is missing | `kubectl apply -f 16-capstone-ai-platform/eks/clusterqueue-team-research.yaml`; confirm `kubectl get clusterqueue team-research` exists |
 | Pipeline's `register-model` step fails: `Connection refused` to MLflow | MLflow (ch15) not installed yet, or wrong namespace/port. `Connection refused` specifically (not a timeout) means the pipeline's Pod reached the right IP but nothing was listening on that port — a strong signal the Service exists but the MLflow Pod behind it isn't up yet, versus a typo'd hostname (which would show `NXDOMAIN`/DNS failure instead) | `kubectl -n mlflow get pods`; the pipeline hard-codes `http://mlflow.mlflow.svc.cluster.local:5000` — that must match your ch15 install |
-| Pipeline's `submit-trainjob` step fails with a Forbidden error | `common/pipeline/namespace-rbac.yaml` wasn't applied, or you're running the Workflow under a different ServiceAccount than `capstone-pipeline`. Kubernetes RBAC defaults to deny — a ServiceAccount can do nothing until a Role/RoleBinding explicitly grants it a verb (`create`, `get`, …) on a resource in a namespace, so a missing grant looks exactly like this: not a crash, a clean `403 Forbidden` | `kubectl apply -k 16-capstone-ai-platform/common/pipeline`; check the WorkflowTemplate's `spec.serviceAccountName` |
-| `promote-vllm` step succeeds but the served model doesn't change | vLLM's Deployment uses `Recreate` strategy — the patch only changes a Pod *annotation*, it doesn't change the served weights on its own; wire your own `initContainer`/args to read the annotation, or treat this as a "deployment marker", not a real model swap. This is a deliberate simplification of this lab's pipeline, not a bug: a real promotion step would need the container's launch args (e.g. `--model <new-path>`) to actually change, which this teaching pipeline leaves as a documented next step rather than hiding behind extra complexity | See the comment in `common/pipeline/workflowtemplate-platform-e2e.yaml`'s `promote-vllm` template |
+| Pipeline's `submit-trainjob` step fails with a Forbidden error | `eks/namespace-rbac.yaml` wasn't applied, or you're running the Workflow under a different ServiceAccount than `capstone-pipeline`. Kubernetes RBAC defaults to deny — a ServiceAccount can do nothing until a Role/RoleBinding explicitly grants it a verb (`create`, `get`, …) on a resource in a namespace, so a missing grant looks exactly like this: not a crash, a clean `403 Forbidden` | `kubectl apply -f 16-capstone-ai-platform/eks/namespace-rbac.yaml`; check the WorkflowTemplate's `spec.serviceAccountName` |
+| `promote-vllm` step succeeds but the served model doesn't change | vLLM's Deployment uses `Recreate` strategy — the patch only changes a Pod *annotation*, it doesn't change the served weights on its own; wire your own `initContainer`/args to read the annotation, or treat this as a "deployment marker", not a real model swap. This is a deliberate simplification of this lab's pipeline, not a bug: a real promotion step would need the container's launch args (e.g. `--model <new-path>`) to actually change, which this teaching pipeline leaves as a documented next step rather than hiding behind extra complexity | See the comment in `eks/workflowtemplate-platform-e2e.yaml`'s `promote-vllm` template |
 | `smoke-test-gateway` step 404s / times out | Gateway (ch12) not yet `Programmed` (its own control plane hasn't finished configuring routing yet — check with `kubectl get gateway -n ch12-gateway`), or the in-cluster placeholder check in that step isn't a real substitute for hitting the Gateway's external address, since an in-cluster curl can succeed via a path that never goes through the Gateway's actual routing rules at all | Read the template's comment: swap in `kubectl get gateway -n ch12-gateway -o jsonpath=...` and curl that externally for a real check |
 | §4's "Validate everything at once" shows empty output for a whole section | That phase isn't deployed yet (fine — most `\|\| true` sections mean "not installed", not "broken"). Remember `\|\| true` exists precisely so a missing CRD/resource type doesn't abort the whole diagnostic script — an empty section is the script telling you "nothing here yet," not "something failed here" | Cross-check against the build-order phase for that section above |
 
@@ -775,7 +777,7 @@ helm uninstall kueue -n kueue-system
 First `kubectl get workload -n ch07-training -o yaml` and read `status.conditions` — Kueue admission
 happens before any pod is created, so a `Pending` TrainJob with zero pods is almost always a
 queueing problem, not a scheduling one. Check whether the `Workload` even exists and which
-`ClusterQueue` it's trying to match (`common/kueue-bridge/clusterqueue-team-research.yaml` must
+`ClusterQueue` it's trying to match (`eks/clusterqueue-team-research.yaml` must
 exist and cover `nvidia.com/gpu`). Only after confirming admission would you move to node-level
 scheduling (`kubectl describe pod`, taints/tolerations, GPU quota).
 </details>
@@ -858,7 +860,7 @@ against the phase's acceptance criteria before treating it as a bug.
 ## 13. Further reading and versions tested
 
 - [Kueue documentation](https://kueue.sigs.k8s.io/docs/) — ClusterQueue/Cohort/preemption semantics used by the bridge
-- [Argo Workflows: WorkflowTemplates](https://argo-workflows.readthedocs.io/en/latest/workflow-templates/) — `templateRef`, `resource` template action used throughout `common/pipeline/` and `cpu-lab/`
+- [Argo Workflows: WorkflowTemplates](https://argo-workflows.readthedocs.io/en/latest/workflow-templates/) — `templateRef`, `resource` template action used in `eks/workflowtemplate-platform-e2e.yaml`
 - [Kubeflow Trainer v2](https://www.kubeflow.org/docs/components/trainer/) — TrainJob/TrainingRuntime/JobSet failure policy referenced in the game day
 - [MLflow Model Registry](https://mlflow.org/docs/latest/model-registry.html)
 - [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/)
@@ -868,7 +870,7 @@ against the phase's acceptance criteria before treating it as a bug.
 **Versions tested:** every version referenced by this chapter is inherited from the chapter that
 owns the component (`versions.env` plus each chapter's own "Versions tested" section) — this chapter
 pins nothing new except `ghcr.io/mlflow/mlflow:v3.4.0` in the pipeline's `register-model` step,
-already flagged `# VERIFY` in `common/pipeline/workflowtemplate-platform-e2e.yaml` (client/server
+already flagged `# VERIFY` in `eks/workflowtemplate-platform-e2e.yaml` (client/server
 version compatibility — see `15-mlops-gitops-and-pipelines/README.md`'s note) and
 `curlimages/curl:8.11.1` (unpinned upstream, latest stable as of 2026-09-16) in both this chapter's
 and the CPU lab's smoke-test steps.

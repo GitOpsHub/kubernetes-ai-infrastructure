@@ -1,0 +1,105 @@
+# Tensor-parallel-2 variant of vllm-deployment.yaml: shards a bigger model (Qwen/Qwen3-8B, which
+# does not fit a single 24 GiB L4 or 16 GiB T4 with useful KV cache headroom) across 2 GPUs on the
+# SAME node with --tensor-parallel-size=2. Needs a 2-GPU node type (e.g. g6.12xlarge) — this is NOT
+# what the reused chapter-01 spot-gpu pool provides (1 GPU/node), so this is optional/advanced: see
+# README Step 4. Apply this file INSTEAD of vllm-deployment.yaml (same namespace/name — do not run
+# both at once), after pointing nodeSelector at your 2-GPU pool.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: ch09-vllm
+  labels:
+    app.kubernetes.io/name: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm
+    spec:
+      terminationGracePeriodSeconds: 25
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+        nvidia.com/gpu.present: "true"
+        # node.kubernetes.io/instance-type: g6.12xlarge   # uncomment/adjust once your 2-GPU pool exists
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:v0.29.0-cu129
+        args:
+        - Qwen/Qwen3-8B
+        - --host=0.0.0.0
+        - --port=8000
+        - --max-model-len=8192
+        - --gpu-memory-utilization=0.90
+        - --max-num-seqs=64
+        - --enable-prefix-caching
+        - --shutdown-timeout=10
+        - --tensor-parallel-size=2
+        env:
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: HF_TOKEN
+              optional: true
+        ports:
+        - name: http
+          containerPort: 8000
+        resources:
+          requests:
+            cpu: "8"
+            memory: 48Gi
+            nvidia.com/gpu: "2"
+          limits:
+            memory: 64Gi
+            nvidia.com/gpu: "2"
+        # 16 GiB of weights take longer to download + load: allow 20 minutes.
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          failureThreshold: 120
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 4
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
+        volumeMounts:
+        - name: hf-cache
+          mountPath: /root/.cache/huggingface
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: hf-cache
+        persistentVolumeClaim:
+          claimName: hf-cache
+      # TP workers exchange tensors via NCCL, which uses /dev/shm between processes.
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi

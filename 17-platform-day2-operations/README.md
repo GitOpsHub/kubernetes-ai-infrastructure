@@ -28,7 +28,7 @@ create node pools or GPU capacity of its own. Specifically:
   (ArgoCD `Application` state Velero backs up).
 - `env.sh` and `versions.env` sourced (`source env.sh && source versions.env`).
 
-None of the objects in this chapter's `common/` require a GPU by themselves — the drain-demo
+None of the objects under this chapter's `eks/` require a GPU by themselves — the drain-demo
 workload, Velero, and OpenCost all run fine on CPU-only nodes. GPUs only matter for the specific
 runbooks that are inherently about GPU hardware (the Operator upgrade, DCGM Xid errors).
 
@@ -225,28 +225,28 @@ restart in place — briefly interrupting GPU workloads on that node, the same d
 causes but self-inflicted by the Operator's own reconciliation, not the eviction API, so PDBs do
 **not** protect you here either. This chapter's runbook is that checklist made concrete:
 
-1. **Dry-run the diff** (`common/scripts/gpu-operator-upgrade-dry-run.sh`) — `helm template` both
+1. **Dry-run the diff** (`eks/scripts/gpu-operator-upgrade-dry-run.sh`) — `helm template` both
    the current and target `${GPU_OPERATOR_VERSION}` against your cloud's real
-   `values-<cloud>.yaml` from chapter 02, entirely client-side, no cluster touched.
+   `values-eks.yaml` from chapter 02, entirely client-side, no cluster touched.
 2. **Take a backup** — a pre-change Velero backup of the `gpu-operator` namespace and anything
-   currently running GPU workloads (`common/velero/backup-manual-example.yaml`), so a bad upgrade
+   currently running GPU workloads (`eks/velero-backup-manual-example.yaml`), so a bad upgrade
    is a restore, not a re-build.
 3. **Drain or accept disruption on one pool first** — cordon the target node pool (section 3.1's
    `drain-node.sh`), `helm upgrade` the GPU Operator release, watch `ClusterPolicy` come back
    `ready` and the validator pods go `Completed` (chapter 02 section 6) before touching the rest of
    the fleet.
-4. **Verify** — re-run chapter 02's own `common/validate.sh` against the upgraded pool before
-   calling it done.
+4. **Verify** — re-check chapter 02's own GPU Operator health checks (README section 6) against
+   the upgraded pool before calling it done.
 
 ### 3.3 Incident runbooks: five failures this course's own chapters produce
 
 | Failure | Where it comes from | First move |
 |---|---|---|
-| **Spot reclaim storm** | Chapters 00/01/13 — spot-first everywhere means a bad night in one capacity pool can reclaim many nodes within minutes | `common/scripts/spot-storm-report.sh` — confirm scope, check the fallback (on-demand ResourceFlavor/NodePool) is actually absorbing it, not stuck retrying the same exhausted pool |
+| **Spot reclaim storm** | Chapters 00/01/13 — spot-first everywhere means a bad night in one capacity pool can reclaim many nodes within minutes | `eks/scripts/spot-storm-report.sh` — confirm scope, check the fallback (on-demand ResourceFlavor/NodePool) is actually absorbing it, not stuck retrying the same exhausted pool |
 | **DCGM Xid error** | Chapter 04's `GPUXidError` alert, chapter 02's driver stack | Correlate with `dmesg`/`nvidia-smi -q` on the node, then drain (3.1) and let the GPU Operator's validator re-certify the node once you restart it — **not** "just restart the pod," chapter 04's checkpoint answer 5 explains why |
 | **vLLM OOMKilled pod** | Chapter 09's memory-pinned Deployment | Distinguish a **CUDA OOM** (`CUDA out of memory` in logs, `--gpu-memory-utilization` too high — chapter 09's troubleshooting table) from a real kubelet **OOMKilled** (`kubectl get pod -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'` = `OOMKilled`, exit code 137 — the *container's* `resources.limits.memory` (host RAM) was exceeded, not GPU VRAM) — see section 4 step 3 for the full diagnostic |
-| **Kueue quota exhaustion blocking a team** | Chapter 06's ClusterQueues/Cohort | `common/scripts/kueue-quota-report.sh` — is the team's own `nominalQuota` too small, a `borrowingLimit` too tight, or genuinely no spare capacity anywhere in the cohort? Each has a different fix |
-| **Node stuck `NotReady`** | Any chapter, most often right after a spot reclaim/replace on a GPU pool | `common/scripts/diagnose-notready-node.sh` — separate "kubelet lost contact briefly" from "the GPU driver DaemonSet wedged it" (chapter 02) from "the VM is actually gone" |
+| **Kueue quota exhaustion blocking a team** | Chapter 06's ClusterQueues/Cohort | `eks/scripts/kueue-quota-report.sh` — is the team's own `nominalQuota` too small, a `borrowingLimit` too tight, or genuinely no spare capacity anywhere in the cohort? Each has a different fix |
+| **Node stuck `NotReady`** | Any chapter, most often right after a spot reclaim/replace on a GPU pool | `eks/scripts/diagnose-notready-node.sh` — separate "kubelet lost contact briefly" from "the GPU driver DaemonSet wedged it" (chapter 02) from "the VM is actually gone" |
 
 Each runbook script is **read-only** (`kubectl get`/`describe`, no mutations) — safe to run against
 a live cluster at any time, including one you don't fully trust yet.
@@ -284,7 +284,7 @@ flowchart TB
     PVC[PVCs / model caches<br/>ch05 shared storage, ch09 hf-cache]
     CRD[Custom resources with real state<br/>ch06 Kueue queues, ch11 InferenceServices]
     ARGO[ArgoCD Application objects<br/>ch15 -- sync/health state, not just the Git repo]
-    SEC[Generated Secrets/ConfigMaps<br/>not reproduced by kubectl apply -k]
+    SEC[Generated Secrets/ConfigMaps<br/>not reproduced by kubectl apply -f]
   end
   VELERO[Velero Schedule: nightly] --> PVC
   VELERO --> CRD
@@ -303,7 +303,7 @@ current model version, an ArgoCD `Application`'s sync status) — Velero backs u
 objects and, via CSI snapshots, PVC contents; it never touches etcd directly on any of these three
 clouds.
 
-**RPO/RTO framing.** `common/velero/schedule-platform-backup.yaml` runs nightly (`0 2 * * *`) with a
+**RPO/RTO framing.** `eks/velero-schedule-platform-backup.yaml` runs nightly (`0 2 * * *`) with a
 30-day TTL — that's an **RPO of ~24 hours** for anything in `ch05-models`, `ch06-kueue`,
 `ch09-vllm`, `ch11-kserve`, and `argocd`. That's appropriate for this course's labs (nothing here
 changes minute-to-minute) but is almost certainly too coarse for a real production platform serving

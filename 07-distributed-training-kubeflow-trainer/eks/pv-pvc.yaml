@@ -1,0 +1,40 @@
+# S3 bucket mounted with Mountpoint for Amazon S3 CSI driver (static provisioning).
+# Prereq: aws-mountpoint-s3-csi-driver add-on (README §4.3).
+# Render-time substitution: README §4.3 runs envsubst on ${BUCKET_NAME} / ${AWS_REGION}.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ch07-ddp-checkpoints
+spec:
+  capacity:
+    storage: 100Gi              # ignored, required
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""          # required for static provisioning
+  claimRef:
+    namespace: ch07-training
+    name: ddp-checkpoints
+  mountOptions:
+    - allow-delete              # checkpoint retention deletes old files
+    - region ${AWS_REGION}
+    - prefix ddp/               # keep lab objects under one prefix
+  csi:
+    driver: s3.csi.aws.com
+    volumeHandle: ch07-ddp-checkpoints   # must be unique in the cluster
+    volumeAttributes:
+      bucketName: ${BUCKET_NAME}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ddp-checkpoints
+  namespace: ch07-training
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: ch07-ddp-checkpoints

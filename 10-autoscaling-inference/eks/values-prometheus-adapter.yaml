@@ -1,0 +1,21 @@
+# Helm values for the prometheus-adapter install in the README's Step 1. Points at chapter 04's
+# in-cluster kube-prometheus-stack Prometheus. For a cloud-managed Prometheus (Amazon Managed
+# Service for Prometheus) swap `prometheus.url` for that endpoint instead — AMP's query API needs
+# SigV4-signed requests, so the in-cluster route is what this chapter's lab actually exercises.
+prometheus:
+  url: http://kube-prometheus-stack-prometheus.monitoring.svc
+  port: 9090
+  path: ""
+
+rules:
+  default: false
+  custom:
+  - seriesQuery: 'vllm:num_requests_waiting{namespace!="",pod!=""}'
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        pod: {resource: "pod"}
+    name:
+      matches: "^vllm:num_requests_waiting$"
+      as: "vllm_num_requests_waiting"
+    metricsQuery: 'avg_over_time(<<.Series>>{<<.LabelMatchers>>}[1m])'

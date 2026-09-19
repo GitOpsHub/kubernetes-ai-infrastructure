@@ -1,0 +1,46 @@
+# Attribute-based selection: something the device plugin model cannot express.
+# "Give me any NVIDIA GPU with at least 20Gi memory" -> matches L4 (24Gi) / A10 (24Gi),
+# skips T4 (16Gi). Attribute/capacity names are published by the driver in ResourceSlices:
+#   kubectl get resourceslices -o yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-20gi-plus
+  namespace: ch03-gpu-sharing
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            selectors:
+              - cel:
+                  expression: "device.capacity['gpu.nvidia.com'].memory.compareTo(quantity('20Gi')) >= 0"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dra-cel-selector
+  namespace: ch03-gpu-sharing
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-20gi-plus
+      containers:
+        - name: cuda
+          image: nvidia/cuda:12.9.1-base-ubuntu24.04
+          command: ["bash", "-c", "nvidia-smi --query-gpu=name,memory.total --format=csv && sleep 30"]
+          resources:
+            claims:
+              - name: gpu

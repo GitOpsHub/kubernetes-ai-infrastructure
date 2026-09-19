@@ -1,0 +1,92 @@
+# EKS: interactive RayCluster.   kubectl apply -f 08-ray-on-kubernetes/eks/raycluster-spot.yaml
+#
+# Head runs on stable (on-demand) capacity with no GPU -- it's the GCS/dashboard/autoscaler
+# process, losing it mid-run is far more disruptive than losing a worker, and it doesn't need a
+# GPU. Workers run on spot GPU capacity (nodeSelector/tolerations below, matching the managed
+# node group created in the README's §4.2) and autoscale 0..2; the in-tree Ray autoscaler (not
+# the Kubernetes Cluster Autoscaler) adds/removes *Ray* worker replicas based on pending Ray
+# tasks, which in turn changes how many Pods exist for the Kubernetes-level autoscaler to size
+# nodes for.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: ray-spot
+  namespace: ch08-ray
+  labels:
+    app.kubernetes.io/part-of: ch08
+spec:
+  rayVersion: "2.52.0"
+  enableInTreeAutoscaling: true
+  autoscalerOptions:
+    upscalingMode: Default
+    idleTimeoutSeconds: 120       # scale a GPU worker back to 0 two minutes after it goes idle
+  headGroupSpec:
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-cpus: "0"                # don't schedule Ray tasks/actors on the head
+    template:
+      spec:
+        serviceAccountName: ray
+        containers:
+          - name: ray-head
+            image: rayproject/ray:2.52.0-py311
+            ports:
+              - containerPort: 6379
+                name: gcs-server
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+              - containerPort: 8000
+                name: serve
+            resources:
+              requests:
+                cpu: "1"
+                memory: 2Gi
+              limits:
+                cpu: "2"
+                memory: 3Gi
+            volumeMounts:
+              - name: log-volume
+                mountPath: /tmp/ray
+        volumes:
+          - name: log-volume
+            emptyDir: {}
+  workerGroupSpecs:
+    - groupName: gpu-spot
+      replicas: 1
+      minReplicas: 0
+      maxReplicas: 2
+      rayStartParams: {}
+      template:
+        spec:
+          serviceAccountName: ray
+          nodeSelector:
+            eks.amazonaws.com/capacityType: SPOT   # set automatically on managed node groups
+            ch08.lab/gpu: l4                       # set by the eksctl create nodegroup command in README §4.2
+          tolerations:
+            - key: nvidia.com/gpu                  # taint added by that same nodegroup command
+              operator: Exists
+              effect: NoSchedule
+          # Give Ray's own graceful-shutdown drain (it stops accepting new tasks/actors and lets
+          # running ones finish) a head start on a spot reclaim before the kubelet SIGKILLs it.
+          terminationGracePeriodSeconds: 25
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.52.0-py311-gpu
+              resources:
+                requests:
+                  cpu: "3"
+                  memory: 12Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: log-volume
+                  mountPath: /tmp/ray
+          volumes:
+            - name: log-volume
+              emptyDir: {}

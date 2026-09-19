@@ -1,0 +1,10 @@
+# Optional (README §3.4/Lab C): LocalQueue in this chapter's namespace, pointing at the
+# ClusterQueue from 06-batch-jobs-and-kueue ("team-research": spot flavor first, on-demand
+# fallback). Only needed if you're layering Kueue admission on top of the base GPU lab.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: ch07-queue
+  namespace: ch07-training
+spec:
+  clusterQueue: team-research

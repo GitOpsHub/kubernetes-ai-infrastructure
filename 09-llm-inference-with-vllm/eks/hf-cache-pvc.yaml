@@ -1,0 +1,15 @@
+# Model-cache PVC so a restarted/rescheduled pod (spot reclaim!) reuses already-downloaded weights
+# instead of re-pulling ~1.2 GiB from Hugging Face. Uses the cluster's default StorageClass
+# (EKS: gp3 via EBS CSI) — fine for a single ReadWriteOnce replica. For a cache SHARED across many
+# vLLM replicas/nodes, see 05-model-storage-and-data (Mountpoint-S3, ReadOnlyMany) and mount that
+# instead.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hf-cache
+  namespace: ch09-vllm
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

@@ -1,0 +1,20 @@
+# Bind to a Group so it maps straight onto real IdP groups behind EKS's OIDC/IAM
+# integration (`aws eks create-access-entry --type STANDARD` mapped to an IAM group, or an
+# OIDC groups claim). This repo doesn't stand up an IdP, so `kubectl` impersonation is how the
+# lab verifies it (see README Step 1): `kubectl auth can-i --as-group=team-a-engineers ...`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-edit-binding
+  namespace: ch14-team-a
+subjects:
+- kind: Group
+  name: team-a-engineers
+  apiGroup: rbac.authorization.k8s.io
+- kind: ServiceAccount
+  name: team-a-ci
+  namespace: ch14-team-a
+roleRef:
+  kind: Role
+  name: tenant-edit
+  apiGroup: rbac.authorization.k8s.io

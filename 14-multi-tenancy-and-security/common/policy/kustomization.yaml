@@ -1,7 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - vap-disallow-latest-tag.yaml
-  - vap-require-resource-limits.yaml
-  - vap-restrict-registries.yaml
-  - kyverno-verify-images.yaml

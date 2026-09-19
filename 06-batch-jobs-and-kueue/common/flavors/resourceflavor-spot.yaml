@@ -1,9 +1,0 @@
-# Cloud-agnostic base. Each cloud overlay (gke/, eks/, aks/) patches nodeLabels (and, on AKS,
-# tolerations) so that Workloads assigned this flavor land on spot/preemptible nodes.
-# Left empty here it matches any node - that's what cpu-lab/ uses (kind/minikube has no spot concept).
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: ResourceFlavor
-metadata:
-  name: spot
-spec:
-  nodeLabels: {}

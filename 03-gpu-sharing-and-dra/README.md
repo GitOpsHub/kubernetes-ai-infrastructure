@@ -118,17 +118,17 @@ By the end you can:
 3. Read and write DRA `DeviceClass`, `ResourceClaim`, `ResourceClaimTemplate`, and a CEL device
    selector.
 4. Explain why a DRA driver and a device plugin must never manage the same node.
-5. Run the same DRA claim mechanics on a free local kind cluster with a simulated GPU driver.
+5. Install the NVIDIA DRA driver on a dedicated EKS node group and confirm it publishes
+   `ResourceSlice`s for real GPUs.
 
 | Time | Activity |
 |---|---|
-| 0:00–0:35 | Read section 3 (concepts). Skim `common/device-plugin-config/configmap.yaml` and `common/dra/*.yaml` |
-| 0:35–1:00 | `cpu-lab/`: DRA claim mechanics on kind, no GPU quota needed |
-| 1:00–1:20 | Time-slicing lab on EKS |
-| 1:20–1:40 | MPS lab |
-| 1:40–2:15 | DRA lab (single claim, shared claim, CEL selector, opaque sharing config) |
-| 2:15–2:45 | MIG (read-through if you don't have A100/H100 quota; hands-on if you do) |
-| 2:45–3:00 | Checkpoint questions, cleanup |
+| 0:00–0:35 | Read section 3 (concepts). Skim `eks/device-plugin-config.yaml` and `eks/dra/*.yaml` |
+| 0:35–1:00 | Time-slicing lab on EKS |
+| 1:00–1:20 | MPS lab |
+| 1:20–1:55 | DRA lab (single claim, shared claim, CEL selector, opaque sharing config) |
+| 1:55–2:25 | MIG (read-through if you don't have A100/H100 quota; hands-on if you do) |
+| 2:25–2:40 | Checkpoint questions, cleanup |
 
 ## 3. Concepts
 
@@ -153,12 +153,12 @@ your own dev/test pods sharing a GPU with each other are usually fine with time-
 EKS has no native node-group flag for GPU sharing (unlike GKE's `gpu-sharing-strategy` on
 `gcloud container node-pools create`), so this chapter leans on the portable mechanism: the
 NVIDIA device plugin's `sharing:` block, delivered as a `nvidia.com/device-plugin.config`
-ConfigMap key and selected per node with a label (`common/device-plugin-config/configmap.yaml`).
+ConfigMap key and selected per node with a label (`eks/device-plugin-config.yaml`).
 The GPU Operator's config-manager sidecar watches that label and restarts the plugin whenever it
 changes — no manual DaemonSet restart needed.
 
 **What's actually in that ConfigMap, concretely.** Open
-`common/device-plugin-config/configmap.yaml`: it's one ConfigMap with several *keys*, each key
+`eks/device-plugin-config.yaml`: it's one ConfigMap with several *keys*, each key
 holding a small YAML document the device plugin understands (`time-sliced-4`, `mps-4`,
 `mig-single`, `mig-mixed`, and a no-op `any`). A node doesn't get all of these at once — you pick
 *one* key per node with the label `nvidia.com/device-plugin.config: <key>`, and the plugin running
@@ -179,12 +179,11 @@ references a `ResourceClaim` (or gets one generated per-pod from a `ResourceClai
 claim's `spec.devices.requests` says what it needs (`deviceClassName`, optionally a CEL
 `selectors` expression over device attributes/capacity published in `ResourceSlice` objects by
 the driver), and the scheduler allocates matching devices at bind time. A `DeviceClass`
-(`gpu.nvidia.com` here, `gpu.example.com` in the CPU lab) is a cluster-scoped, admin-defined
-"kind of device" claims can request. Config attached to a claim (`config[].opaque`) is passed
-through to the driver verbatim — this is how the NVIDIA DRA driver implements time-slicing/MPS
-as claim-time config instead of node-time config. See `common/dra/*.yaml` for four patterns:
-exclusive claim, claim shared by name across pods, CEL attribute selector, and opaque
-time-slicing config across two containers in one pod.
+(`gpu.nvidia.com` here) is a cluster-scoped, admin-defined "kind of device" claims can request.
+Config attached to a claim (`config[].opaque`) is passed through to the driver verbatim — this is
+how the NVIDIA DRA driver implements time-slicing/MPS as claim-time config instead of node-time
+config. See `eks/dra/*.yaml` for four patterns: exclusive claim, claim shared by name across
+pods, CEL attribute selector, and opaque time-slicing config across two containers in one pod.
 
 **Unpacking those four DRA objects one at a time, since they're new vocabulary even if you know
 Kubernetes well:**
@@ -196,13 +195,13 @@ Kubernetes well:**
 - **`ResourceClaim`** — a namespaced object that says "I need one device matching this
   `DeviceClass` (optionally matching this selector)." It's a *request for allocation*, not the
   device itself. One `ResourceClaim` gets resolved to one specific physical device once the
-  scheduler places a pod that uses it. Look at `common/dra/02-shared-claim.yaml`: it's a single
+  scheduler places a pod that uses it. Look at `eks/dra/02-shared-claim.yaml`: it's a single
   `ResourceClaim` named `shared-gpu` that a `Deployment` with 2 replicas both reference by name —
   because it's one claim, not a template, both pods end up bound to the *same* allocated GPU.
 - **`ResourceClaimTemplate`** — a stamp for `ResourceClaim`s: instead of you writing one
   `ResourceClaim` per pod, you write a template once and reference it from a pod spec's
   `resourceClaims`, and Kubernetes creates (and later garbage-collects) a fresh, private
-  `ResourceClaim` for every pod that uses it. `common/dra/01-single-gpu.yaml` uses this pattern —
+  `ResourceClaim` for every pod that uses it. `eks/dra/01-single-gpu.yaml` uses this pattern —
   every pod created from that template gets its *own* exclusive claim, the DRA equivalent of
   `resources.limits: {nvidia.com/gpu: 1}`. The difference between this and the shared-claim example
   above is entirely "did you reference a `ResourceClaimTemplateName` (each pod gets its own) or a
@@ -228,45 +227,6 @@ cp env.sh.example env.sh && source env.sh && source versions.env   # if not alre
 Prerequisite: chapter 01 (device plugin) or chapter 02 (GPU Operator) already running on the
 node groups you point sharing configs at — this chapter reconfigures the plugin, it doesn't
 install it fresh, except for DRA which installs its own separate driver.
-
-### Step 0 (no GPU quota needed): DRA mechanics on kind
-
-Everything past this point either needs a real GPU node group (costs money the moment it's
-created) or a lot of quota approval lead time. This step needs neither: `kind` (Kubernetes-in-
-Docker) plus `kubernetes-sigs/dra-example-driver`, which fakes GPUs entirely in software — it
-publishes `ResourceSlice`s and hands out claims exactly like a real driver, but there's no CUDA,
-no `/dev/nvidia*`, and no performance behavior underneath. The point is to get the DRA object
-mechanics (`ResourceClaim`, `ResourceClaimTemplate`, `DeviceClass`) into your hands for free before
-you spend a cent on a GPU.
-
-```bash
-./03-gpu-sharing-and-dra/cpu-lab/create-kind-cluster.sh
-./03-gpu-sharing-and-dra/cpu-lab/install-example-driver.sh
-kubectl apply -k 03-gpu-sharing-and-dra/cpu-lab
-kubectl get resourceclaims -n ch03-dra-cpu-lab
-kubectl get pod -n ch03-dra-cpu-lab dra-cpu-single -o jsonpath='{.status.phase}{"\n"}'
-kubectl exec -n ch03-dra-cpu-lab dra-cpu-single -- bash -c 'export | grep -i gpu'
-```
-- `create-kind-cluster.sh` boots a local 3-node kind cluster pinned to a Kubernetes 1.35 node
-  image, so the GA `resource.k8s.io/v1` API is available with no feature gates to flip.
-- `install-example-driver.sh` clones the pinned `dra-example-driver` tag and Helm-installs it —
-  this driver is what creates the `gpu.example.com` `DeviceClass` and starts publishing
-  `ResourceSlice`s for the (fake) GPUs it simulates per node.
-- `kubectl apply -k cpu-lab` applies `01-single-claim.yaml` and `02-sharing-config.yaml` — the
-  same `ResourceClaim`/`ResourceClaimTemplate` shapes you'll use for real in Step 3, just pointed
-  at `gpu.example.com` instead of `gpu.nvidia.com`.
-- The `get resourceclaims` / `get pod ... -o jsonpath` / `exec ... export` commands are just
-  "did it work": a `ResourceClaim` object exists, the pod reached `Running` (meaning the scheduler
-  successfully allocated a fake device for it), and the exec shows the fake GPU env vars the
-  example driver injects in place of real CUDA device files.
-
-Expected: two `Running` pods each holding their own simulated GPU claim, and
-`dra-cpu-sharing`'s three containers holding claims from the same `ResourceClaimTemplate`
-using two different opaque sharing strategies (`TimeSlicing`, `SpacePartitioning`) — the same
-claim/template/opaque-config shape as the real NVIDIA driver, verified without any cloud account.
-
-**What doesn't carry over:** no real CUDA context, no memory isolation, no performance signal —
-only the API objects, scheduling flow, and claim/config mechanics transfer.
 
 ### Step 1: Time-slicing
 
@@ -295,7 +255,7 @@ chapter 02 is installed as release `gpu-operator` in namespace `gpu-operator`). 
 ConfigMap just makes the sharing profiles available; the `helm upgrade` call is what actually
 tells the device plugin's Helm-managed config *which* ConfigMap and key to read by default:
 ```bash
-kubectl apply -k 03-gpu-sharing-and-dra/common/device-plugin-config
+kubectl apply -f 03-gpu-sharing-and-dra/eks/device-plugin-config.yaml
 
 helm upgrade gpu-operator nvidia/gpu-operator \
   --namespace gpu-operator \
@@ -319,7 +279,8 @@ unlabeled GPU node never accidentally inherits a sharing profile meant for a dif
 
 Apply the demo and check the pods:
 ```bash
-kubectl apply -k 03-gpu-sharing-and-dra/eks/timeslicing
+kubectl apply -f 03-gpu-sharing-and-dra/eks/namespace.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/timeslicing/deployment.yaml
 kubectl -n ch03-gpu-sharing get pods -o wide
 kubectl -n ch03-gpu-sharing exec deploy/timeslice-demo -- nvidia-smi -L
 ```
@@ -361,7 +322,8 @@ eksctl create nodegroup -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml 
 
 kubectl label node -l course-chapter=03,eks.amazonaws.com/nodegroup=gpu-share-spot \
   nvidia.com/device-plugin.config=mps-4 --overwrite
-kubectl apply -k 03-gpu-sharing-and-dra/eks/mps
+kubectl apply -f 03-gpu-sharing-and-dra/eks/namespace.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/mps/deployment.yaml
 kubectl -n ch03-gpu-sharing get pods -o wide
 ```
 Expected output:
@@ -393,7 +355,7 @@ CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
 ### Step 3: DRA
 
 What you're about to do: install the NVIDIA DRA driver on its own node group (never mixed with a
-device plugin), apply the four claim patterns from `common/dra/`, and confirm the scheduler allocated
+device plugin), apply the four claim patterns from `eks/dra/`, and confirm the scheduler allocated
 real devices through `ResourceClaim`/`ResourceSlice` objects instead of extended-resource counting.
 
 Create the `gpu-dra-spot` node group (labeled `gpu-mode: dra`, `nvidia.com/gpu.deploy.device-plugin:
@@ -442,11 +404,15 @@ scheduler and any CEL selectors will match against.
 
 Apply the claim patterns and check allocation:
 ```bash
-kubectl apply -k 03-gpu-sharing-and-dra/eks/dra
+kubectl apply -f 03-gpu-sharing-and-dra/eks/namespace.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/dra/01-single-gpu.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/dra/02-shared-claim.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/dra/03-cel-selector.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/dra/04-timeslicing-config.yaml
 kubectl get resourceclaims -n ch03-gpu-sharing
 kubectl get resourceslices -o wide
 ```
-This applies all four patterns from `common/dra/`: `01-single-gpu.yaml` (one claim per pod,
+This applies all four patterns from `eks/dra/`: `01-single-gpu.yaml` (one claim per pod,
 exclusive), `02-shared-claim.yaml` (one named claim, two pods share the same GPU), `03-cel-selector.yaml`
 (a claim that only matches GPUs with ≥20Gi memory), and `04-timeslicing-config.yaml` (opaque
 per-claim time-slicing config across two containers in one pod).
@@ -478,7 +444,8 @@ eksctl create nodegroup -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml 
 # MIG Manager (part of the GPU Operator) reads the nvidia.com/mig.config label and partitions
 # the GPU after the node joins; wait for it before scheduling:
 kubectl get pods -n gpu-operator -l app=nvidia-mig-manager -w
-kubectl apply -k 03-gpu-sharing-and-dra/eks/mig
+kubectl apply -f 03-gpu-sharing-and-dra/eks/namespace.yaml
+kubectl apply -f 03-gpu-sharing-and-dra/eks/mig/deployment.yaml
 ```
 The wait matters because MIG partitioning is not instantaneous or automatic on node join: the MIG
 Manager DaemonSet has to notice the new node's `nvidia.com/mig.config` label, then actually
@@ -517,7 +484,7 @@ NVIDIA's MIG profile naming: 1 GPU compute slice (of 7 total on an A100) and 5GB
 | MPS pod never sees `CUDA_MPS_*` env | Plugin's MPS control daemon not running. The device plugin only injects those env vars when it has successfully started the MPS control daemon on the node — if that daemon crashed or never started, clients get scheduled as if MPS worked but never actually get quota-managed access. | `kubectl -n gpu-operator logs -l app=nvidia-device-plugin-mps-control-daemon` |
 | `ResourceClaim` stuck `pending` forever (no error) | No node in range advertises a matching `ResourceSlice`, or CEL selector too strict. Unlike a `Pending` pod from ordinary scheduling (which usually gets an event explaining why), an over-strict or typo'd CEL expression can just quietly match nothing, with no obvious error pointing at the expression itself. | `kubectl get resourceslices -o yaml`, check `device.capacity` names/units match the CEL expression exactly |
 | Device plugin ConfigMap change has no effect | Wrong `devicePlugin.config.name`/`default` on the Helm release, or node missing the label. The ConfigMap can be perfectly correct and applied, but if the Helm release's `devicePlugin.config.name` doesn't point at it (or the node lacks the label selecting a key inside it), the plugin keeps reading whatever it was already using. | Re-run the `helm upgrade gpu-operator ...` from Step 1 (`--set devicePlugin.config.name=device-plugin-sharing --set devicePlugin.config.default=any`); verify with `kubectl get nodes -o custom-columns=NAME:.metadata.name,CFG:.metadata.labels.nvidia\.com/device-plugin\.config` |
-| kind cluster: `no matches for kind "ResourceClaimTemplate"` | kind node image too old (pre-1.34) or wrong context. `resource.k8s.io/v1` DRA objects only exist as API types on clusters new enough to have the GA API compiled in — an older kind image simply doesn't recognize the kind, exactly like applying a CRD-backed resource before the CRD exists. | Recreate with `create-kind-cluster.sh` (pins `kindest/node:v1.35.8`); `kubectl config current-context` should be `kind-dra-cpu-lab` |
+| `no matches for kind "ResourceClaimTemplate"` | Cluster too old (pre-1.34) or `resource.k8s.io/v1` not yet GA on this control plane. DRA objects only exist as API types on clusters new enough to have the GA API compiled in — applying one before the API exists behaves exactly like applying a CRD-backed resource before the CRD is installed. | Confirm the cluster is on Kubernetes 1.35+ (`kubectl version`); recreate the EKS cluster on `version: "1.35"` per chapter 00 if not |
 
 ## 7. Cleanup and cost notes
 
@@ -526,12 +493,17 @@ groups:
 ```bash
 : "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?source env.sh}"
 
-for k in timeslicing mps mig dra; do
-  kubectl delete -k "03-gpu-sharing-and-dra/eks/${k}" --ignore-not-found --wait=false || true
-done
+kubectl delete -f 03-gpu-sharing-and-dra/eks/timeslicing/deployment.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/mps/deployment.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/mig/deployment.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/dra/01-single-gpu.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/dra/02-shared-claim.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/dra/03-cel-selector.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/dra/04-timeslicing-config.yaml --ignore-not-found --wait=false || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/namespace.yaml --ignore-not-found --wait=false || true
 helm uninstall nvidia-dra-driver-gpu -n nvidia-dra-driver-gpu 2>/dev/null || true
 kubectl delete namespace nvidia-dra-driver-gpu --ignore-not-found --wait=false
-kubectl delete -k 03-gpu-sharing-and-dra/common/device-plugin-config --ignore-not-found || true
+kubectl delete -f 03-gpu-sharing-and-dra/eks/device-plugin-config.yaml --ignore-not-found || true
 # Revert the operator to its default (no sharing config):
 #   helm upgrade gpu-operator nvidia/gpu-operator -n gpu-operator --reuse-values \
 #     --set devicePlugin.config.name="" --set devicePlugin.config.default=""
@@ -541,9 +513,6 @@ for ng in gpu-share-spot gpu-dra-spot gpu-mig-spot; do
 done
 rm -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml
 ```
-```bash
-./03-gpu-sharing-and-dra/cpu-lab/cleanup.sh   # local, but frees laptop CPU/RAM
-```
 - Sharing doesn't change the node's hourly price — 4 time-sliced pods on one spot L4 still cost
   exactly what the node costs, split across more work. The saving is utilization, not the bill.
   In other words: sharing is a way to get more value out of a GPU you're already paying for, not a
@@ -551,8 +520,6 @@ rm -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml
   itself to shrink just because you turned on time-slicing or MPS.
 - MIG on A100/H100 spot, when available, is still several×  an L4/T4's price. Delete the group the
   moment the lab is done; don't leave `desiredCapacity` above 0 overnight.
-- The kind lab is entirely local — no cloud spend, but the driver's fake devices vanish with the
-  cluster, so nothing lingers to bill you even if you forget cleanup.
 
 ## 8. Checkpoint questions
 
@@ -562,7 +529,7 @@ rm -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml
 4. What can a DRA `ResourceClaim`'s CEL selector express that a plain `nvidia.com/gpu: 1` request cannot?
 5. What happens if two pods reference the same `ResourceClaim` by name (not a template)?
 6. Why is MIG's partition size immutable after node-group creation?
-7. Name one thing that doesn't carry over from the kind DRA lab to a real GPU cluster.
+7. Why must the `gpu-dra-spot` node group be labeled `nvidia.com/gpu.deploy.device-plugin: "false"`?
 
 <details>
 <summary>Answers</summary>
@@ -585,23 +552,22 @@ rm -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml
 6. The GPU's physical SM/memory partitioning happens once, when the driver configures the card
    for that profile; changing it requires the GPU to be reset/reconfigured, so you delete and
    recreate the node group instead of live-editing it.
-7. No real CUDA context, no device driver, no memory/compute isolation, no performance numbers —
-   only the Kubernetes API objects (ResourceClaim/Template/DeviceClass) and scheduling flow
-   transfer; anything that touches an actual GPU does not.
+7. So the GPU Operator's device-plugin DaemonSet skips that node entirely — this is the
+   infrastructure-level enforcement of the "DRA driver and device plugin must never manage the
+   same node" rule from section 3.3, rather than relying on remembering it by hand.
 </details>
 
 ## 9. Further reading and versions tested
 
 - [NVIDIA GPU sharing docs](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html), [NVIDIA MPS](https://docs.nvidia.com/deploy/mps/index.html), [Kubernetes DRA tutorial](https://kubernetes.io/docs/tutorials/cluster-management/install-use-dra/), [Kubernetes DRA concepts](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)
 - EKS: [Amazon EKS GPU nodes](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-ami.html), [NVIDIA GPU Operator on EKS](https://docs.aws.amazon.com/eks/latest/userguide/eks-add-ons.html)
-- [`kubernetes-sigs/dra-example-driver`](https://github.com/kubernetes-sigs/dra-example-driver), [`kubernetes-sigs/dra-driver-nvidia-gpu`](https://github.com/NVIDIA/k8s-dra-driver-gpu) (moved from `NVIDIA/` org; chart now under `registry.k8s.io/dra-driver-nvidia`)
+- [`kubernetes-sigs/dra-driver-nvidia-gpu`](https://github.com/NVIDIA/k8s-dra-driver-gpu) (moved from `NVIDIA/` org; chart now under `registry.k8s.io/dra-driver-nvidia`)
 
 **Versions tested** (2026-09-16): Kubernetes 1.35 (`resource.k8s.io/v1` GA), GPU Operator
 `${GPU_OPERATOR_VERSION}` (v26.7.0), NVIDIA device plugin `${DEVICE_PLUGIN_VERSION}` (v0.20.0),
 `dra-driver-nvidia-gpu` chart `0.5.0` (`registry.k8s.io/dra-driver-nvidia`, not pinned in
-`versions.env` yet — see `# VERIFY` items below), `dra-example-driver` `v0.5.0`, kind `v0.30+`,
-`kindest/node:v1.35.8`, images `nvidia/cuda:12.9.1-base-ubuntu24.04`,
-`nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1-ubuntu18.04`, `ubuntu:22.04`.
+`versions.env` yet — see `# VERIFY` items below), images `nvidia/cuda:12.9.1-base-ubuntu24.04`,
+`nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1-ubuntu18.04`.
 
 ---
 

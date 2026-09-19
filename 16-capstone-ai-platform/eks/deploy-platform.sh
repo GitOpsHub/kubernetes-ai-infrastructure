@@ -46,7 +46,9 @@ echo "== Phase 6: GitOps + pipelines + registry (ch15) =="
 # kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab
 
 echo "== Phase 7: capstone glue (ch16 — this chapter) =="
-# kubectl apply -k 16-capstone-ai-platform/eks
+# kubectl apply -f 16-capstone-ai-platform/eks/clusterqueue-team-research.yaml
+# kubectl apply -f 16-capstone-ai-platform/eks/namespace-rbac.yaml
+# kubectl apply -f 16-capstone-ai-platform/eks/workflowtemplate-platform-e2e.yaml
 # argo submit --watch -n ch15-pipelines --from workflowtemplate/platform-e2e
 
 echo "Every command above is commented out on purpose — uncomment and run one phase at a time."

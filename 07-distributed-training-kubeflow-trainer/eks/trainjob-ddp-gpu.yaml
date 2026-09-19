@@ -1,0 +1,66 @@
+# 2 nodes x 1 GPU PyTorch DDP (NCCL) on spot GPUs.
+# The Trainer torch plugin injects PET_NNODES=2, PET_NPROC_PER_NODE=1,
+# PET_NODE_RANK (from the Job completion index), PET_MASTER_ADDR=ddp-gpu-node-0-0.ddp-gpu,
+# PET_MASTER_PORT=29500 -> torchrun reads them, no flags needed.
+#
+# spec.runtimePatches[] below is EKS's own addition on top of the cloud-agnostic
+# torch-ddp-spot runtime (eks/trainingruntime-torch-ddp-spot.yaml): it layers the
+# spot/GPU nodeSelector + toleration onto the runtime's JobSet template at admission
+# time, without forking the runtime itself (see README §3.3).
+apiVersion: trainer.kubeflow.org/v1alpha1
+kind: TrainJob
+metadata:
+  name: ddp-gpu
+  namespace: ch07-training
+  labels:
+    app.kubernetes.io/part-of: ch07
+spec:
+  runtimeRef:
+    apiGroup: trainer.kubeflow.org
+    kind: TrainingRuntime
+    name: torch-ddp-spot
+  runtimePatches:
+    - manager: ch07.lab/cloud-overlay
+      trainingRuntimeSpec:
+        template:
+          spec:
+            replicatedJobs:
+              - name: node
+                template:
+                  spec:
+                    template:
+                      spec:
+                        nodeSelector:
+                          eks.amazonaws.com/capacityType: SPOT   # set automatically on managed node groups
+                          ch07.lab/gpu: l4                       # set by the eksctl create nodegroup command in README §4.3
+                        tolerations:
+                          - key: nvidia.com/gpu                  # taint added by that same nodegroup command
+                            operator: Exists
+                            effect: NoSchedule
+  trainer:
+    # CUDA 12.6 build: works on T4 (Turing) and L4 (Ada) with any recent cloud driver.
+    image: pytorch/pytorch:2.13.0-cuda12.6-cudnn9-runtime
+    command:
+      - torchrun
+      - /workspace/scripts/train_ddp.py
+    numNodes: 2
+    numProcPerNode: 1
+    resourcesPerNode:
+      requests:
+        cpu: "2"
+        memory: 8Gi
+        nvidia.com/gpu: "1"
+      limits:
+        memory: 12Gi
+        nvidia.com/gpu: "1"
+    env:
+      - name: RUN_ID
+        value: ddp-gpu
+      - name: TOTAL_STEPS
+        value: "20000"
+      - name: CHECKPOINT_EVERY
+        value: "500"
+      - name: BATCH_SIZE
+        value: "1024"
+      - name: NCCL_DEBUG
+        value: WARN          # set INFO to see which transport NCCL picked (Socket vs IB/EFA)

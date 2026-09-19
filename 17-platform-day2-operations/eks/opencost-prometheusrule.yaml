@@ -1,0 +1,60 @@
+# Chargeback/showback alerting: catches the two things a per-team GPU-hour bill should never
+# surprise anyone with -- a GPU that's allocated (and billing) but not doing any work, and a team's
+# spend crossing a budget line. Joins OpenCost's own cost series with chapter 04's DCGM metrics
+# (`DCGM_FI_DEV_GPU_UTIL`) -- same Prometheus, same `release: kube-prometheus-stack` label
+# convention as 04-gpu-observability/eks/prometheusrule.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: opencost-chargeback
+  namespace: opencost
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: ch17-chargeback
+    rules:
+    # Idle GPU = allocated to a running pod but averaging <5% SM utilization for 30 minutes.
+    # DCGM_FI_DEV_GPU_UTIL is per-GPU/node (chapter 04); joining on `Hostname` against
+    # kube_pod_info's `node` label attributes it to the pod (and its `app.kubernetes.io/part-of`
+    # chapter/team label) actually holding the nvidia.com/gpu allocation, so the alert names a
+    # namespace/pod to go talk to, not just "some GPU somewhere is idle."
+    - alert: ChargebackIdleGPUAllocation
+      expr: |
+        avg by (Hostname) (DCGM_FI_DEV_GPU_UTIL) < 5
+        and on (Hostname) (
+          count by (Hostname) (kube_pod_container_resource_requests{resource="nvidia_com_gpu"} > 0
+            * on (node) group_left(Hostname) label_replace(kube_node_labels, "Hostname", "$1", "node", "(.*)")) > 0
+        )
+      for: 30m
+      labels:
+        severity: warning
+      annotations:
+        summary: "GPU on node {{ $labels.Hostname }} is allocated but idle"
+        description: >-
+          Average GPU utilization has been under 5% for 30m on a node that has a running,
+          GPU-requesting pod. This node is billing a team's chargeback report for compute it isn't
+          using -- see README section 7 (chargeback/showback) for the OpenCost query that names
+          which namespace/team to follow up with, and 13-node-autoscaling-and-cost for scaling it
+          down instead of just alerting on it.
+    # A team's cumulative GPU spend (OpenCost's own `node_gpu_hourly_cost` x allocated GPU-hours,
+    # summed per namespace via `opencost_*` series) crossing a soft monthly budget line. The exact
+    # PromQL for "cost so far this month per namespace" lives in README section 7's showback
+    # query -- this rule wraps that same expression as an alert instead of a dashboard panel.
+    - alert: ChargebackNamespaceBudgetExceeded
+      expr: |
+        sum by (namespace) (
+          label_replace(opencost_pod_gpu_allocation_cost_hourly_dollars, "namespace", "$1", "namespace", "(.*)")
+        ) * 730 > 5000
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Namespace {{ $labels.namespace }} is projected over its monthly GPU budget"
+        description: >-
+          Projected monthly GPU spend (current hourly cost rate x 730h) exceeds the $5000 example
+          threshold set here -- replace with your real per-team budget. # VERIFY the exact
+          `opencost_pod_gpu_allocation_cost_hourly_dollars` metric name against your installed
+          OpenCost version's `/metrics` output; OpenCost's cost-model metric names have changed
+          across major versions, confirm with `curl localhost:9003/metrics | grep gpu` per README
+          section 7 before relying on this in a real environment.

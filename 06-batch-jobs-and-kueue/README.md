@@ -10,12 +10,11 @@
 
 This chapter assumes:
 
-- A cluster from chapter `00-prerequisites-and-cluster-setup` or any cluster for the cpu-lab path —
-  Kueue itself needs no GPUs.
+- The EKS cluster from chapter `00-prerequisites-and-cluster-setup` already exists.
 - `env.sh` and `versions.env` sourced (`source env.sh && source versions.env`) so `${KUEUE_VERSION}`
   and `${EKS_CLUSTER}`/`${AWS_REGION}` are set.
-- For Step 5 (real spot vs on-demand ResourceFlavors): AWS IAM/quota to create a second (on-demand)
-  node group alongside the spot group — see the table in `CONVENTIONS.md` for EKS's spot label.
+- AWS IAM/quota to create the spot + on-demand CPU node group pair this chapter's lab uses (Step 1)
+  — see the table in `CONVENTIONS.md` for EKS's spot label.
 - No GPU node pool is required for this chapter — it's CPU-only quota management. If you're
   continuing straight from chapter `05-model-storage-and-data`, you can reuse that cluster as-is.
 
@@ -93,8 +92,8 @@ By the end you can:
 | Block | Time | What |
 |---|---|---|
 | Theory | 40 min | §3 concepts, object model, the two preemption models |
-| Lab A (any cluster) | 45 min | cpu-lab: install Kueue, queues, plain Job, Indexed Job + podFailurePolicy |
-| Lab B (your cloud) | 60 min | spot/on-demand node pools, cloud-patched ResourceFlavors, borrowing + preemption |
+| Lab A | 75 min | spot/on-demand node pools, Kueue install, queues, plain Job, Indexed Job + podFailurePolicy |
+| Lab B | 60 min | borrowing + preemption across the cohort |
 | Lab C (optional) | 20 min | Fair Sharing vs classical preemption, WorkloadPriorityClass mutability |
 | Review | 15 min | spot notes, troubleshooting, checkpoint questions |
 
@@ -170,7 +169,7 @@ flowchart LR
 
 `spec.podFailurePolicy.rules` (native `batch/v1`, requires `restartPolicy: Never`) lets you say
 "a pod failure caused by disruption doesn't count; a real exit code does." See
-`common/jobs/job-indexed-spot.yaml` for the full rule set.
+`eks/job-indexed-spot.yaml` for the full rule set.
 
 ### 3.3 Kueue's object model
 
@@ -292,9 +291,9 @@ first, on-demand fallback" happen; you never set that on the Job itself.
 | Ordering signal | priority (and, as a tiebreak, borrowWithinCohort) | each ClusterQueue's *historical share* of the cohort, weighted by `Cohort.spec.fairSharing.weight` |
 | Good for | "team B's priority-10000 job always wins" | "over time, give every team roughly its weighted share, regardless of priority" |
 
-This chapter's default install (`common/values-kueue.yaml`) uses **classical preemption** —
+This chapter's default install (`eks/values-kueue.yaml`) uses **classical preemption** —
 `team-a-cq`/`team-b-cq` set `reclaimWithinCohort: LowerPriority` and `borrowWithinCohort`. §Lab C
-and `common/values-kueue-fairsharing.yaml` show how to switch to Fair Sharing instead (not both
+and `eks/values-kueue-fairsharing.yaml` show how to switch to Fair Sharing instead (not both
 at once).
 
 ### 3.6 Topology Aware Scheduling (mention only)
@@ -312,40 +311,80 @@ Layout:
 
 ```
 06-batch-jobs-and-kueue/
-├── common/
-│   ├── base/             namespace ch06-kueue
-│   ├── flavors/          ResourceFlavor spot + on-demand (empty nodeLabels — cloud overlays patch them)
-│   ├── queues/            Cohort, team-a-cq/team-b-cq, team-a-queue/team-b-queue, batch-low/batch-high
-│   ├── jobs/              job-simple (pattern a), job-indexed-spot (pattern b, podFailurePolicy), job-high-priority
-│   ├── values-kueue.yaml              Helm values: classical preemption (default)
-│   └── values-kueue-fairsharing.yaml  Helm values: Fair Sharing (§Lab C, optional)
-├── eks/                  nodegroup config (spot + on-demand), ResourceFlavor patches
-└── cpu-lab/              same queues, unpatched flavors — any cluster, no cloud IAM
+└── eks/
+    ├── nodegroup-ch06.yaml            eksctl config: spot CPU node group + on-demand node group
+    ├── namespace.yaml                 ch06-kueue
+    ├── resourceflavor-spot.yaml       ResourceFlavor spot, nodeLabels = eks.amazonaws.com/capacityType: SPOT
+    ├── resourceflavor-ondemand.yaml   ResourceFlavor on-demand, nodeLabels = ...capacityType: ON_DEMAND
+    ├── cohort.yaml                    Cohort ch06-cohort
+    ├── clusterqueue-team-a.yaml       ClusterQueue team-a-cq
+    ├── clusterqueue-team-b.yaml       ClusterQueue team-b-cq
+    ├── localqueue-team-a.yaml         LocalQueue team-a-queue (namespace ch06-kueue)
+    ├── localqueue-team-b.yaml         LocalQueue team-b-queue (namespace ch06-kueue)
+    ├── workloadpriorityclass-low.yaml   WorkloadPriorityClass batch-low
+    ├── workloadpriorityclass-high.yaml  WorkloadPriorityClass batch-high
+    ├── job-simple.yaml                pattern (a): plain Job
+    ├── job-indexed-spot.yaml          pattern (b): Indexed Job + podFailurePolicy
+    ├── job-high-priority.yaml         used in Step 4 (borrowing/preemption)
+    ├── values-kueue.yaml              Helm values: classical preemption (default)
+    └── values-kueue-fairsharing.yaml  Helm values: Fair Sharing (§Lab C, optional)
 ```
+
+Every file under `eks/` is a complete, standalone manifest — apply any of them directly with
+`kubectl apply -f`, in the order below (jobs are applied individually rather than all at once so
+the lab can submit them in a specific order to observe queueing/preemption).
 
 ```bash
 source env.sh && source versions.env
 ```
 
-### Step 1 · CPU lab: install Kueue, inspect the queues
+### Step 1 · Node groups, then Kueue
 
-What you're about to do, and why in this order: the kustomize apply below creates every object
-from §3.3 *except* Kueue's own controller — the namespace, both ResourceFlavors, the Cohort,
-both ClusterQueues, both LocalQueues, and both WorkloadPriorityClasses. None of this actually
-does anything yet, because Kueue's controller (the process that watches these objects and
-performs admission) doesn't exist until the second command runs `helm install`. This order is
-deliberate and safe either way — Kueue's CRDs and controller can come up before or after the
-objects that use them — but doing the cheap, no-cluster-mutation kustomize apply first means
-that if something's wrong with your YAML you find out before waiting on a Helm install.
-`cpu-lab/install-kueue.sh` is a real file in this repo ([view
-it](cpu-lab/install-kueue.sh)) — not inlined here because it's one of the few scripts CONVENTIONS.md
-allows to stay a script, since it's a single reusable install step you'll also re-run from
-Step 5 in spirit (there you'll run the equivalent `helm install` by hand, pinned to a node
-selector).
+What you're about to do: create the spot + on-demand CPU node group pair this chapter's
+ResourceFlavors point at, then install Kueue via its official OCI Helm chart with the controller
+pinned to the on-demand group so a spot reclaim never takes the scheduler itself down.
+[`eks/nodegroup-ch06.yaml`](eks/nodegroup-ch06.yaml) defines a diversified `ch06-cpu-spot` group
+and a tiny `ch06-cpu-ondemand` group for the Kueue controller — edit `metadata.name`/`region` to
+match `env.sh` first. This is plain `eksctl`, not Kueue — it's the actual EC2 capacity that the
+`spot`/`on-demand` ResourceFlavors (Step 2) will later point at; Kueue never creates nodes itself,
+it only decides which already-existing nodes admitted Workloads are allowed to land on:
 
 ```bash
-kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab      # namespace + flavors + cohort + queues + priority classes
-./06-batch-jobs-and-kueue/cpu-lab/install-kueue.sh    # helm install kueue, --version ${KUEUE_VERSION}
+eksctl create nodegroup -f 06-batch-jobs-and-kueue/eks/nodegroup-ch06.yaml
+```
+
+```bash
+: "${KUEUE_VERSION:?source versions.env}"
+helm install kueue oci://registry.k8s.io/kueue/charts/kueue \
+  --version "${KUEUE_VERSION}" \
+  --namespace kueue-system --create-namespace \
+  -f 06-batch-jobs-and-kueue/eks/values-kueue.yaml \
+  --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/capacityType=ON_DEMAND' \
+  --wait --timeout 5m
+kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
+kubectl get crd | grep kueue.x-k8s.io
+```
+
+### Step 2 · Inspect the queues
+
+What you're about to do, and why in this order: the `kubectl apply -f` calls below create every
+object from §3.3 — the namespace, both ResourceFlavors (already carrying the real
+`eks.amazonaws.com/capacityType` labels EKS managed node groups apply automatically — no
+overlay/patch step needed), the Cohort, both ClusterQueues, both LocalQueues, and both
+WorkloadPriorityClasses. Kueue's controller from Step 1 is already running, so these get admitted
+and validated immediately:
+
+```bash
+kubectl apply -f 06-batch-jobs-and-kueue/eks/namespace.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/resourceflavor-spot.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/resourceflavor-ondemand.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/cohort.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/clusterqueue-team-a.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/clusterqueue-team-b.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/localqueue-team-a.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/localqueue-team-b.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/workloadpriorityclass-low.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/workloadpriorityclass-high.yaml
 kubectl get resourceflavor,clusterqueue,cohort,workloadpriorityclass
 kubectl get localqueue -n ch06-kueue
 ```
@@ -354,9 +393,14 @@ Expected: `team-a-cq` and `team-b-cq` both show `Active: True` (a ClusterQueue r
 `Active: False` if it references a ResourceFlavor or Cohort that doesn't exist yet — that's the
 webhook/controller cross-checking the object graph from §3.3 for you); `kubectl describe
 clusterqueue team-a-cq` shows `resourceGroups` with `spot` before `on-demand` and the nominal
-quotas from §3.4.
+quotas from §3.4; `kubectl get resourceflavor spot -o yaml | grep -A3 nodeLabels` shows
+`eks.amazonaws.com/capacityType: SPOT`. How to tell the flavor actually matches real nodes:
+`kubectl get nodes -L eks.amazonaws.com/capacityType` shows `SPOT` on the spot nodegroup's nodes.
+EKS doesn't taint spot nodes automatically, so `nodeLabels` alone is enough — the flavor needs no
+`tolerations` here (compare a cloud that auto-taints spot pools, where the flavor would need a
+matching toleration too, or admitted pods would never schedule there).
 
-### Step 2 · Pattern (a): a plain Job through the queue
+### Step 3 · Pattern (a): a plain Job through the queue
 
 What you're about to do: submit `job-simple.yaml` — a plain, unmodified-looking `batch/v1` Job
 whose only Kueue-specific content is the two labels
@@ -370,7 +414,7 @@ final `kubectl get pods` confirms pods actually exist and are running — someth
 impossible while `suspend` was still `true`.
 
 ```bash
-kubectl apply -f 06-batch-jobs-and-kueue/common/jobs/job-simple.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/job-simple.yaml
 kubectl get workloads -n ch06-kueue -w   # Ctrl-C once ADMITTED
 kubectl get job team-a-low -n ch06-kueue -o jsonpath='{.spec.suspend}'; echo   # false once admitted
 kubectl get pods -n ch06-kueue -l app=team-a-low
@@ -383,7 +427,11 @@ NAME                          QUEUE          RESERVED IN   ADMITTED   FINISHED  
 team-a-low-a1b2c              team-a-queue   team-a-cq     True                  3s
 ```
 
-### Step 3 · Pattern (b): Indexed Job with podFailurePolicy, then simulate a spot reclaim
+`kubectl get pods -n ch06-kueue -o wide` plus `kubectl get nodes -L eks.amazonaws.com/capacityType`
+shows the pods landing specifically on the spot pool — you never wrote a `nodeSelector` on the Job;
+Kueue's admission webhook copied it in from the ResourceFlavor.
+
+### Step 4 · Pattern (b): Indexed Job with podFailurePolicy, then simulate a spot reclaim
 
 What you're about to do: this Job has 4 pods, each with a stable index `0..3`
 (`completionMode: Indexed`, §3.1) and each writing a checkpoint file once its "work" finishes
@@ -395,7 +443,7 @@ comparison at the end of this step (a forced `kill -9`) behaves differently: it 
 condition, so it isn't ignored.
 
 ```bash
-kubectl apply -f 06-batch-jobs-and-kueue/common/jobs/job-indexed-spot.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/job-indexed-spot.yaml
 kubectl get pods -n ch06-kueue -l app=team-a-indexed
 # Simulate the cloud reclaiming the node under one shard mid-run:
 kubectl delete pod -n ch06-kueue -l app=team-a-indexed --field-selector=status.phase=Running --wait=false | head -1
@@ -409,7 +457,7 @@ without touching `backoffLimit`. Compare: delete a pod with `kubectl delete pod 
 --grace-period=0 --force` right after exec'ing in and running `kill -9 1` on a real bug — that
 still fails normally, because there's no `DisruptionTarget` condition on a plain container crash.
 
-### Step 4 · Borrowing and preemption across the cohort
+### Step 5 · Borrowing and preemption across the cohort
 
 What you're about to do: this is the step that actually exercises the "fair sharing across
 teams" promise from §1 — the reason a raw scheduler can't do this on its own. First you push
@@ -421,10 +469,10 @@ decision it made — you don't have to take the paragraph below on faith.
 
 ```bash
 # team-a takes almost all the shared spot quota:
-kubectl apply -f 06-batch-jobs-and-kueue/common/jobs/job-simple.yaml   # ~1.5 CPU of team-a-cq's 4 CPU spot quota... run it a few times, or bump `parallelism`, to actually exhaust it
+kubectl apply -f 06-batch-jobs-and-kueue/eks/job-simple.yaml   # ~1.5 CPU of team-a-cq's 4 CPU spot quota... run it a few times, or bump `parallelism`, to actually exhaust it
 kubectl get clusterqueue team-a-cq -o jsonpath='{.status.flavorsUsage}'; echo
 # team-b needs more spot than its own 1 CPU nominal quota — watch it borrow:
-kubectl apply -f 06-batch-jobs-and-kueue/common/jobs/job-high-priority.yaml
+kubectl apply -f 06-batch-jobs-and-kueue/eks/job-high-priority.yaml
 kubectl get workloads -n ch06-kueue -o custom-columns=NAME:.metadata.name,QUEUE:.spec.queueName,ADMITTED:.status.conditions[-1].type
 kubectl describe clusterqueue team-b-cq | grep -A6 "Preemption\|Borrowing"
 ```
@@ -434,62 +482,6 @@ Because `team-b-high` carries `batch-high` (value 10000) and team-a's running po
 LowerPriority` + `borrowWithinCohort.policy: LowerPriority`, Kueue evicts enough of team-a-low's
 pods to admit team-b-high once team-b needs to reclaim its share. Evicted pods' Workloads go back
 to `Pending` and are retried automatically — you don't resubmit anything.
-
-### Step 5 (your cloud) · Real spot vs on-demand ResourceFlavors
-
-What you're about to do: tear down the cpu-lab install, create a real spot + on-demand node-group
-pair on EKS, and re-install Kueue with the controller pinned to the on-demand group. The teardown
-matters because cpu-lab's ResourceFlavors have empty `nodeLabels: {}` (§`common/flavors/`), which
-matches *any* node — fine for a single-pool kind/minikube cluster, but on EKS you want `spot` and
-`on-demand` to mean something real, which is what the `eks/` overlay's patches (§eks/kustomization.yaml)
-give you instead.
-
-```bash
-kubectl delete -k 06-batch-jobs-and-kueue/cpu-lab   # tear down the cpu-lab queues first
-helm uninstall kueue -n kueue-system
-```
-
-Create the node groups ([`eks/nodegroup-ch06.yaml`](eks/nodegroup-ch06.yaml) defines a diversified
-`ch06-cpu-spot` group and a tiny `ch06-cpu-ondemand` group for the Kueue controller itself — edit
-`metadata.name`/`region` to match `env.sh` first). This is plain `eksctl`, not Kueue — it's the
-actual EC2 capacity that the `spot`/`on-demand` ResourceFlavors will later point at; Kueue never
-creates nodes itself, it only decides which already-existing nodes admitted Workloads are allowed
-to land on:
-```bash
-eksctl create nodegroup -f 06-batch-jobs-and-kueue/eks/nodegroup-ch06.yaml
-```
-
-What you're about to do next: install Kueue via the official OCI Helm chart, pinned to
-`${KUEUE_VERSION}`, with the controller pinned to the on-demand nodegroup
-(`eks.amazonaws.com/capacityType=ON_DEMAND`) so a spot reclaim never takes the scheduler itself down.
-```bash
-: "${KUEUE_VERSION:?source versions.env}"
-helm install kueue oci://registry.k8s.io/kueue/charts/kueue \
-  --version "${KUEUE_VERSION}" \
-  --namespace kueue-system --create-namespace \
-  -f 06-batch-jobs-and-kueue/common/values-kueue.yaml \
-  --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/capacityType=ON_DEMAND' \
-  --wait --timeout 5m
-kubectl -n kueue-system rollout status deploy/kueue-controller-manager --timeout=5m
-kubectl get crd | grep kueue.x-k8s.io
-```
-
-Then apply the EKS overlay, which patches the `spot`/`on-demand` ResourceFlavors to the labels EKS
-managed node groups apply automatically for each `capacityType`:
-```bash
-kubectl apply -k 06-batch-jobs-and-kueue/eks
-kubectl get resourceflavor spot -o yaml | grep -A3 nodeLabels
-```
-Expected: `nodeLabels` shows `eks.amazonaws.com/capacityType: SPOT`. How to tell this worked:
-`kubectl get nodes -L eks.amazonaws.com/capacityType` shows `SPOT` on the spot nodegroup's nodes.
-EKS doesn't taint spot nodes automatically, so `nodeLabels` alone is enough — the flavor needs no
-`tolerations` here (compare a cloud that auto-taints spot pools, where the flavor would need a
-matching toleration too, or admitted pods would never schedule there).
-
-Re-run Steps 2–4 against the EKS overlay. `kubectl get pods -n ch06-kueue -o wide` plus
-`kubectl get nodes -L eks.amazonaws.com/capacityType` shows the pods landing specifically on the
-spot pool — you never wrote a `nodeSelector` on the Job; Kueue's admission webhook copied it in
-from the ResourceFlavor.
 
 ### Step 6 (optional) · Fair Sharing instead of classical preemption
 
@@ -507,8 +499,8 @@ kubectl patch clusterqueue team-b-cq --type merge -p '{"spec":{"preemption":{"bo
 
 ```bash
 helm upgrade kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}" \
-  -n kueue-system -f 06-batch-jobs-and-kueue/common/values-kueue.yaml \
-  -f 06-batch-jobs-and-kueue/common/values-kueue-fairsharing.yaml \
+  -n kueue-system -f 06-batch-jobs-and-kueue/eks/values-kueue.yaml \
+  -f 06-batch-jobs-and-kueue/eks/values-kueue-fairsharing.yaml \
   --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/capacityType=ON_DEMAND'
 ```
 
@@ -531,7 +523,7 @@ whichever queue is consuming more than its fair split.
   Step 5's `helm install`/`helm upgrade` sets `controllerManager.nodeSelector` to the on-demand
   nodegroup. If it runs on spot and gets reclaimed, admission for the whole cluster stalls until it
   reschedules.
-- **`waitForPodsReady` avoids half-admitted gangs.** Enabled in `common/values-kueue.yaml`. Without
+- **`waitForPodsReady` avoids half-admitted gangs.** Enabled in `eks/values-kueue.yaml`. Without
   it, a multi-pod Workload can have some pods scheduled and others stuck (e.g. spot momentarily
   out of capacity in one AZ), burning quota on a Job that can't actually make progress.
 - **`borrowingLimit` caps the blast radius of borrowing.** Without one, a team that never uses
@@ -547,7 +539,7 @@ whichever queue is consuming more than its fair split.
 | Symptom | Likely cause | Why this happens | Fix |
 |---|---|---|---|
 | Job stuck `suspend: true` forever, no Workload admitted | ClusterQueue quota too small for the request, or `namespaceSelector` doesn't match | Kueue only flips `suspend` to `false` after admission succeeds (§3.3) — if the Workload can never fit inside `nominalQuota` + `borrowingLimit`, or the ClusterQueue's `namespaceSelector` doesn't include your namespace, Kueue has nothing wrong to report except "still waiting," because from its side this is normal queueing, not an error | `kubectl describe workload <name> -n ch06-kueue`; check `status.conditions` message |
-| `Error creating: admission webhook ... denied the request: cohortName ...` | Cohort object doesn't exist yet | Kueue's validating webhook checks referential integrity at apply time — a ClusterQueue naming a Cohort that isn't in the API server yet is rejected immediately rather than silently created in a broken state, the same way Kubernetes rejects a Pod referencing a Secret that doesn't exist for volume mounts | Apply `common/queues` (includes `cohort.yaml`) before any ClusterQueue referencing it |
+| `Error creating: admission webhook ... denied the request: cohortName ...` | Cohort object doesn't exist yet | Kueue's validating webhook checks referential integrity at apply time — a ClusterQueue naming a Cohort that isn't in the API server yet is rejected immediately rather than silently created in a broken state, the same way Kubernetes rejects a Pod referencing a Secret that doesn't exist for volume mounts | Apply `eks/cohort.yaml` before any ClusterQueue referencing it |
 | `reclaimWithinCohort=Never and borrowWithinCohort.Policy!=Never` on `kubectl apply` | Kueue's webhook rejects that specific combination | Logically, "never reclaim borrowed quota" and "have a policy for reclaiming it" contradict each other — the webhook validates this combination fails fast at `apply` time instead of leaving you with config that would silently never trigger | Set `reclaimWithinCohort` to `LowerPriority`/`Any` if you set `borrowWithinCohort` |
 | Preemption doesn't happen even though priorities differ | Fair Sharing is enabled cluster-wide — `borrowWithinCohort` is a no-op under Fair Sharing | The two cohort-sharing models (§3.5) use different signals to decide who gets preempted — priority for classical preemption, historical weighted share for Fair Sharing — and the docs are explicit the two don't compose, so a leftover `borrowWithinCohort` from before you enabled Fair Sharing is simply never read | Pick one model (§3.5); don't run both configs at once |
 | Workload preempted pods immediately re-admitted on the *same* low-priority Job | Requeuing worked as designed — that's expected once the preemptor's own Workload completes and frees quota | Preemption evicts pods, not the Workload itself — Kueue's requeue logic puts the evicted Workload straight back in the queue, so once the higher-priority Workload finishes and releases its quota, the same low-priority Job is simply next in line again, with no resubmission needed | n/a |
@@ -558,13 +550,23 @@ whichever queue is consuming more than its fair split.
 ## 7. Cleanup & cost notes
 
 What you're about to do: delete the Jobs, queues, Kueue install and the node groups created in
-Step 5 — spot **and** on-demand capacity costs money even sitting idle.
+Step 1 — spot **and** on-demand capacity costs money even sitting idle.
 ```bash
-kubectl delete -f 06-batch-jobs-and-kueue/common/jobs --ignore-not-found
-kubectl delete -k 06-batch-jobs-and-kueue/cpu-lab --ignore-not-found   # or eks — whichever you applied
+kubectl delete -f 06-batch-jobs-and-kueue/eks/job-simple.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/job-indexed-spot.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/job-high-priority.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/localqueue-team-a.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/localqueue-team-b.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/clusterqueue-team-a.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/clusterqueue-team-b.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/cohort.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/resourceflavor-spot.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/resourceflavor-ondemand.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/workloadpriorityclass-low.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/workloadpriorityclass-high.yaml --ignore-not-found
+kubectl delete -f 06-batch-jobs-and-kueue/eks/namespace.yaml --ignore-not-found
 
 : "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}"
-kubectl delete -k 06-batch-jobs-and-kueue/eks --ignore-not-found
 helm uninstall kueue -n kueue-system || true
 kubectl delete namespace kueue-system --ignore-not-found
 

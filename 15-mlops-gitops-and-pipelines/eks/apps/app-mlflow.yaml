@@ -15,7 +15,7 @@ spec:
       targetRevision: "1.11.7"   # = MLFLOW_CHART_VERSION in versions.env (app 3.16.0) — Argo CD can't read it, keep in sync by hand
       helm:
         valueFiles:
-          - $values/15-mlops-gitops-and-pipelines/common/mlflow/values-mlflow-eks.yaml
+          - $values/15-mlops-gitops-and-pipelines/eks/values-mlflow-eks.yaml
     - repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY
       targetRevision: main
       ref: values

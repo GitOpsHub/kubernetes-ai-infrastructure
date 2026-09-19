@@ -1,9 +1,0 @@
-# Pattern (a): every pod downloads the model itself in an init container into an emptyDir.
-# Simplest possible thing; cold start = full download on every pod start (including after every spot reclaim).
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: ch05-models
-resources:
-  - ../base
-  - deployment.yaml
-  - service.yaml

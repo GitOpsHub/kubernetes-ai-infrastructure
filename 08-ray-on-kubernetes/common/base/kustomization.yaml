@@ -1,7 +1,0 @@
-# Shared by every cloud overlay and the CPU lab: namespace + service account.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: ch08-ray
-resources:
-  - namespace.yaml
-  - serviceaccount.yaml

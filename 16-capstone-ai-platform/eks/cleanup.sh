@@ -8,7 +8,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 echo "== Reverse Phase 7-6: capstone + pipelines =="
-# kubectl delete -k 16-capstone-ai-platform/eks --ignore-not-found
+# kubectl delete -f 16-capstone-ai-platform/eks/workflowtemplate-platform-e2e.yaml --ignore-not-found
+# kubectl delete -f 16-capstone-ai-platform/eks/namespace-rbac.yaml --ignore-not-found
+# kubectl delete -f 16-capstone-ai-platform/eks/clusterqueue-team-research.yaml --ignore-not-found
 # ./15-mlops-gitops-and-pipelines/cpu-lab/cleanup.sh
 
 echo "== Reverse Phase 5: security (14-multi-tenancy-and-security/README.md §7) =="

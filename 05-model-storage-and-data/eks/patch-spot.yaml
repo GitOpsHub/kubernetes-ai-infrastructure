@@ -1,5 +1,0 @@
-# Managed node group spot label. With Karpenter use karpenter.sh/capacity-type: spot instead.
-- op: add
-  path: /spec/template/spec/nodeSelector
-  value:
-    eks.amazonaws.com/capacityType: SPOT

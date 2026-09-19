@@ -17,7 +17,6 @@ This chapter assumes:
 - Chapter `04-gpu-observability`'s kube-prometheus-stack installed (namespace `monitoring`) — the
   metric source for both HPA and KEDA here.
 - `env.sh` and `versions.env` sourced.
-- No GPU? Step 4 (`cpu-lab/`) only needs chapter `09`'s CPU-lab Ollama Deployment.
 
 If any of those are missing, stop and go do them first — every command below assumes vLLM and
 Prometheus are already running and reachable in-cluster; none of this chapter installs them.
@@ -55,16 +54,14 @@ By the end you can:
 4. Configure KEDA scale-to-zero and estimate the resulting cold-start latency for your model/GPU.
 5. Explain the interplay between pod-level autoscaling here and node-level autoscaling (chapter 13):
    why a HPA/KEDA scale-up can still leave a pod `Pending` for minutes.
-6. Reproduce the same trigger-a-scale-out exercise on CPU with KEDA's `cpu` scaler.
 
 | Time | Activity |
 |---|---|
 | 0:00–0:25 | Read section 3: what HPA/KEDA are, metrics, cold-start math |
 | 0:25–1:00 | Install prometheus-adapter + KEDA, wire the ServiceMonitor |
 | 1:00–1:40 | HPA v2 lab: load-generate, watch it scale out, read `kubectl describe hpa` |
-| 1:40–2:15 | KEDA lab: scale-to-zero, load-generate again, measure cold start end-to-end |
-| 2:15–2:45 | `cpu-lab/`: KEDA `cpu` trigger on Ollama, load-generate |
-| 2:45–3:00 | Checkpoint questions, cleanup |
+| 1:40–2:30 | KEDA lab: scale-to-zero, load-generate again, measure cold start end-to-end |
+| 2:30–3:00 | Checkpoint questions, cleanup |
 
 ## 3. Concepts
 
@@ -214,7 +211,7 @@ shared infrastructure you only set up once, in Step 1.
 | `vllm:kv_cache_usage_perc` | "Are we close to OOM/max concurrency" | Alone it's a saturation signal, not throughput — pair with waiting-requests for a complete picture |
 | Request rate / RPS at the gateway | Simple, cloud-native (e.g. GAIE's `InferencePool`, chapter 12) | Doesn't distinguish light vs. heavy requests (256 vs 8192 tokens) the way queue depth does |
 
-This chapter uses `vllm:num_requests_waiting` (via the `ServiceMonitor` in `common/`) as the single
+This chapter uses `vllm:num_requests_waiting` (via the `ServiceMonitor` in `eks/`) as the single
 signal for both the HPA and the KEDA `ScaledObject`, exposed as a Pods-type custom metric
 (`vllm_num_requests_waiting`) for the HPA and queried directly by KEDA's `prometheus` trigger.
 
@@ -258,7 +255,7 @@ pod boots (that's what KEDA's separate HTTP add-on does, out of scope here). For
 API, `minReplicaCount: 1` (never truly idle, just autoscale the rest) is usually the right trade;
 scale-to-zero is for genuinely bursty/dev/batch-adjacent traffic where an occasional 5+ minute first
 request is acceptable. This is why `activationThreshold`, `cooldownPeriod`, and the scale-down
-`stabilizationWindowSeconds` in `common/keda/scaledobject-vllm.yaml` are all tuned conservatively —
+`stabilizationWindowSeconds` in `eks/scaledobject-vllm.yaml` are all tuned conservatively —
 flapping between 0 and 1 replicas is far more expensive here than on a typical microservice.
 
 ### 3.4 Real-world cold-start mitigation: Headroom over-provisioning and KV-cache saturation scaling
@@ -335,8 +332,8 @@ kube-prometheus-stack installed (namespace `monitoring`).
 ### Step 1: Install prometheus-adapter and KEDA, wire the ServiceMonitor
 
 What you're about to do: install prometheus-adapter (exposes vLLM's queue-depth metric as a
-`custom.metrics.k8s.io` series, feeding the HPA in `common/hpa`) and KEDA (queries Prometheus
-directly, feeding the `ScaledObject` in `common/keda`) — prereq: chapter `04`'s
+`custom.metrics.k8s.io` series, feeding the HPA in `eks/hpa-vllm.yaml`) and KEDA (queries Prometheus
+directly, feeding the `ScaledObject` in `eks/scaledobject-vllm.yaml`) — prereq: chapter `04`'s
 kube-prometheus-stack already running in-cluster (namespace `monitoring`) — then apply the
 `ServiceMonitor` that tells Prometheus to scrape vLLM's `/metrics`.
 
@@ -347,7 +344,7 @@ helm repo update prometheus-community
 helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
   --namespace monitoring --create-namespace \
   --version "${PROMETHEUS_ADAPTER_VERSION}" \
-  -f 10-autoscaling-inference/common/values-prometheus-adapter.yaml \
+  -f 10-autoscaling-inference/eks/values-prometheus-adapter.yaml \
   --wait --timeout 5m
 
 kubectl get apiservice v1beta1.custom.metrics.k8s.io
@@ -386,17 +383,14 @@ itself is generic and identical across clouds. `kubectl -n keda get pods` is a p
 you're looking for the `keda-operator` and `keda-operator-metrics-apiserver` pods both `Running`
 before moving on, since a `ScaledObject` applied against a not-yet-ready operator just sits inert.
 
-Apply the `ServiceMonitor` (this overlay's only resource):
+Apply the `ServiceMonitor`:
 ```bash
-kubectl apply -k 10-autoscaling-inference/eks
+kubectl apply -f 10-autoscaling-inference/eks/servicemonitor-vllm.yaml
 ```
 
-Why this is a kustomize overlay and not a bare `kubectl apply -f`: it follows this repo's convention
-(CONVENTIONS.md) of always applying through the `eks/` overlay so cloud-specific patches (none needed
-here, but the pattern stays consistent) have a place to live. Under the hood this simply creates the
-`ServiceMonitor` object from `common/servicemonitor-vllm.yaml`, which is a Custom Resource understood
-by the Prometheus Operator (installed in chapter 04) — it tells that already-running Prometheus "go
-scrape this additional target," it does not itself run any scraping.
+This creates the `ServiceMonitor` object from `eks/servicemonitor-vllm.yaml`, which is a Custom
+Resource understood by the Prometheus Operator (installed in chapter 04) — it tells that
+already-running Prometheus "go scrape this additional target," it does not itself run any scraping.
 
 Verify:
 ```bash
@@ -415,9 +409,10 @@ after the first request. That's normal at this point in the lab; you'll generate
 ### Step 2: HPA v2 lab
 
 ```bash
-kubectl apply -k 10-autoscaling-inference/common/hpa
+kubectl apply -f 10-autoscaling-inference/eks/hpa-vllm.yaml
 kubectl -n ch09-vllm get hpa vllm --watch &
-kubectl apply -k 10-autoscaling-inference/common/load-generator
+kubectl apply -f 10-autoscaling-inference/eks/namespace-load.yaml
+kubectl apply -f 10-autoscaling-inference/eks/load-job.yaml
 ```
 
 Why in this order: applying the `HorizontalPodAutoscaler` first means it's already watching (even with
@@ -425,15 +420,16 @@ no load yet, it'll just report the metric as `<unknown>` or `0`) before you gene
 don't miss the transition from idle to scaling. Backgrounding the `--watch` with `&` lets you keep
 issuing commands in the same terminal while it streams updates — it will keep printing new lines as
 the HPA re-evaluates, which is exactly what you want to see live. The `load-generator` Job (see
-`common/load-generator/load-job.yaml`) runs vLLM's own benchmark client, sending sustained concurrent
-chat-completion requests at the Deployment so `num_requests_waiting` climbs — without it, there's no
-load, and the HPA would sit at its idle replica count indefinitely.
+`eks/load-job.yaml`) runs vLLM's own benchmark client, sending sustained concurrent chat-completion
+requests at the Deployment so `num_requests_waiting` climbs — without it, there's no load, and the HPA
+would sit at its idle replica count indefinitely. The namespace file is applied first, matching this
+repo's convention for any resource that needs a namespace that doesn't already exist.
 
 Expected: `kubectl -n ch09-vllm describe hpa vllm` shows the current metric value climbing above the
 `averageValue: "5"` target, then `Replicas` increasing (bounded by `maxReplicas: 4` and — on the
 single-GPU node pool reused from chapter 09/01 — by GPU node availability; see Troubleshooting).
 ```bash
-kubectl delete -k 10-autoscaling-inference/common/hpa
+kubectl delete -f 10-autoscaling-inference/eks/hpa-vllm.yaml
 kubectl -n ch10-load delete job load-generator
 ```
 
@@ -448,13 +444,13 @@ complete or you delete it early).
 ### Step 3: KEDA scale-to-zero lab
 
 ```bash
-kubectl apply -k 10-autoscaling-inference/common/keda
+kubectl apply -f 10-autoscaling-inference/eks/scaledobject-vllm.yaml
 kubectl -n ch09-vllm get scaledobject vllm
 # after cooldownPeriod (300s) with no traffic, the Deployment scales to 0:
 kubectl -n ch09-vllm get deploy vllm -w
 ```
 
-Why you'll likely watch it scale to 0 almost immediately: `common/keda/scaledobject-vllm.yaml` sets
+Why you'll likely watch it scale to 0 almost immediately: `eks/scaledobject-vllm.yaml` sets
 `minReplicaCount: 0`, and if there's no load running (you deleted the load-generator Job at the end of
 Step 2), the Prometheus query will read at or near zero, which is below `activationThreshold: "0.5"` —
 so KEDA treats this as "no real traffic" and scales the Deployment down to 0 once `cooldownPeriod`
@@ -463,7 +459,8 @@ step measures, not a bug.
 
 Expected once idle: `vllm   0/0     0            0`. Now trigger from zero and time it:
 ```bash
-date; kubectl apply -k 10-autoscaling-inference/common/load-generator
+date; kubectl apply -f 10-autoscaling-inference/eks/namespace-load.yaml
+kubectl apply -f 10-autoscaling-inference/eks/load-job.yaml
 kubectl -n ch09-vllm get pods -w   # note the timestamp the first vllm pod goes Running
 ```
 
@@ -478,7 +475,7 @@ replica count, which is more informative for spotting exactly where time is goin
 Compare the elapsed time against section 3.3's estimate. Cleanup:
 ```bash
 kubectl -n ch10-load delete job load-generator
-kubectl delete -k 10-autoscaling-inference/common/keda
+kubectl delete -f 10-autoscaling-inference/eks/scaledobject-vllm.yaml
 ```
 
 Why delete the `ScaledObject` here rather than leaving it running for the rest of the chapter: it's the
@@ -486,28 +483,6 @@ same "don't run two autoscalers on one Deployment" reasoning as Step 2, in rever
 KEDA silently scaling `vllm` back to 0 while you're doing something else with it later in the course.
 (Section 7 has an important note about KEDA's finalizer — delete the `ScaledObject` before ever
 uninstalling KEDA itself, not just at the end of this step.)
-
-### Step 4: CPU lab (no GPU)
-
-```bash
-kubectl apply -k 09-llm-inference-with-vllm/cpu-lab   # if not already running
-kubectl apply -k 10-autoscaling-inference/cpu-lab
-kubectl -n ch09-vllm-cpu get scaledobject,hpa,pods -w
-```
-
-Why this exists as a separate lab rather than just "do the GPU lab on CPU": it demonstrates KEDA's
-built-in `cpu` scaler (`cpu-lab/scaledobject-ollama.yaml`) against Ollama, chapter 09's CPU-only
-serving stand-in — this is the one case in the whole chapter where plain resource-based autoscaling
-*is* the right signal, because Ollama-on-CPU genuinely is CPU-bound, unlike vLLM-on-GPU. It's a useful
-contrast: same KEDA operator, same `ScaledObject` CRD, completely different trigger type, and (per
-section 3.1/3.3) a trigger that structurally cannot scale to 0 on its own. `get scaledobject,hpa,pods
--w` in one command watches all three object types at once so you can see the `ScaledObject` existing,
-the HPA KEDA created for it, and the resulting pod count change together, rather than needing three
-terminals.
-
-Watch the KEDA-managed HPA's `TARGET` column climb as the load Job runs, and `ollama` replicas scale
-from 1 toward 3, then back down after `cooldownPeriod`. This trigger **cannot** go to 0 — see 3.1/3.3
-and the manifest's comments.
 
 ## 5. Spot considerations
 
@@ -537,7 +512,6 @@ and the manifest's comments.
 | KEDA `ScaledObject` stuck, no HPA created | KEDA operator not installed/Ready, or `scaleTargetRef.name` typo. Remember from 3.0 that KEDA only creates its managed HPA once the object is validated and its trigger is reachable — a typo'd Deployment name or an operator that never finished starting means KEDA has nothing to attach an HPA to, so none appears, silently. | `kubectl -n keda get pods`; `kubectl describe scaledobject vllm -n ch09-vllm` |
 | Scaled-up replica sits `Pending` | Node pool at its max, or spot capacity unavailable in zone. This is the "two loops" problem from section 5/3.1 checkpoint question 3: the HPA/KEDA decision to add a replica was correct, but the *separate* node-level autoscaler either hasn't finished provisioning a node yet or has hit its own ceiling — from the pod-level autoscaler's point of view, both look identical ("still Pending"), so you have to check the node side yourself. | Check `kubectl describe pod`; raise the nodegroup's `--nodes-max`, or scale up the on-demand fallback nodegroup from chapter `01` §4 (`INCLUDE=ondemand-gpu`) |
 | Deployment never scales to 0 | Traffic never actually stops (health checks, benchmark job still running), or `activationThreshold` too low. Liveness/readiness probes hitting the pod, or a load Job you forgot to delete, both keep `num_requests_waiting` or request volume just barely nonzero — enough to stay above `activationThreshold` forever, which from KEDA's point of view is indistinguishable from real traffic. | `kubectl -n ch09-vllm top pod`; confirm no leftover load Job |
-| `cpu` trigger in cpu-lab never fires | Ollama pod's `resources.requests.cpu` not set, or load Job undersized. KEDA's `cpu` scaler (like a plain HPA) computes utilization as *actual usage* divided by the pod's `resources.requests.cpu` — if requests aren't set, that denominator is undefined and there's nothing to compute a percentage against, so the trigger just never reports a meaningful value. | Check `patch-ollama-resources.yaml` applied; scale up `load-job.yaml` iteration count |
 | Everything scales, but requests still time out during scale-up | Expected under a hard load spike — the cold-start budget (3.3) is real time, not a bug. Neither HPA nor KEDA holds a caller's request open while a new pod boots (that requires KEDA's separate HTTP add-on, out of scope here) — a request that lands exactly when the old replicas are already saturated and the new one isn't ready yet will simply time out or queue at the client, which is the concrete cost of the "worst case" row in section 3.3's table. | Consider `minReplicaCount: 1` for latency-sensitive traffic |
 
 ## 7. Cleanup and cost notes
@@ -548,13 +522,11 @@ they belong to those chapters. Delete the `ScaledObject` **before** uninstalling
 finalizer on it, and with the operator gone the object sits in `Terminating`:
 
 ```bash
-kubectl delete -k 10-autoscaling-inference/common/keda --ignore-not-found
-kubectl delete -k 10-autoscaling-inference/common/hpa --ignore-not-found
-kubectl delete -k 10-autoscaling-inference/common/load-generator --ignore-not-found
-kubectl delete -k 10-autoscaling-inference/eks --ignore-not-found   # ServiceMonitor
-# cpu-lab only — NOTE: this overlay includes 09's cpu-lab as a base, so it also deletes the Ollama
-# Deployment from chapter 09's cpu-lab. Re-apply 09-llm-inference-with-vllm/cpu-lab if you still need it.
-kubectl delete -k 10-autoscaling-inference/cpu-lab --ignore-not-found
+kubectl delete -f 10-autoscaling-inference/eks/scaledobject-vllm.yaml --ignore-not-found
+kubectl delete -f 10-autoscaling-inference/eks/hpa-vllm.yaml --ignore-not-found
+kubectl delete -f 10-autoscaling-inference/eks/load-job.yaml --ignore-not-found
+kubectl delete -f 10-autoscaling-inference/eks/namespace-load.yaml --ignore-not-found
+kubectl delete -f 10-autoscaling-inference/eks/servicemonitor-vllm.yaml --ignore-not-found
 
 # Uninstall the Helm releases only if they're present (another chapter may already have removed them):
 if helm status prometheus-adapter -n monitoring > /dev/null 2>&1; then
@@ -635,7 +607,7 @@ worst case, at the cost of one GPU always running.
 </details>
 
 <details>
-<summary>5. Why does <code>common/keda/scaledobject-vllm.yaml</code> set <code>activationThreshold: "0.5"</code> in addition to <code>threshold: "5"</code>?</summary>
+<summary>5. Why does <code>eks/scaledobject-vllm.yaml</code> set <code>activationThreshold: "0.5"</code> in addition to <code>threshold: "5"</code>?</summary>
 
 `threshold` is the target the HPA-equivalent math scales toward (more replicas as the value exceeds
 it). `activationThreshold` is a separate floor: below it, KEDA treats the workload as having "no
@@ -644,16 +616,7 @@ that's technically nonzero (rounding noise, a stray health check) but not meanin
 </details>
 
 <details>
-<summary>6. Why can't the KEDA <code>cpu</code> scaler in cpu-lab scale Ollama to 0 replicas on its own?</summary>
-
-Resource metrics (`cpu`/`memory`) are computed as a ratio against currently-running pods' actual
-usage — with 0 replicas there is nothing to measure, so KEDA has no signal to decide when to scale
-back up from 0. KEDA requires pairing a resource scaler with at least one non-resource trigger
-(Prometheus, cron, etc., like the vLLM `ScaledObject` in this same chapter) to support scale-to-zero.
-</details>
-
-<details>
-<summary>7. Why does <code>common/keda/scaledobject-vllm.yaml</code>'s scale-down <code>stabilizationWindowSeconds</code> (300s) intentionally differ from a typical web-service HPA's default (0-30s)?</summary>
+<summary>6. Why does <code>eks/scaledobject-vllm.yaml</code>'s scale-down <code>stabilizationWindowSeconds</code> (300s) intentionally differ from a typical web-service HPA's default (0-30s)?</summary>
 
 Scaling a GPU replica down and then immediately needing it again means fully re-paying the cold-start
 budget from 3.3 — for this workload, a slower, more conservative scale-down (tolerate a short burst
@@ -661,7 +624,7 @@ of low traffic before removing capacity) is cheaper overall than reacting quickl
 </details>
 
 <details>
-<summary>8. Why does this chapter apply the HPA and the KEDA ScaledObject as mutually exclusive steps rather than layering them?</summary>
+<summary>7. Why does this chapter apply the HPA and the KEDA ScaledObject as mutually exclusive steps rather than layering them?</summary>
 
 Both ultimately try to control `spec.replicas` on the same Deployment (KEDA does so by creating and
 owning its own HPA object). Running a hand-written HPA and a KEDA-managed one against the same
@@ -675,7 +638,7 @@ before applying the other to keep the scaling decision unambiguous.
 - [prometheus-adapter](https://github.com/kubernetes-sigs/prometheus-adapter), [Helm chart](https://github.com/prometheus-community/helm-charts/tree/main/charts/prometheus-adapter)
 - KEDA: [prometheus scaler](https://keda.sh/docs/2.20/scalers/prometheus/), [cpu scaler](https://keda.sh/docs/2.20/scalers/cpu/), [ScaledObject spec](https://keda.sh/docs/2.20/concepts/scaling-deployments/)
 - vLLM: [Production Metrics](https://docs.vllm.ai/en/latest/usage/metrics.html)
-- [Amazon Managed Service for Prometheus](https://docs.aws.amazon.com/prometheus/latest/userguide/what-is-Amazon-Managed-Service-Prometheus.html) (metrics source alternative to in-cluster kube-prometheus-stack — not wired into this chapter's lab, see `common/values-prometheus-adapter.yaml` comment)
+- [Amazon Managed Service for Prometheus](https://docs.aws.amazon.com/prometheus/latest/userguide/what-is-Amazon-Managed-Service-Prometheus.html) (metrics source alternative to in-cluster kube-prometheus-stack — not wired into this chapter's lab, see `eks/values-prometheus-adapter.yaml` comment)
 - Cross-link: `04-gpu-observability` (the Prometheus this chapter scrapes into), `09-llm-inference-with-vllm` (the Deployment being scaled), `12-inference-gateway-and-multinode-serving` (InferencePool-aware routing/autoscaling), `13-node-autoscaling-and-cost` (the node-level loop this chapter's pod-level loop depends on)
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `PROMETHEUS_ADAPTER_VERSION=5.3.0`, `KEDA_VERSION=2.20.2`,

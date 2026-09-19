@@ -1,0 +1,39 @@
+# Same shape as the time-slicing demo, but targeted at MPS-enabled nodes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mps-demo
+  namespace: ch03-gpu-sharing
+  labels:
+    app: mps-demo
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: mps-demo
+  template:
+    metadata:
+      labels:
+        app: mps-demo
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+        nvidia.com/gpu.sharing-strategy: mps
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: cuda
+          image: nvcr.io/nvidia/k8s/cuda-sample:nbody-cuda11.7.1-ubuntu18.04
+          command: ["bash", "-c"]
+          args:
+            - |
+              nvidia-smi -L
+              env | grep -E '^CUDA_MPS' || echo "no CUDA_MPS_* env injected"
+              trap 'exit 0' TERM
+              /tmp/sample --benchmark --numbodies=2000000 & wait
+          resources:
+            limits:
+              nvidia.com/gpu: 1

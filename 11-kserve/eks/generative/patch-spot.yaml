@@ -1,6 +1,0 @@
-# nvidia.com/gpu.present=true is set at boot by nodeadm on the EKS AL2023 NVIDIA AMI (01's pool).
-- op: add
-  path: /spec/template/nodeSelector
-  value:
-    eks.amazonaws.com/capacityType: SPOT
-    nvidia.com/gpu.present: "true"

@@ -1,0 +1,43 @@
+# RBAC the EPP needs to watch Pods (for metrics-server discovery), the InferencePool it serves,
+# and Gateway API / Inference Extension status objects it writes back.
+# VERIFY: exact verbs against the upstream `config/rbac` for gateway-api-inference-extension v1.6.1
+# (not published as a plain manifest at this tag at fetch time) -- this is the reference EPP's
+# documented minimum permission set from the project's deploy guides.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-epp
+  namespace: ch12-gateway
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-epp
+  namespace: ch12-gateway
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools", "inferenceobjectives"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools/status", "inferenceobjectives/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-epp
+  namespace: ch12-gateway
+subjects:
+- kind: ServiceAccount
+  name: vllm-epp
+  namespace: ch12-gateway
+roleRef:
+  kind: Role
+  name: vllm-epp
+  apiGroup: rbac.authorization.k8s.io

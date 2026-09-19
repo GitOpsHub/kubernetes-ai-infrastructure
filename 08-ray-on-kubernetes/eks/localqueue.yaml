@@ -1,0 +1,17 @@
+# Optional: submit the RayJob (and the standalone RayCluster) through Kueue -- see the README's
+# §3.5. 06-batch-jobs-and-kueue's Kueue Helm values already enable the ray.io/rayjob,
+# ray.io/rayservice and ray.io/raycluster integrations, so this LocalQueue plus a
+# kueue.x-k8s.io/queue-name label on the RayJob/RayCluster (added with `kubectl label`, see the
+# README) is all a workload needs here. Kueue's RayJob webhook manages spec.suspend itself (true
+# until admitted, then false); the always-on RayCluster is admitted once at creation and simply
+# held Pending until quota is free.
+#
+# Points at the same "team-research" ClusterQueue 07-distributed-training-kubeflow-trainer uses
+# (spot flavor first, on-demand fallback).
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: ch08-queue
+  namespace: ch08-ray
+spec:
+  clusterQueue: team-research

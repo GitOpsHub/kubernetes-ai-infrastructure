@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-epp
+  namespace: ch12-gateway
+  labels:
+    app.kubernetes.io/name: vllm-epp
+spec:
+  selector:
+    app.kubernetes.io/name: vllm-epp
+  ports:
+  - name: grpc-epp
+    port: 9002
+    targetPort: grpc-epp
+  - name: grpc-health
+    port: 9003
+    targetPort: grpc-health
+  - name: metrics
+    port: 9090
+    targetPort: metrics

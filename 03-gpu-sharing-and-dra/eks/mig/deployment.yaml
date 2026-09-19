@@ -1,0 +1,36 @@
+# One pod per MIG slice. Requests nvidia.com/gpu (MIG "single" strategy: each slice is
+# advertised as nvidia.com/gpu).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mig-demo
+  namespace: ch03-gpu-sharing
+  labels:
+    app: mig-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mig-demo
+  template:
+    metadata:
+      labels:
+        app: mig-demo
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+        nvidia.com/mig.strategy: single
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: cuda
+          image: nvidia/cuda:12.9.1-base-ubuntu24.04
+          command: ["bash", "-c"]
+          # Inside a MIG slice nvidia-smi -L shows the parent GPU plus ONE MIG device.
+          args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep infinity & wait"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1

@@ -1,9 +1,0 @@
-# LocalQueue in this chapter's namespace, pointing at the same "team-research" ClusterQueue
-# 07-distributed-training-kubeflow-trainer uses (spot flavor first, on-demand fallback).
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: LocalQueue
-metadata:
-  name: ch08-queue
-  namespace: ch08-ray
-spec:
-  clusterQueue: team-research

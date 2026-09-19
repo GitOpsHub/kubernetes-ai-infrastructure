@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ch14-team-a
+  labels:
+    # Pod Security Admission (built into the API server since 1.23, GA since 1.25 — no
+    # controller/Helm chart to install). "restricted" forbids privileged containers, host
+    # namespaces/paths, non-default capabilities, and requires runAsNonRoot. The GPU device
+    # plugin / gpu-operator components still run in the privileged `gpu-operator` namespace
+    # (see 02-nvidia-gpu-operator/eks/clusterpolicy.yaml) — tenant workload namespaces like
+    # this one never need host access.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    kubernetes.io/metadata.name: ch14-team-a
+    tenant: team-a

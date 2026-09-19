@@ -1,7 +1,7 @@
 # 09 · LLM Inference with vLLM
 
 > Serve an OpenAI-compatible LLM endpoint on Kubernetes with vLLM: probes that match a multi-minute
-> weight-load, KV cache / GPU memory sizing, tensor parallelism, benchmarking, and a CPU fallback.
+> weight-load, KV cache / GPU memory sizing, tensor parallelism, and benchmarking.
 
 **New to both Kubernetes and GPU/AI serving?** This chapter assumes you can already run `kubectl
 apply`/`get`/`logs` (from earlier chapters) but assumes nothing about how LLMs get served. Section 3
@@ -17,8 +17,6 @@ This chapter assumes:
   create its own.
 - The NVIDIA GPU Operator or device plugin from `01`/`02` already installed on that pool.
 - `env.sh` and `versions.env` sourced.
-- No GPU? Skip straight to Step 5 (`cpu-lab/` with Ollama) — it needs only the base cluster from
-  chapter `00`.
 
 ## 1. Why this matters
 
@@ -27,8 +25,7 @@ GPU's memory in one allocation (the KV cache), dies ungracefully if you send SIG
 period, and its "ready" signal has nothing to do with the container starting. Get the probes or the
 memory math wrong and you get flapping pods, OOM-killed inference, or silent request drops during a
 spot reclaim. This chapter builds one correct single-GPU deployment first, then scales it out
-(tensor parallel) and stress-tests it (benchmark job), on EKS — plus a CPU-only Ollama lab so you
-can learn the request/response shape before you have GPU quota.
+(tensor parallel) and stress-tests it (benchmark job), on EKS.
 
 If you've only ever deployed stateless web apps (a container that answers a request in milliseconds
 and holds no meaningful state between requests), almost every assumption you're used to breaks here:
@@ -49,17 +46,14 @@ By the end you can:
 4. Explain when tensor parallelism helps (model too big for one GPU) vs. when it doesn't (latency
    for a model that already fits), and run a 2-GPU tensor-parallel deployment.
 5. Benchmark throughput/TTFT with `vllm bench serve` and read the report.
-6. Run the same OpenAI-compatible contract on CPU with Ollama, and name exactly what does not carry
-   over to real GPU serving.
 
 | Time | Activity |
 |---|---|
 | 0:00–0:30 | Read section 3 (concepts): probes, KV cache, tensor parallel |
 | 0:30–1:15 | Deploy vLLM on your cloud's spot GPU, watch startup logs, hit the API |
 | 1:15–1:45 | Break the probes on purpose (see Troubleshooting), fix them |
-| 1:45–2:15 | Tensor-parallel-2 component + benchmark job, read the report |
-| 2:15–2:45 | `cpu-lab/` with Ollama — same OpenAI contract, no GPU |
-| 2:45–3:00 | Checkpoint questions, cleanup |
+| 1:45–2:30 | Tensor-parallel-2 deployment + benchmark job, read the report |
+| 2:30–3:00 | Checkpoint questions, cleanup |
 
 ## 3. Concepts
 
@@ -106,8 +100,7 @@ is a purpose-built *inference server*: it implements continuous batching and the
 allocator (**PagedAttention**, described in 3.1) so the same GPU serves many concurrent users with
 far higher throughput, and it exposes an **OpenAI-compatible HTTP API** (`/v1/chat/completions`, the
 same request/response shape as OpenAI's own API) so any existing OpenAI client library talks to it
-with just a different base URL. That compatibility is also why this chapter's CPU fallback (Ollama,
-Step 5) is directly comparable: different engine, same wire contract.
+with just a different base URL.
 
 **What a Hugging Face access token and a "gated" model are, and why the Secret pattern matters.**
 Hugging Face Hub hosts model weights (the actual downloadable files a model needs, gigabytes of
@@ -307,17 +300,22 @@ Prerequisite: a spot GPU node pool from `01-gpu-nodes-and-scheduling` §4 (the `
 node group + the pinned NVIDIA device plugin). This chapter reuses that nodegroup — it does not
 create its own.
 
-### Step 1: What's in `common/`
+### Step 1: What's in `eks/`
+
+Every file here is a complete, standalone manifest you apply directly with `kubectl apply -f` — no
+kustomize base/overlay, no separate patch files.
 
 - `namespace.yaml` — `ch09-vllm`
 - `vllm-deployment.yaml` — the single-GPU vLLM Deployment (`Qwen/Qwen3-0.6B`, `strategy: Recreate`
-  because a 1-GPU pod pool can't run two copies during a rollout)
+  because a 1-GPU pod pool can't run two copies during a rollout), pinned to the spot GPU node group
+  via `nodeSelector`, with the HF cache mounted from the PVC below
+- `hf-cache-pvc.yaml` — PVC-backed HF cache so restarts don't re-download weights (see "Model cache"
+  below)
 - `service.yaml`, `pdb.yaml`
-- `components/tensor-parallel-2` — a Kustomize Component that swaps the model to `Qwen/Qwen3-8B` and
-  requests 2 GPUs with `--tensor-parallel-size=2` (needs a 2-GPU node — see step 4)
-- `components/model-cache-pvc` — swaps the emptyDir HF cache for a PVC so restarts don't re-download
-  weights (see "Model cache" below)
-- `benchmark/benchmark-job.yaml` — `vllm bench serve` load test (runs on CPU, hits the Service)
+- `vllm-deployment-tp2.yaml` — an alternate Deployment (same name/namespace as `vllm-deployment.yaml`
+  — apply one or the other, not both) that swaps the model to `Qwen/Qwen3-8B` and requests 2 GPUs with
+  `--tensor-parallel-size=2` (needs a 2-GPU node — see step 4)
+- `benchmark-job.yaml` — `vllm bench serve` load test (runs on CPU, hits the Service)
 
 There's no separate script for the `hf-token` Secret — Step 2 below creates it inline with a single
 `kubectl create secret generic hf-token --from-literal=HF_TOKEN=...` command from `$HF_TOKEN`
@@ -376,15 +374,17 @@ and exits *only if you actually try to use `$HF_TOKEN` without having exported i
 you to set one.
 
 ```bash
-kubectl apply -k 09-llm-inference-with-vllm/eks
+kubectl apply -f 09-llm-inference-with-vllm/eks/namespace.yaml
+kubectl apply -f 09-llm-inference-with-vllm/eks/hf-cache-pvc.yaml
+kubectl apply -f 09-llm-inference-with-vllm/eks/vllm-deployment.yaml
+kubectl apply -f 09-llm-inference-with-vllm/eks/service.yaml
+kubectl apply -f 09-llm-inference-with-vllm/eks/pdb.yaml
 ```
 
-This is the actual deployment step. `-k` tells `kubectl` to run this path through **Kustomize**
-first: it takes the cloud-agnostic manifests in `common/` (Deployment, Service, PDB, namespace),
-layers the EKS-specific `model-cache-pvc` component and the `patch-spot.yaml` node-selector patch on
-top (pinning the pod to the spot GPU node group — see `09-llm-inference-with-vllm/eks/kustomization.yaml`),
-and applies the merged result. Nothing in `common/` gets applied on its own in this chapter; the `eks/`
-overlay is always the thing you `apply`.
+This is the actual deployment step: apply the namespace first (so the PVC/Deployment/Service/PDB
+have somewhere to land), then the rest of `eks/`. Each file is a complete manifest — the Deployment
+already has the spot GPU `nodeSelector` and the PVC-backed HF cache baked in, there's no overlay to
+merge on top.
 
 ```bash
 kubectl -n ch09-vllm get pods -w
@@ -425,7 +425,7 @@ at your own cluster's IP instead of `api.openai.com`.
 ### Step 3: Benchmark
 
 ```bash
-kubectl apply -k 09-llm-inference-with-vllm/common/benchmark
+kubectl apply -f 09-llm-inference-with-vllm/eks/benchmark-job.yaml
 kubectl -n ch09-vllm logs -f job/vllm-bench
 ```
 This applies a Kubernetes **Job** (a Pod that runs to completion once, unlike a Deployment which keeps
@@ -459,55 +459,30 @@ throughput — this is the latency/throughput tradeoff continuous batching makes
 ### Step 4: Tensor parallelism (needs a 2-GPU node)
 
 The reused single-GPU pool from chapter 01 only has 1 GPU per node. To try tensor-parallel-2 you need
-a node with 2 GPUs (e.g. `g6.12xlarge`) — expensive, so this step is **optional/advanced**. Layer
-the component on top of the overlay:
-```yaml
-# 09-llm-inference-with-vllm/eks/kustomization.yaml, temporarily:
-components:
-- ../common/components/tensor-parallel-2
-```
-This adds a second Kustomize Component alongside the existing `model-cache-pvc` one already in that
-file — Components are Kustomize's mechanism for optional, composable patches layered on the same base,
-so adding this one doesn't remove the model-cache behavior. `components/tensor-parallel-2` (see
-`09-llm-inference-with-vllm/common/components/tensor-parallel-2/kustomization.yaml`) patches the
-Deployment to request `nvidia.com/gpu: "2"` instead of `"1"`, swaps the model to the larger
-`Qwen/Qwen3-8B` (which is the point — 3.3 explained TP is for models that don't fit one GPU, and
-`Qwen3-0.6B` already fits comfortably on one), and raises the `startupProbe` budget to 20 minutes
-since more/larger weights take longer to download and the CUDA graph capture step scales with model
-size.
+a node with 2 GPUs (e.g. `g6.12xlarge`) — expensive, so this step is **optional/advanced**.
+`eks/vllm-deployment-tp2.yaml` is a complete, standalone alternate Deployment (same name/namespace as
+`vllm-deployment.yaml`, so applying it replaces the single-GPU pod rather than running alongside it):
+it requests `nvidia.com/gpu: "2"` instead of `"1"`, swaps the model to the larger `Qwen/Qwen3-8B`
+(which is the point — 3.3 explained TP is for models that don't fit one GPU, and `Qwen3-0.6B` already
+fits comfortably on one), and raises the `startupProbe` budget to 20 minutes since more/larger weights
+take longer to download and the CUDA graph capture step scales with model size.
 
-then `kubectl kustomize eks` to confirm the patch, point the overlay's node selector at your 2-GPU
-pool, and apply. Compare `vllm bench serve` throughput at concurrency 64 against the single-GPU run.
-
-### Step 5: CPU lab (no GPU, any cluster)
-
+Edit its `nodeSelector` to target your 2-GPU pool (uncomment/adjust the
+`node.kubernetes.io/instance-type` line, or add whatever label your 2-GPU node group carries), then:
 ```bash
-kubectl apply -k 09-llm-inference-with-vllm/cpu-lab
-kubectl -n ch09-vllm-cpu wait --for=condition=ready pod -l app.kubernetes.io/name=ollama --timeout=600s
-kubectl -n ch09-vllm-cpu port-forward svc/ollama 11434:11434 &
-curl -s http://localhost:11434/v1/chat/completions -H 'Content-Type: application/json' -d \
-  '{"model":"qwen3:0.6b","messages":[{"role":"user","content":"Say hi in 5 words"}]}' | jq
+kubectl apply -f 09-llm-inference-with-vllm/eks/vllm-deployment-tp2.yaml
 ```
-[Ollama](https://ollama.com) is a much simpler local/CPU model runner built on `llama.cpp`; it's
-included here purely so you can practice the request/response contract and see a real "model boots,
-then answers" flow without needing GPU quota at all. `kubectl wait --for=condition=ready` blocks the
-command until the pod's `readinessProbe` passes (or the 600s timeout expires) instead of you manually
-polling `kubectl get pods -w` — useful in scripts, and worth knowing as an alternative to the `-w`
-watch flag used in Step 2.
-
-**What carries over**: the OpenAI-compatible `/v1/chat/completions` contract, the idea of a
-model-load startup delay, request/response shape for building clients against.
-**What does not carry over**: throughput (CPU llama.cpp decoding is 10-100x slower per token than a
-GPU), continuous batching under concurrent load, PagedAttention KV cache mechanics (Ollama uses
-llama.cpp's own KV cache, not vLLM's), tensor parallelism, and GPU memory sizing math entirely.
+Compare `vllm bench serve` throughput at concurrency 64 against the single-GPU run. To go back to the
+single-GPU deployment afterwards, re-apply `vllm-deployment.yaml`.
 
 ### Model cache
 
-By default the HF cache is an `emptyDir` — simple, but a rescheduled pod (spot reclaim!) re-downloads
-weights. `components/model-cache-pvc` swaps it for a `ReadWriteOnce` PVC on the cluster's default
-StorageClass, already wired into the `eks` overlay in this chapter. For a cache **shared**
-across multiple vLLM replicas or nodes (ReadOnlyMany), reuse `05-model-storage-and-data`'s
-GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that PV in place of `hf-cache`.
+`eks/hf-cache-pvc.yaml` gives the HF cache a `ReadWriteOnce` PVC on the cluster's default
+StorageClass instead of an `emptyDir`, so a rescheduled pod (spot reclaim!) doesn't re-download
+weights — it's already wired into `vllm-deployment.yaml` (and `vllm-deployment-tp2.yaml`) in this
+chapter. For a cache **shared** across multiple vLLM replicas or nodes (ReadOnlyMany), reuse
+`05-model-storage-and-data`'s GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that
+PV in place of `hf-cache`.
 
 ## 5. Spot considerations
 
@@ -534,8 +509,7 @@ GCS-FUSE / Mountpoint-S3 / Azure-Blob-CSI patterns instead — mount that PV in 
 | `ValueError: ... does not fit in ... GPU memory` | Model + `--max-model-len` KV cache needs more memory than available. `--max-model-len` caps the longest sequence (prompt + generated tokens) vLLM will ever have to hold KV cache for — a larger value means it must reserve more KV cache headroom per sequence at startup, even before any request arrives. | Lower `--max-model-len`, `--max-num-seqs`, or use a smaller model/bigger GPU |
 | 2-GPU TP pod `Pending`: `Insufficient nvidia.com/gpu` | Reused 1-GPU pool from chapter 01 only has 1 GPU/node, and Kubernetes cannot split one pod's GPU request across two different nodes — the scheduler needs one node that alone has 2 free `nvidia.com/gpu` to place this pod. | Provision a 2-GPU node type (step 4) |
 | Requests time out under load, throughput plateaus | Expected — GPU compute/KV-cache-bound; not a bug. Once the continuous-batching scheduler has as many sequences in flight as the GPU's compute and KV-cache pages can support, additional concurrent requests only add queueing delay, not more completed work per second — this is the same effect the benchmark step's TTFT-vs-throughput comparison is designed to show you directly. | Benchmark at different `--max-concurrency`, see step 3 |
-| `curl: /v1/chat/completions` 404 | Wrong path, or hit the CPU-lab Ollama Service instead of vLLM (or vice versa) — both listen OpenAI-style but on different ports/namespaces | vLLM: `ch09-vllm` svc `vllm:8000`; Ollama: `ch09-vllm-cpu` svc `ollama:11434` |
-| Ollama pod never `Ready` | `ollama pull` still downloading Qwen3-0.6B GGUF (~523 MB) — the container's `readinessProbe` only checks that the HTTP server itself is up (see `cpu-lab/ollama-deployment.yaml`'s `/` check), while the `startupProbe`'s `ollama list` exec check is what's actually waiting on the model download to finish. | `kubectl -n ch09-vllm-cpu logs deploy/ollama`; `startupProbe` allows 10 min |
+| `curl: /v1/chat/completions` 404 | Wrong path, or `port-forward` not actually running | vLLM Service is `ch09-vllm` svc `vllm:8000`; confirm `kubectl -n ch09-vllm get svc vllm` and that the `port-forward` process is still alive |
 
 ## 7. Cleanup and cost notes
 
@@ -544,20 +518,26 @@ if no other chapter needs the GPU nodegroup, scale it down too (chapter `01` §4
 nodegroup ... --nodes 0`).
 
 ```bash
-kubectl delete -k 09-llm-inference-with-vllm/eks --ignore-not-found
-kubectl delete -k 09-llm-inference-with-vllm/cpu-lab --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/benchmark-job.yaml --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/pdb.yaml --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/service.yaml --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/vllm-deployment.yaml --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/vllm-deployment-tp2.yaml --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/hf-cache-pvc.yaml --ignore-not-found
+kubectl delete -f 09-llm-inference-with-vllm/eks/namespace.yaml --ignore-not-found
 ```
-`--ignore-not-found` makes both commands safe to re-run even if you already deleted these resources
+`--ignore-not-found` makes every command safe to re-run even if you already deleted these resources
 (or never fully applied them) — `kubectl delete` normally exits non-zero when the target doesn't
-exist, which is unhelpful in a cleanup script you might run more than once.
+exist, which is unhelpful in a cleanup script you might run more than once. Deleting the namespace
+last also takes the PVC with it, so the explicit `hf-cache-pvc.yaml` delete above is belt-and-suspenders.
 
 - A single L4/T4 spot GPU running vLLM idle-but-loaded still bills for the whole node — this chapter
   does not scale to zero on its own (see `10-autoscaling-inference` for KEDA scale-to-zero).
 - The GPU node pool/nodegroup is shared with chapter `01` — only scale it to 0 if you're done with
   GPU chapters for this session.
-- The `hf-cache` PVC persists after `kubectl delete -k` only if you delete the Deployment/Service but
-  not the PVC directly — delete it explicitly to stop paying for the disk: `kubectl -n ch09-vllm
-  delete pvc hf-cache`.
+- The `hf-cache` PVC persists after deleting the Deployment/Service if you don't delete the namespace
+  or the PVC itself — delete it explicitly to stop paying for the disk: `kubectl -n ch09-vllm delete
+  pvc hf-cache`.
 
 > **GPU quota and cost reminder:** GPU-backed EC2 instances (even spot) are the most expensive compute
 > this course uses. Confirm the nodegroup is scaled to 0 (or the pods deleted) when you're done for the
@@ -620,16 +600,17 @@ tokens/sec.
 </details>
 
 <details>
-<summary>7. Why doesn't the CPU-lab Ollama deployment prove your vLLM YAML will work correctly on a GPU?</summary>
+<summary>7. Why does <code>vllm-deployment-tp2.yaml</code> exist as a separate file instead of a flag you toggle on <code>vllm-deployment.yaml</code>?</summary>
 
-They serve a compatible *API contract* but completely different engines: Ollama uses llama.cpp's own
-scheduler and KV cache, no PagedAttention, no continuous batching at vLLM's level, no tensor
-parallelism, no CUDA graph capture, and no GPU memory pre-allocation. It validates client code and the
-request/response shape, not vLLM's GPU-specific behavior or performance characteristics.
+Every manifest in this chapter is meant to be a complete, standalone file you can read and
+`kubectl apply -f` on its own — a toggle would mean the file on disk no longer matches what's
+actually running unless you also remembered which flag was last set. Because both files use the same
+Deployment name/namespace, applying one always fully replaces the other on the cluster, which makes
+it obvious and auditable which variant (single-GPU or tensor-parallel-2) is live.
 </details>
 
 <details>
-<summary>8. Why does <code>components/model-cache-pvc</code> use <code>ReadWriteOnce</code> instead of reusing chapter 05's <code>ReadOnlyMany</code> object-storage mount?</summary>
+<summary>8. Why does <code>hf-cache-pvc.yaml</code> use <code>ReadWriteOnce</code> instead of reusing chapter 05's <code>ReadOnlyMany</code> object-storage mount?</summary>
 
 This chapter runs a single vLLM replica — a simple RWO PVC on the default StorageClass is enough to
 survive that one pod's restarts and needs no cloud IAM setup. `ReadOnlyMany` object storage (GCS
@@ -651,12 +632,11 @@ gets rate-limited.
 ## 9. Further reading and versions tested
 
 - vLLM: [OpenAI-Compatible Server](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html), [Engine Args](https://docs.vllm.ai/en/latest/serving/engine_args.html), [Distributed Serving (Tensor Parallel)](https://docs.vllm.ai/en/latest/serving/distributed_serving.html)
-- Ollama: [OpenAI compatibility](https://ollama.com/blog/openai-compatibility), [qwen3 library page](https://ollama.com/library/qwen3)
 - Model: [Qwen/Qwen3-0.6B on Hugging Face](https://huggingface.co/Qwen/Qwen3-0.6B)
 - Cross-link: `01-gpu-nodes-and-scheduling` (GPU node pool reused here), `05-model-storage-and-data` (shared model cache options), `10-autoscaling-inference` (HPA/KEDA scaling this Deployment), `12-inference-gateway-and-multinode-serving` (Gateway API Inference Extension, multi-node serving), and [AI Infrastructure Research & Articles](../AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md#31-model-serving-kv-cache--attention-mechanics) (seminal papers on PagedAttention, FlashAttention, SGLang, and Speculative Decoding)
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `VLLM_VERSION=v0.29.0` (image `vllm/vllm-openai:v0.29.0-cu129`),
-`OLLAMA_VERSION=0.34.1` (image `ollama/ollama:0.34.1`), model `Qwen/Qwen3-0.6B` (vLLM) / `qwen3:0.6b` (Ollama library tag).
+model `Qwen/Qwen3-0.6B` (vLLM).
 
 ---
 

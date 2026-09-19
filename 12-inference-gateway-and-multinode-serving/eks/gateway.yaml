@@ -1,0 +1,17 @@
+# Gateway API v1.6.2 Gateway. gatewayClassName is "nginx" because this chapter installs NGINX
+# Gateway Fabric (Step 2 of the README) as the Gateway controller -- it registers a GatewayClass
+# named "nginx" by default.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: ch12-gateway
+spec:
+  gatewayClassName: nginx
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same

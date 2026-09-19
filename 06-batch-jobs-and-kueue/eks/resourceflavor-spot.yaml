@@ -1,0 +1,13 @@
+# "spot" is listed first in every ClusterQueue's resourceGroups so Kueue tries it before
+# "on-demand" (flavorFungibility defaults to whenCanBorrow: Borrow, whenCanPreempt: TryNextFlavor).
+# nodeLabels matches the label EKS managed node groups apply automatically for capacityType: SPOT
+# (see eks/nodegroup-ch06.yaml). EKS doesn't taint spot nodes automatically, so no tolerations
+# are needed here — compare a cloud that auto-taints spot pools, where this flavor would also
+# need a matching spec.tolerations entry.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: spot
+spec:
+  nodeLabels:
+    eks.amazonaws.com/capacityType: SPOT

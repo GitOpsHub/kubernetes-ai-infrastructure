@@ -1,7 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- inferencepool.yaml
-- epp-rbac.yaml
-- epp-deployment.yaml
-- epp-service.yaml

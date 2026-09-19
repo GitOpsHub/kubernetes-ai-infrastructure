@@ -1,6 +1,0 @@
-# Chapter-05 common entry point = shared base only (namespace, model coordinates, service accounts).
-# Labs live in sub-bases: object-storage/, shared-fs/, init-container/ – each consumed by the cloud overlays.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - base

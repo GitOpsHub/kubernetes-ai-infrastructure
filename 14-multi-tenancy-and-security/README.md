@@ -106,9 +106,9 @@ This chapter assumes:
   applies regardless, it just has nothing to allow if `monitoring` doesn't exist yet).
 
 If you're new to Kubernetes entirely, don't worry about memorizing IRSA or CEL right now — Lab A
-(cpu-lab, no cloud account needed) is enough to see namespaces, quotas, RBAC, and NetworkPolicy
-work end to end. Lab B (real AWS Secrets Manager + Kyverno) is where the cloud-specific pieces
-show up, and it explains each one before you run it.
+(the cluster you already have from chapter 00, no extra cloud setup needed) is enough to see
+namespaces, quotas, RBAC, and NetworkPolicy work end to end. Lab B (real AWS Secrets Manager +
+Kyverno) is where the cloud-specific pieces show up, and it explains each one before you run it.
 
 ## 1. Why this matters
 

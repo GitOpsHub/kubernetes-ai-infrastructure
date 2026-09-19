@@ -1,0 +1,19 @@
+# "New" model version under a separate InferenceService name. Swap storageUri for your actual
+# retrained artifact; kept identical here so the lab is runnable without training a second model.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: sklearn-iris-canary
+  namespace: ch11-kserve
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: sklearn
+      protocolVersion: v2
+      storageUri: "gs://kfserving-examples/models/sklearn/1.0/model"   # swap for your v2 artifact
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "1", memory: 2Gi}

@@ -8,8 +8,9 @@
 
 This chapter assumes:
 
-- A cluster from `00-prerequisites-and-cluster-setup`. Step 2 (predictive models) is CPU-only and
-  works on any cluster (`cpu-lab/` is the same overlay, cloud-agnostic).
+- A cluster from `00-prerequisites-and-cluster-setup`. Step 2 (predictive models) needs no GPU, but
+  still runs against the real EKS cluster from chapter 00 — this course targets real GPU hardware
+  throughout, there's no separate CPU-only cluster path.
 - Step 3 (generative model) needs the spot GPU node pool from `01-gpu-nodes-and-scheduling` /
   `09-llm-inference-with-vllm` — this chapter reuses it, it does not create its own.
 - Step 4's optional native-Serverless canary demo needs Knative Serving installed separately (not
@@ -274,17 +275,13 @@ What you're about to do: apply the namespace + sklearn/xgboost `InferenceService
 inference API once they're ready.
 
 ```bash
-kubectl apply -k 11-kserve/eks   # namespace + sklearn + xgboost InferenceServices
+kubectl apply -f 11-kserve/eks/namespace.yaml
+kubectl apply -f 11-kserve/eks/inferenceservice-sklearn.yaml
+kubectl apply -f 11-kserve/eks/inferenceservice-xgboost.yaml
 ```
-Why `-k` (kustomize) instead of `apply -f` on individual files: `11-kserve/eks/kustomization.yaml`
-composes the `common` base (the `ch11-kserve` `Namespace` object plus the two `InferenceService`
-manifests you read above) with any EKS-specific patches — same "cloud-agnostic base + cloud overlay"
-pattern used by every chapter in this course (CONVENTIONS.md). You never need to know or list the
-individual files; `kustomization.yaml` is the manifest of what's included.
-
-No GPU/cloud cluster yet? `kubectl apply -k 11-kserve/cpu-lab` is identical for this step —
-`cpu-lab/` is `common` + `common/predictive` with no cloud-specific patches, since predictive
-models here need no GPU/spot nodeSelector at all.
+Each file is a complete, standalone manifest (namespace set via `metadata.namespace: ch11-kserve`
+in the two `InferenceService`s) — apply the namespace first so the two `InferenceService` objects
+have somewhere to land.
 
 ```bash
 kubectl -n ch11-kserve get inferenceservice
@@ -326,14 +323,14 @@ What you're about to do: layer the `generative` component on top of the EKS over
 the GPU `LLMInferenceService`.
 
 ```bash
-kubectl apply -k 11-kserve/eks/generative
+kubectl apply -f 11-kserve/eks/generative/llminferenceservice-qwen.yaml
 ```
-Why this is a separate overlay from Step 2's `eks/` rather than bundled in: the GPU LLM needs a spot
-GPU node pool (chapter 01) to exist first and costs real money per hour while running, whereas the
-CPU predictive models are nearly free and don't need one — keeping them as separate `kubectl apply`
-targets means you only pay for the GPU pod once you're actually ready to run the generative half of
-the lab. `eks/generative/kustomization.yaml` layers `eks/generative/patch-spot.yaml` (the spot
-`nodeSelector` you saw above) onto `common/generative/llminferenceservice-qwen.yaml`.
+Why this is a separate `kubectl apply` from Step 2's files rather than bundled in: the GPU LLM needs
+a spot GPU node pool (chapter 01) to exist first and costs real money per hour while running,
+whereas the CPU predictive models are nearly free and don't need one — keeping it as a separate
+apply target means you only pay for the GPU pod once you're actually ready to run the generative
+half of the lab. `llminferenceservice-qwen.yaml` already carries the spot `nodeSelector`/toleration
+inline (see the file) — there's no separate patch file to layer on.
 
 ```bash
 kubectl -n ch11-kserve get llminferenceservice
@@ -363,7 +360,9 @@ hand-built vLLM Deployment; KServe changes how the pod got there, not the API it
 ### Step 4: Canary (RawDeployment workaround)
 
 ```bash
-kubectl apply -k 11-kserve/common/canary   # stable + canary InferenceServices (+ HTTPRoute if Gateway API is installed)
+kubectl apply -f 11-kserve/eks/canary/inferenceservice-sklearn-v1.yaml
+kubectl apply -f 11-kserve/eks/canary/inferenceservice-sklearn-canary.yaml
+kubectl apply -f 11-kserve/eks/canary/httproute-canary.yaml   # only if Gateway API is installed
 kubectl -n ch11-kserve get inferenceservice
 ```
 Why two `InferenceService`s instead of one: this is the RawDeployment workaround from 3.3 in
@@ -386,7 +385,7 @@ weighting happening, you're doing the comparison a Gateway API `HTTPRoute` would
 To see the native Serverless-mode `canaryTrafficPercent` behavior instead (separate, optional —
 needs Knative Serving installed, not covered by this course's cluster setup):
 ```yaml
-# VERIFY against your Knative install — not exercised by this chapter's kustomize overlays
+# VERIFY against your Knative install — not exercised by this chapter's manifests
 metadata:
   annotations: {serving.kserve.io/deploymentMode: Serverless}
 spec:
@@ -428,21 +427,26 @@ What you're about to do: remove the chapter's workloads (and, optionally, the KS
 itself).
 
 ```bash
-kubectl delete -k 11-kserve/eks --ignore-not-found
-kubectl delete -k 11-kserve/eks/generative --ignore-not-found
-kubectl delete -k 11-kserve/common/canary --ignore-not-found
-kubectl delete -k 11-kserve/cpu-lab --ignore-not-found
+kubectl delete -f 11-kserve/eks/inferenceservice-sklearn.yaml --ignore-not-found
+kubectl delete -f 11-kserve/eks/inferenceservice-xgboost.yaml --ignore-not-found
+kubectl delete -f 11-kserve/eks/generative/llminferenceservice-qwen.yaml --ignore-not-found
+kubectl delete -f 11-kserve/eks/canary/inferenceservice-sklearn-v1.yaml --ignore-not-found
+kubectl delete -f 11-kserve/eks/canary/inferenceservice-sklearn-canary.yaml --ignore-not-found
+kubectl delete -f 11-kserve/eks/canary/httproute-canary.yaml --ignore-not-found
+kubectl delete -f 11-kserve/eks/namespace.yaml --ignore-not-found
 if [[ "${UNINSTALL_KSERVE:-false}" == "true" ]]; then
   helm -n kserve uninstall kserve || true
   helm -n kserve uninstall kserve-crd || true
 fi
 ```
-Why each part: `kubectl delete -k <path>` is the exact inverse of the `kubectl apply -k <path>` you
-ran to create each thing — kustomize renders the same set of objects, `delete` just removes them
-instead of creating/updating them, so you never have to remember individual object names.
-`--ignore-not-found` means it's safe to run all four lines even if you skipped some steps (e.g. never
-did the GPU lab) — without it, deleting something that was never applied would exit non-zero and
-could break a copy-pasted script. The `helm uninstall` calls are gated behind an environment variable
+Why each part: `kubectl delete -f <file>` is the exact inverse of the `kubectl apply -f <file>` you
+ran to create each thing — every manifest is a complete, standalone object, so `delete` just removes
+it by name instead of creating/updating it; delete the namespace last so any objects still in it are
+cleaned up individually first (deleting the namespace alone would also work, but the explicit order
+matches how you applied them). `--ignore-not-found` means it's safe to run every line even if you
+skipped some steps (e.g. never did the GPU lab) — without it, deleting something that was never
+applied would exit non-zero and could break a copy-pasted script. The `helm uninstall` calls are
+gated behind an environment variable
 (`UNINSTALL_KSERVE`, unset/`false` by default) specifically so that running cleanup after *this*
 chapter doesn't remove the KServe controller/CRDs out from under any other chapter or namespace that
 might still depend on them — you opt in explicitly only when you're sure nothing else needs KServe.

@@ -1,0 +1,30 @@
+# Proves the full chain: scheduler -> device plugin allocation -> driver libs + /dev/nvidia* in the container.
+# nvidia-smi is NOT in the image: the NVIDIA container runtime/CDI (EKS, AKS) or GKE's device plugin
+# mounts it from the host driver install.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nvidia-smi
+  namespace: ch01-gpu
+  labels:
+    app: gpu-smoke
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    eks.amazonaws.com/capacityType: SPOT
+    nvidia.com/gpu.present: "true"      # set at boot by nodeadm on the EKS AL2023 NVIDIA AMI
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  containers:
+  - name: nvidia-smi
+    image: nvidia/cuda:12.9.1-base-ubuntu24.04
+    command: ["bash", "-c", "nvidia-smi && nvidia-smi -L && echo NVIDIA_VISIBLE_DEVICES=$NVIDIA_VISIBLE_DEVICES"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi

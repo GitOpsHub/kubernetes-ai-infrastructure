@@ -12,7 +12,7 @@ spec:
   source:
     repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY
     targetRevision: main
-    path: 15-mlops-gitops-and-pipelines/common/workflows
+    path: 15-mlops-gitops-and-pipelines/eks/pipelines
   destination:
     server: "https://kubernetes.default.svc"
     namespace: ch15-pipelines

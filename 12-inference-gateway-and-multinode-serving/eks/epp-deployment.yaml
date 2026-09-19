@@ -1,0 +1,69 @@
+# EPP (Endpoint Picker): a gRPC ext_proc server the Gateway calls per-request. It watches vLLM's
+# /metrics (queue depth, KV-cache utilization) via the Pods selected by the InferencePool and
+# returns the single best Pod for each request -- this is what makes inference-aware load
+# balancing different from a Service's round robin.
+#
+# Image: registry.k8s.io/gateway-api-inference-extension/lwepp:v1.6.1
+# Corrected from an earlier `epp:v1.6.1` image + `--port`/`-v` flags after checking the v1.6.1
+# source tree directly: as of v1.6.1 the repo only builds `cmd/lwepp` (the "lightweight EPP" --
+# the old standalone `cmd/epp` is gone), so the image repo is `lwepp`, not `epp`. Its flag set
+# (pkg/lwepp/server/options.go) is `--grpc-port` (not `--port`) and has no `-v` flag at all --
+# passing either of the old flags makes pflag.Parse() exit 2 and CrashLoopBackOff the Deployment.
+# `--secure-serving=false` below disables the default TLS-on-ext_proc-port behavior, which needs a
+# cert the Gateway controller doesn't automatically trust in a self-hosted lab -- use TLS in prod.
+# VERIFY: re-check image path/flags against the pinned tag before relying on this in production;
+# `pkg/lwepp/server/options.go` at that tag is the source of truth for the flag set.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-epp
+  namespace: ch12-gateway
+  labels:
+    app.kubernetes.io/name: vllm-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm-epp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm-epp
+    spec:
+      serviceAccountName: vllm-epp
+      containers:
+      - name: epp
+        image: registry.k8s.io/gateway-api-inference-extension/lwepp:v1.6.1 # VERIFY
+        args:
+        - --pool-name=vllm-pool
+        - --pool-namespace=$(POD_NAMESPACE)
+        - --grpc-port=9002
+        - --grpc-health-port=9003
+        - --metrics-port=9090
+        - --secure-serving=false
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: grpc-epp
+          containerPort: 9002
+        - name: grpc-health
+          containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        readinessProbe:
+          grpc:
+            port: 9003
+          initialDelaySeconds: 5
+        livenessProbe:
+          grpc:
+            port: 9003
+          initialDelaySeconds: 5
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            memory: 512Mi

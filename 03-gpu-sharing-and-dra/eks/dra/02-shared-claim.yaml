@@ -1,0 +1,50 @@
+# ONE ResourceClaim referenced by name from several Pods = "user-mediated" sharing.
+# The scheduler allocates one GPU once; every Pod that references the claim lands on the
+# node that holds it and sees the same GPU UUID. No isolation (like time-slicing).
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: shared-gpu
+  namespace: ch03-gpu-sharing
+spec:
+  devices:
+    requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dra-shared-gpu
+  namespace: ch03-gpu-sharing
+  labels:
+    app: dra-shared-gpu
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dra-shared-gpu
+  template:
+    metadata:
+      labels:
+        app: dra-shared-gpu
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      resourceClaims:
+        - name: gpu
+          resourceClaimName: shared-gpu
+      containers:
+        - name: cuda
+          image: nvidia/cuda:12.9.1-base-ubuntu24.04
+          command: ["bash", "-c"]
+          args: ["nvidia-smi -L; trap 'exit 0' TERM; sleep infinity & wait"]
+          resources:
+            claims:
+              - name: gpu

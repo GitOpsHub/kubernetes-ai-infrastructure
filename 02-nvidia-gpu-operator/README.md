@@ -57,10 +57,10 @@ By the end you can:
 
 | Time | Activity |
 |---|---|
-| 0:00–0:30 | Read section 3 (glossary, concepts, component table). Read `common/clusterpolicy.yaml` |
+| 0:00–0:30 | Read section 3 (glossary, concepts, component table). Read `eks/clusterpolicy.yaml` |
 | 0:30–1:00 | Decide: Operator vs. the AMI's baked-in driver (section 3.3) |
 | 1:00–1:45 | Install the Operator, watch operands come up |
-| 1:45–2:15 | `common/validate.sh`, read GFD labels, rerun chapter 01's CUDA job against the Operator-managed nodes |
+| 1:45–2:15 | Validate: check operands, read GFD labels, rerun chapter 01's CUDA job against the Operator-managed nodes |
 | 2:15–2:45 | Break it: disable a component that's actually needed, watch `ClusterPolicy` status; read the upgrade-strategy section |
 | 2:45–3:00 | Checkpoint questions, cleanup |
 
@@ -195,9 +195,9 @@ node. Start at the top:
 the one CR you edit; the operator's controller reconciles every component in the table above from
 its `spec`. In the normal install path (this chapter's Step 2), you don't write the CR by hand — Helm
 renders it from `values-eks.yaml`, the same file that configures the chart. See
-`common/clusterpolicy.yaml` for a fully-commented copy of what the chart renders, verified against
-the `${GPU_OPERATOR_VERSION}` chart's actual `helm template` output and CRD schema — useful for
-reading/diffing without a cluster (`kubectl kustomize eks`), not for applying directly.
+[`eks/clusterpolicy.yaml`](eks/clusterpolicy.yaml) for a fully-commented copy of what the chart
+renders, verified against the `${GPU_OPERATOR_VERSION}` chart's actual `helm template` output and CRD
+schema — useful for reading/diffing without a cluster, not for applying directly.
 
 ### 3.3 Operator vs. the AMI's baked-in driver
 
@@ -313,24 +313,37 @@ This step exists because "the Helm command exited 0" and "every Pod says `Runnin
 not sufficient — the point of the validator component (table in 3.1) and this script is to prove GPUs
 are actually schedulable and usable, not just that some Pods started.
 ```bash
-./02-nvidia-gpu-operator/common/validate.sh
+echo "== ClusterPolicy status ==" # Ready only once every enabled operand's DaemonSet/Deployment is up
+kubectl get clusterpolicy cluster-policy -o jsonpath='{.status.state}{"\n"}'
+
+echo "== gpu-operator pods =="
+kubectl -n gpu-operator get pods -o wide
+
+echo "== GPU capacity on nodes (device plugin registered) =="
+kubectl get nodes -o custom-columns=NAME:.metadata.name,GPUS:.status.allocatable.nvidia\\.com/gpu
+
+echo "== GFD labels (present once gpu-feature-discovery has run on a GPU node) =="
+kubectl get nodes -L nvidia.com/gpu.product,nvidia.com/gpu.memory,nvidia.com/gpu.count,nvidia.com/cuda.driver.major
+
+echo "== Operator's own validator pods (must all be Completed) =="
+kubectl -n gpu-operator get pods -l app=nvidia-operator-validator
 ```
-This script (real file, cloud-agnostic, checked into `common/`) runs five read-only checks in order:
-`ClusterPolicy` status, every `gpu-operator` Pod, each node's allocatable `nvidia.com/gpu` count
-(proof the device plugin registered it with the kubelet), the GFD labels described in 3.0, and the
-Operator's own validator Pods. Reading it top to bottom mirrors the dependency order from the diagram
-in 3.1.
+These five read-only checks run in dependency order, mirroring the diagram in 3.1: `ClusterPolicy`
+status, every `gpu-operator` Pod, each node's allocatable `nvidia.com/gpu` count (proof the device
+plugin registered it with the kubelet), the GFD labels described in 3.0, and the Operator's own
+validator Pods.
 
 Expected output — GFD labels on the GPU node:
 ```
 NAME                        GPU-PRODUCT   GPU-MEMORY   GPU-COUNT
 ip-10-0-1-23.ec2.internal   NVIDIA-L4     23034MiB     1
 ```
-How to tell this worked: every pod listed by `validate.sh` is `Running` (validators `Completed`), and
-the GFD columns are non-empty for your GPU node. Re-run chapter 01's smoke test against the
-Operator-managed node — same manifests, same result, different plumbing underneath:
+How to tell this worked: every pod listed above is `Running` (validators `Completed`), and the GFD
+columns are non-empty for your GPU node. Re-run chapter 01's smoke test against the Operator-managed
+node — same manifests, same result, different plumbing underneath:
 ```bash
-kubectl apply -k 01-gpu-nodes-and-scheduling/eks
+kubectl apply -f 01-gpu-nodes-and-scheduling/eks/namespace.yaml
+kubectl apply -f 01-gpu-nodes-and-scheduling/eks/cuda-vectoradd-job.yaml
 kubectl -n ch01-gpu logs job/cuda-vectoradd
 ```
 The point of reusing chapter 01's exact Job manifest here (nothing rewritten) is that it's the
@@ -340,29 +353,6 @@ would fail the same way any real GPU workload would.
 
 How to tell this worked: the job reaches `Completed` and its log shows the vector-add result, exactly
 like chapter 01 — proving the Operator's driver/toolkit/plugin chain is a drop-in replacement.
-
-### Step 4: cpu-lab (what doesn't carry over)
-
-**There is no meaningful GPU-Operator lab on CPU-only nodes.** The Operator's entire purpose is
-installing and reconciling a real driver, container toolkit and DCGM stack against physical GPU
-hardware — none of that exists without a GPU node, and unlike chapter 00/01's fake-`nvidia.com/gpu`
-trick, faking node status doesn't get you anything: the Operator's own components (driver DaemonSet,
-toolkit, validator) would still try to talk to real hardware and fail, which teaches you nothing
-useful about the Operator itself.
-
-What you *can* do without a cluster, cloud account, or GPU — all read-only/local:
-```bash
-./02-nvidia-gpu-operator/cpu-lab/validate-dry-run.sh
-```
-This runs `helm template` against `values-eks.yaml` and the pinned chart (renders the `ClusterPolicy`
-the real install would create, entirely client-side) and `kubectl kustomize` on every overlay in this
-chapter, to confirm the CR schema and our toggles are self-consistent before you ever touch a real
-cluster. `helm template` and `kubectl kustomize` never open a network connection to a cluster or make
-an AWS API call — they only render YAML locally — which is exactly why this script is safe to run
-with no AWS account, no `kubeconfig`, and no GPU, and is the same kind of dry-run validation
-`CLAUDE.md`'s repo-wide "no test suite" convention relies on. Use this to review the diff between
-`values-eks.yaml` and `common/clusterpolicy.yaml` — the disabled/enabled component list you're
-reading right now is the whole point of section 3.3.
 
 ## 5. Spot considerations
 
@@ -455,7 +445,7 @@ image doesn't already ship one.
 A cluster-scoped custom resource (`nvidia.com/v1`, singleton name `cluster-policy`) that the
 operator's controller reconciles into every component's DaemonSet/Deployment. You don't hand-edit it
 in the normal flow — Helm renders it from `values-eks.yaml` on `helm upgrade --install`. The
-`common/clusterpolicy.yaml` kustomize copy is for offline reading/diffing only.
+`eks/clusterpolicy.yaml` mirror is for offline reading/diffing only.
 </details>
 
 <details>
@@ -501,7 +491,7 @@ observability/MIG story managed by one component instead of a hand-picked chart 
 Read the chart's release notes for driver-version bumps (a new default driver version ships with
 almost every Operator release) and any minimum-toolchain changes (e.g. this release raised the
 minimum supported containerd version) that could break your cluster's container runtime; then test
-with `helm template`/`cpu-lab/validate-dry-run.sh` before touching a real cluster, and roll out to a
+with `helm template -f eks/values-eks.yaml` (client-side, no cluster needed) before touching a real cluster, and roll out to a
 single node group first — the Operator restarts driver pods in place on an upgrade, which briefly
 interrupts GPU workloads on that node.
 </details>

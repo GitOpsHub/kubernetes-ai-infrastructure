@@ -10,12 +10,10 @@
 
 This chapter assumes:
 
-- A cluster from `00-prerequisites-and-cluster-setup`. The `cpu-lab` path needs nothing else; the
-  GPU path needs the node-pool mechanics from `01-gpu-nodes-and-scheduling` (this chapter creates
-  its own dedicated GPU node pool in §4.2).
+- A cluster from `00-prerequisites-and-cluster-setup`, plus the node-pool mechanics from
+  `01-gpu-nodes-and-scheduling` (this chapter creates its own dedicated GPU node pool in §4.2).
 - Optional: the `team-research` ClusterQueue and Ray integrations enabled by
-  `06-batch-jobs-and-kueue`'s Kueue install, only if you plan to run §3.5's `kueue/eks`
-  overlay.
+  `06-batch-jobs-and-kueue`'s Kueue install, only if you plan to run §3.5's optional Kueue step.
 - `env.sh` and `versions.env` sourced.
 
 ## 1. Why this matters
@@ -107,7 +105,7 @@ By the end you can:
 
 1. Explain the difference between `RayCluster`, `RayJob` and `RayService`, and which one to reach
    for.
-2. Read `common/raycluster-spot.yaml`: head vs worker group spec, `enableInTreeAutoscaling`, and
+2. Read `eks/raycluster-spot.yaml`: head vs worker group spec, `enableInTreeAutoscaling`, and
    why the head shouldn't run GPU workloads or spot capacity.
 3. Explain the difference between the **Ray autoscaler** (adds/removes Ray worker *replicas*
    based on pending Ray tasks/actors) and the **Kubernetes-level** Cluster Autoscaler/Karpenter
@@ -116,15 +114,15 @@ By the end you can:
    `RayCluster` via `clusterSelector`.
 5. Deploy a `RayService` running a small Ray Serve app and understand what KubeRay's zero-downtime
    upgrade does differently from a Kubernetes Deployment rolling update.
-6. Explain what changes once you layer the optional `kueue/eks` overlay.
+6. Explain what changes once you layer the optional Kueue admission step.
 
 | Block | Time | What |
 |---|---|---|
 | Theory | 35 min | §3 concepts, RayCluster/RayJob/RayService, the two autoscalers |
-| Lab A | 40 min | Install KubeRay, run the CPU `cpu-lab` (or the EKS GPU RayCluster) |
+| Lab A | 40 min | Install KubeRay, create the GPU node pool, apply the EKS GPU RayCluster |
 | Lab B | 45 min | Submit `RayJob` (watch the ephemeral cluster come and go), inspect the dashboard |
 | Lab C | 40 min | Deploy `RayService`, curl `/generate`, trigger a spec change and watch the upgrade |
-| Review | 20 min | Kueue overlay, troubleshooting, checkpoint questions, cleanup |
+| Review | 20 min | Kueue admission, troubleshooting, checkpoint questions, cleanup |
 
 ## 3. Concepts
 
@@ -184,12 +182,12 @@ translating that one YAML object into the right number of real Pods for you.
 
 The head process holds cluster state (GCS), runs the dashboard and (with
 `enableInTreeAutoscaling: true`) the Ray autoscaler itself — losing it kills every actor's
-connection to the cluster, not just one task. `common/raycluster-spot.yaml` therefore gives the
+connection to the cluster, not just one task. `eks/raycluster-spot.yaml` therefore gives the
 head **no** `nodeSelector` at all (schedules onto whatever on-demand capacity your default node
-pool provides) and **no GPU**, while the `gpu-spot` worker group gets the EKS overlay's spot +
-GPU `nodeSelector`/`tolerations` (§3.4). `terminationGracePeriodSeconds: 25` on the worker gives
-Ray's own graceful drain (stop accepting new tasks, let running ones finish) a head start before
-a spot reclaim SIGKILLs the pod.
+pool provides) and **no GPU**, while the `gpu-spot` worker group carries the spot + GPU
+`nodeSelector`/`tolerations` (§3.4) directly in its pod spec. `terminationGracePeriodSeconds: 25`
+on the worker gives Ray's own graceful drain (stop accepting new tasks, let running ones finish)
+a head start before a spot reclaim SIGKILLs the pod.
 
 ### 3.3 Two autoscalers, two triggers
 
@@ -206,11 +204,11 @@ what triggers the Kubernetes-level autoscaler to add a spot GPU node. `idleTimeo
 controls how long an idle Ray worker survives before Ray scales its replica count back down
 (which then lets the node-level autoscaler reclaim the now-empty node).
 
-### 3.4 The EKS overlay
+### 3.4 The EKS worker group placement
 
-Only the RayCluster's `gpu-spot` worker group needs a patch (spot + GPU
-`nodeSelector`/`tolerations`) — the head, the RayJob's ephemeral cluster and the RayService are
-all CPU-only and schedule fine on your default on-demand node pool from chapter `00`.
+Only the RayCluster's `gpu-spot` worker group carries spot + GPU `nodeSelector`/`tolerations` —
+the head, the RayJob's ephemeral cluster and the RayService are all CPU-only and schedule fine on
+your default on-demand node pool from chapter `00`.
 
 | | EKS |
 |---|---|
@@ -219,23 +217,23 @@ all CPU-only and schedule fine on your default on-demand node pool from chapter 
 | GPU taint added by | the `eksctl create nodegroup` command in §4.2 |
 | Spot taint added by | nobody — opt-in, set explicitly in the nodegroup config |
 
-`cpu-lab/` strips the GPU requirement entirely (CPU image, no `nvidia.com/gpu`, no
-`nodeSelector`) so the whole chapter runs on any cluster while you're waiting on GPU quota.
+### 3.5 Optional: Kueue admission
 
-### 3.5 Optional: Kueue admission (`kueue/eks`)
-
-`kueue/eks` layers the `common/kueue` Kustomize *Component*: it labels both the `RayJob` and the
-`RayCluster` with `kueue.x-k8s.io/queue-name: ch08-queue` (pointing at the same `team-research`
-`ClusterQueue` chapter `07`'s optional overlay uses) and removes the worker group's hardcoded
-`eks.amazonaws.com/capacityType` selector key so Kueue's admitted ResourceFlavor decides spot vs
-on-demand instead. `06-batch-jobs-and-kueue`'s Kueue Helm values already enable the
-`ray.io/rayjob`, `ray.io/rayservice` and `ray.io/raycluster` integrations, so no controller-side
-change is needed here. Kueue's RayJob webhook manages `spec.suspend` itself (suspends until
-admitted); the always-on `RayCluster` is admitted once at creation and simply stays `Pending` if
-quota isn't free.
+`eks/localqueue.yaml` creates a `LocalQueue` in `ch08-ray` pointing at the same `team-research`
+`ClusterQueue` chapter `07`'s optional Kueue step uses. To opt the `RayJob` and/or the
+`RayCluster` into it, apply the LocalQueue and label the object with
+`kueue.x-k8s.io/queue-name=ch08-queue` (and, for the RayCluster's `gpu-spot` worker group, remove
+the hardcoded `eks.amazonaws.com/capacityType` selector key from `eks/raycluster-spot.yaml` so
+Kueue's admitted ResourceFlavor decides spot vs on-demand instead). `06-batch-jobs-and-kueue`'s
+Kueue Helm values already enable the `ray.io/rayjob`, `ray.io/rayservice` and `ray.io/raycluster`
+integrations, so no controller-side change is needed here. Kueue's RayJob webhook manages
+`spec.suspend` itself (suspends until admitted); the always-on `RayCluster` is admitted once at
+creation and simply stays `Pending` if quota isn't free.
 
 ```bash
-kubectl apply -k 08-ray-on-kubernetes/kueue/eks
+kubectl apply -f 08-ray-on-kubernetes/eks/localqueue.yaml
+kubectl -n ch08-ray label rayjob pi-estimate kueue.x-k8s.io/queue-name=ch08-queue
+kubectl -n ch08-ray label raycluster ray-spot kueue.x-k8s.io/queue-name=ch08-queue
 ```
 
 ## 4. Lab
@@ -243,9 +241,8 @@ kubectl apply -k 08-ray-on-kubernetes/kueue/eks
 ### 4.1 Install KubeRay
 
 What you're about to do: install the KubeRay operator (controller + CRDs for
-`RayCluster`/`RayJob`/`RayService`) via Helm, pinned to `${KUBERAY_VERSION}`. Skip this step
-entirely if you're only running `cpu-lab` on a cluster that already has KubeRay — otherwise run it
-once per cluster.
+`RayCluster`/`RayJob`/`RayService`) via Helm, pinned to `${KUBERAY_VERSION}`. Run this once per
+cluster, before applying any of this chapter's manifests.
 
 ```bash
 source env.sh && source versions.env
@@ -281,13 +278,13 @@ returns successfully, the operator is genuinely up, not just "requested." The tw
 afterward are just belt-and-suspenders verification: `rollout status` re-confirms the Deployment is
 ready, and `get crd` confirms the three new API kinds this chapter uses actually registered with the
 API server (if the chart failed partway, you'd see this fail instead of failing mysteriously later
-on `kubectl apply -k`).
+on `kubectl apply -f`).
 
 How to tell this worked: `kubectl -n kuberay-system get pods` shows `kuberay-operator` `Running`,
 and `kubectl get crd | grep ray.io` lists `rayclusters.ray.io`, `rayjobs.ray.io`,
 `rayservices.ray.io`.
 
-### 4.2 GPU node pool (skip for `cpu-lab`)
+### 4.2 GPU node pool
 
 What you're about to do: create the dedicated spot GPU managed node group the `gpu-spot` worker
 group targets — L4 instances (`g6.xlarge`/`g6.2xlarge` for spot diversification), scaling from 0.
@@ -350,23 +347,20 @@ Step 4.3's worker Pods trigger a scale-up).
 
 ### 4.3 RayCluster
 
-What you're about to do: apply the `eks` overlay (or `cpu-lab` if you have no GPU quota yet) and
-watch the head + worker group come up.
+What you're about to do: apply the namespace, ServiceAccount and RayCluster manifests and watch
+the head + worker group come up. Every manifest in this chapter is plain, self-contained
+Kubernetes YAML — no templating or overlay tool involved — so apply the namespace first, then the
+rest, with plain `kubectl apply -f`:
 
 ```bash
-kubectl apply -k 08-ray-on-kubernetes/eks
+kubectl apply -f 08-ray-on-kubernetes/eks/namespace.yaml
+kubectl apply -f 08-ray-on-kubernetes/eks/serviceaccount.yaml
+kubectl apply -f 08-ray-on-kubernetes/eks/raycluster-spot.yaml
 ```
 
-`kubectl apply -k` builds and applies a **kustomize overlay**: it takes the cloud-agnostic
-`RayCluster` in `common/raycluster-spot.yaml`, layers the `eks/` patch on top (the spot + GPU
-`nodeSelector`/`tolerations` from §3.4), and applies the merged result — you never hand-edit the
-base file per cloud. This also creates the `ch08-ray` namespace, ServiceAccount, and (if you did
-§3.5) the LocalQueue, since those are all part of the same kustomization.
-
-No GPU quota yet? Run the CPU-only variant instead:
-```bash
-kubectl apply -k 08-ray-on-kubernetes/cpu-lab
-```
+`eks/raycluster-spot.yaml` already carries the spot + GPU `nodeSelector`/`tolerations` (§3.4)
+directly on the `gpu-spot` worker group's pod spec — there's no separate base/overlay pair to
+merge, this is the complete manifest you'd `kubectl apply -f` on its own.
 
 ```bash
 kubectl -n ch08-ray get raycluster,pods -w
@@ -381,8 +375,8 @@ a port on your own machine (`8265`) to a port inside the cluster on the named Se
 dashboard in your browser without exposing it to the internet via a LoadBalancer — this command
 blocks and keeps the tunnel open, so run it in its own terminal.
 
-Open `http://localhost:8265` — the Ray dashboard shows the cluster's nodes, jobs and (with the
-GPU overlay) `nvidia.com/gpu` in cluster resources. Expected:
+Open `http://localhost:8265` — the Ray dashboard shows the cluster's nodes, jobs and
+`nvidia.com/gpu` in cluster resources. Expected:
 
 ```
 NAME       DESIRED WORKERS   AVAILABLE WORKERS   STATUS   AGE
@@ -393,6 +387,14 @@ How to tell this worked: the `raycluster` shows `STATUS: ready` and the dashboar
 tab lists the head plus at least one worker.
 
 ### 4.4 RayJob (ephemeral cluster)
+
+```bash
+kubectl apply -f 08-ray-on-kubernetes/eks/pi-estimate-configmap.yaml
+kubectl apply -f 08-ray-on-kubernetes/eks/rayjob-batch.yaml
+```
+
+The ConfigMap ships `eks/src/pi_estimate.py` (the RayJob's entrypoint script) as a mounted file —
+apply it before the RayJob so the volume it references already exists.
 
 ```bash
 kubectl -n ch08-ray get rayjob pi-estimate -w
@@ -410,6 +412,14 @@ worked: `kubectl -n ch08-ray get rayjob pi-estimate -o jsonpath='{.status.jobSta
 `SUCCEEDED`, and `kubectl -n ch08-ray get raycluster` eventually shows no cluster left for it.
 
 ### 4.5 RayService
+
+```bash
+kubectl apply -f 08-ray-on-kubernetes/eks/qwen-serve-configmap.yaml
+kubectl apply -f 08-ray-on-kubernetes/eks/rayservice-serve.yaml
+```
+
+Same reasoning as §4.4: the ConfigMap ships `eks/src/serve_app.py` as a mounted file, so it needs
+to exist before the RayService's Pods reference it as a volume.
 
 ```bash
 kubectl -n ch08-ray get rayservice qwen-serve -w   # wait for Status: RUNNING
@@ -434,14 +444,15 @@ cluster come up before the old one is torn down.
 
 - **Never put the head on spot.** A reclaimed head loses GCS state for the whole cluster, not
   just the work on that node — every worker, every in-flight actor, every Serve replica goes with
-  it. `common/raycluster-spot.yaml` intentionally leaves the head's `nodeSelector` empty
-  (on-demand default pool) so it's never touched by the spot/GPU overlay.
+  it. `eks/raycluster-spot.yaml` intentionally leaves the head's `nodeSelector` empty (on-demand
+  default pool) so it's never touched by the `gpu-spot` worker group's spot/GPU placement.
 - **`idleTimeoutSeconds`** on the Ray autoscaler and `minReplicas`/`maxReplicas` per worker group
   are your spot cost dial: shorter idle timeout = faster scale-to-zero = cheaper but more cold
   starts.
-- **RayJob's ephemeral worker group** in this lab (`common/rayjob-batch.yaml`) is deliberately
-  CPU-only/on-demand-shaped — for a spot GPU batch job, add the same overlay pattern
-  (`nodeSelector`/`tolerations`) to its `rayClusterSpec.workerGroupSpecs`.
+- **RayJob's ephemeral worker group** in this lab (`eks/rayjob-batch.yaml`) is deliberately
+  CPU-only/on-demand-shaped — for a spot GPU batch job, add the same
+  `nodeSelector`/`tolerations` pattern from `raycluster-spot.yaml`'s worker group to its
+  `rayClusterSpec.workerGroupSpecs`.
 - **RayService availability** during a spot reclaim of a *worker* (not the head) degrades
   gracefully — Serve routes around the lost replica and the Ray autoscaler/Kubernetes autoscaler
   replace it; a reclaimed head, as above, does not degrade gracefully.
@@ -450,12 +461,12 @@ cluster come up before the old one is torn down.
 
 | Symptom | Likely cause | Why this happens | Fix |
 |---|---|---|---|
-| `rayclusters.ray.io` / `rayjobs.ray.io` not found | KubeRay operator not installed yet | These are CRDs — Kubernetes only understands `RayCluster`/`RayJob`/`RayService` objects once the KubeRay Helm chart has registered them with the API server. Applying `common`/`eks`/`cpu-lab` before §4.1 asks the API server about a kind it's never heard of, which is a hard error, not a warning | Run §4.1's `helm upgrade --install`, check `kubectl -n kuberay-system get pods` |
+| `rayclusters.ray.io` / `rayjobs.ray.io` not found | KubeRay operator not installed yet | These are CRDs — Kubernetes only understands `RayCluster`/`RayJob`/`RayService` objects once the KubeRay Helm chart has registered them with the API server. Applying any of this chapter's manifests before §4.1 asks the API server about a kind it's never heard of, which is a hard error, not a warning | Run §4.1's `helm upgrade --install`, check `kubectl -n kuberay-system get pods` |
 | GPU worker Pod stuck `Pending` | GPU node pool at 0 and no autoscaler trigger, or GPU quota exhausted | The GPU node group in §4.2 starts at `desiredCapacity: 0` on purpose (so it's free until needed); a worker Pod requesting `nvidia.com/gpu: "1"` only triggers a scale-up if a Kubernetes-level autoscaler (Cluster Autoscaler/Karpenter, chapter `13`) is watching this node group and there's AWS quota left to launch the instance — if either is missing, the Pod just sits `Pending` forever instead of erroring | `kubectl get nodes -l nvidia.com/gpu.present=true`; check the AWS console for G/VT quota |
-| RayJob stuck `Pending`/no cluster created | `spec.suspend` still `true` (only if you applied `kueue/eks` and quota isn't free) | Kueue's RayJob webhook (enabled by `06-batch-jobs-and-kueue`'s Helm values) intercepts every `RayJob` and sets `spec.suspend: true` until the `team-research` ClusterQueue has free quota to admit it — KubeRay itself never creates the embedded `rayClusterSpec`'s Pods while `suspend` is `true`, so "nothing happened" usually means "still queued," not "broken" | `kubectl get clusterqueue team-research -o yaml` |
+| RayJob stuck `Pending`/no cluster created | `spec.suspend` still `true` (only if you labeled it into Kueue per §3.5 and quota isn't free) | Kueue's RayJob webhook (enabled by `06-batch-jobs-and-kueue`'s Helm values) intercepts every `RayJob` carrying the `kueue.x-k8s.io/queue-name` label and sets `spec.suspend: true` until the `team-research` ClusterQueue has free quota to admit it — KubeRay itself never creates the embedded `rayClusterSpec`'s Pods while `suspend` is `true`, so "nothing happened" usually means "still queued," not "broken" | `kubectl get clusterqueue team-research -o yaml` |
 | RayService stuck `WaitForDashboard`/`DeploymentUnhealthy` | Serve app failed to import (bad `working_dir`/pip deps) or CPU too small to load the model | RayService only flips to `RUNNING` once Ray Serve reports the deployed application healthy; a Python import error in `serve_app.py`, a typo'd package in `serveConfigV2`'s `pip` list, or a head Pod too small to load `Qwen/Qwen3-0.6B` into memory all surface as the app never becoming healthy, which looks identical from `kubectl get rayservice` alone | `kubectl -n ch08-ray logs <head-pod> -c ray-head`; check `serveConfigV2` runtime_env |
 | Dashboard 502 / can't reach 8265 | Port-forward to the wrong service name, or head Pod not Ready | `port-forward` connects to a *Service*, and forwards traffic on to whichever Pod that Service currently selects — if the head Pod isn't Ready yet (still starting up) or you forwarded to a Service name from a different RayCluster/lab run, the tunnel opens but every request behind it fails | `kubectl -n ch08-ray get svc` for the exact `-head-svc` name |
-| `pi_estimate.py` / `serve_app.py` "file not found" | ConfigMap not mounted at the exact path the script/`working_dir` expects | Both scripts reach the Ray Pods as `configMapGenerator`-produced ConfigMaps mounted as a volume, not baked into the container image — if the ConfigMap's generated name and the Pod spec's `volumes[].configMap.name` disagree (e.g. after editing the script and kustomize regenerating the name hash), the volume mount silently doesn't find the file at runtime | Confirm `configMapGenerator` name matches the volume's `configMap.name` |
+| `pi_estimate.py` / `serve_app.py` "file not found" | ConfigMap not mounted at the exact path the script/`working_dir` expects, or applied after the RayJob/RayService that references it | Both scripts reach the Ray Pods as ConfigMaps mounted as a volume, not baked into the container image — if the ConfigMap's name and the Pod spec's `volumes[].configMap.name` disagree, or the ConfigMap didn't exist yet when the Pod was scheduled, the volume mount silently doesn't find the file at runtime | Confirm `eks/pi-estimate-configmap.yaml`/`eks/qwen-serve-configmap.yaml` were applied before the RayJob/RayService, and that the ConfigMap name matches the volume's `configMap.name` |
 
 ## 7. Cleanup and cost notes
 
@@ -464,7 +475,11 @@ scale the GPU managed node groups back down to nothing.
 
 ```bash
 kubectl delete rayservices,rayjobs,rayclusters --all -n ch08-ray --ignore-not-found
-kubectl delete -k 08-ray-on-kubernetes/eks --ignore-not-found
+kubectl delete -f 08-ray-on-kubernetes/eks/qwen-serve-configmap.yaml --ignore-not-found
+kubectl delete -f 08-ray-on-kubernetes/eks/pi-estimate-configmap.yaml --ignore-not-found
+kubectl delete -f 08-ray-on-kubernetes/eks/localqueue.yaml --ignore-not-found
+kubectl delete -f 08-ray-on-kubernetes/eks/serviceaccount.yaml --ignore-not-found
+kubectl delete -f 08-ray-on-kubernetes/eks/namespace.yaml --ignore-not-found
 for ng in ch08-gpu-spot-l4 ch08-gpu-ondemand-l4; do
   eksctl delete nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" --wait 2>/dev/null || true
 done
@@ -475,10 +490,11 @@ fi
 ```
 
 Why the order matters: deleting the `RayService`/`RayJob`/`RayCluster` objects first (rather than
-just `kubectl delete -k`) makes KubeRay tear down their Pods gracefully through its own controller
-logic before the overlay's namespace/ServiceAccount disappear out from under it; `--ignore-not-found`
-on both lines means you can safely re-run this block even if you already deleted some of it by hand,
-instead of the command erroring out and leaving the rest undone. The `eksctl delete nodegroup` loop
+jumping straight to `kubectl delete -f eks/namespace.yaml`) makes KubeRay tear down their Pods
+gracefully through its own controller logic before the namespace/ServiceAccount disappear out
+from under it; `--ignore-not-found` on every line means you can safely re-run this block even if
+you already deleted some of it by hand, instead of the command erroring out and leaving the rest
+undone. The `eksctl delete nodegroup` loop
 removes the GPU managed node group(s) entirely (not just scaling to 0) — since spot/on-demand
 capacity you're not actively using should be deleted, not idled, to actually stop paying for it; `||
 true` and `2>/dev/null` mean a nodegroup that was never created (e.g. you only ever ran the spot
@@ -529,11 +545,11 @@ seconds after the job's Kubernetes Job-equivalent status goes terminal. The `Ray
 (and its final status/logs reference) stays until you `kubectl delete rayjob` it.
 </details>
 
-<details><summary>6. What changes about spot/on-demand placement once you layer <code>kueue/eks</code>?</summary>
+<details><summary>6. What changes about spot/on-demand placement once you opt a workload into the optional Kueue step (§3.5)?</summary>
 
-Same pattern as chapter 07: the overlay's hardcoded capacity-type key is removed from the
-worker group's `nodeSelector`, and Kueue's admitted ResourceFlavor (spot tried first, on-demand
-fallback) decides placement instead of the Workload sitting `Pending` when spot is unavailable.
+Same pattern as chapter 07: the hardcoded capacity-type key is removed from the worker group's
+`nodeSelector`, and Kueue's admitted ResourceFlavor (spot tried first, on-demand fallback)
+decides placement instead of the Workload sitting `Pending` when spot is unavailable.
 </details>
 
 <details><summary>7. Why does the head's `rayStartParams` set <code>num-cpus: "0"</code>?</summary>
@@ -544,11 +560,13 @@ should be reserved for GCS, the dashboard and the autoscaler, not compete with u
 lose).
 </details>
 
-<details><summary>8. What doesn't carry over from the GPU overlay to <code>cpu-lab</code>?</summary>
+<details><summary>8. Why does the GPU node group in §4.2 set <code>minSize: 0</code>/<code>desiredCapacity: 0</code>, and what has to happen before a GPU worker Pod actually lands on a node?</summary>
 
-Any `num_gpus=...` Ray task/actor placement, NCCL-based multi-GPU collective work, and the "spot
-GPU workers" cost story the chapter's overlays are built around — `cpu-lab` only exercises the
-RayCluster/RayJob/RayService and autoscaler mechanics on ordinary CPU capacity.
+`minSize: 0`/`desiredCapacity: 0` mean the node group costs nothing until something needs a GPU
+— a Kubernetes-level autoscaler (Cluster Autoscaler/Karpenter, chapter `13`) has to see an
+unschedulable `nvidia.com/gpu`-requesting Pod (created when the Ray autoscaler raises `gpu-spot`
+replicas per §3.3) and there has to be spot/on-demand GPU capacity and quota available in the
+region before a real node joins the cluster.
 </details>
 
 ## 9. Further reading

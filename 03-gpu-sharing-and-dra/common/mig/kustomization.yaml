@@ -1,9 +1,0 @@
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-# One pod per MIG slice. Base requests nvidia.com/gpu (MIG "single" strategy:
-# each slice is advertised as nvidia.com/gpu). The AKS overlay switches to the
-# "mixed" strategy resource name (nvidia.com/mig-<profile>).
-namespace: ch03-gpu-sharing
-resources:
-  - ../namespace
-  - deployment.yaml

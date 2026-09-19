@@ -1,0 +1,8 @@
+# Namespace where LocalQueues/Jobs for this chapter live. The Kueue controller itself
+# lives in kueue-system (installed via Helm, see README Step 2), not here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ch06-kueue
+  labels:
+    kubernetes.io/metadata.name: ch06-kueue
