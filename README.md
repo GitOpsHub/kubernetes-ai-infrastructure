@@ -5,6 +5,22 @@
 A hands-on course for DevOps engineers on running AI workloads (GPU scheduling, training, LLM serving,
 autoscaling, cost) on Kubernetes. Every lab targets **EKS**, and runs on **spot capacity** by default.
 
+## New to Kubernetes, GPUs, or AWS? Start here
+
+This course assumes you're comfortable at a Linux command line and have written some Python — that's
+it. It does **not** assume you've used Kubernetes before, touched a GPU or CUDA, or worked in AWS.
+Chapter 00 walks through creating your first cluster and AWS account setup from scratch.
+
+In plain English: **Kubernetes** is a system that runs your applications as containers across a group
+of machines (a "cluster"), automatically restarting, scaling, and placing them for you instead of you
+SSH-ing into servers by hand. **GPU scheduling for AI workloads** is about telling Kubernetes "this
+container needs a GPU, not just CPU and memory" so it lands on a machine that has one — and, since GPUs
+are scarce and expensive, doing that fairly and efficiently across training jobs and model-serving
+requests instead of one team quietly hogging every card. The 20 chapters below build up everything
+around that idea: getting GPUs into pods, sharing them, storing and loading multi-gigabyte model
+weights, training across many machines, serving models at scale, autoscaling, and keeping the cost of
+all this under control.
+
 Start with [CONVENTIONS.md](CONVENTIONS.md) for folder layout and environment setup. Every kustomize
 overlay and shell script in this repo is checked on every PR by
 [`scripts/validate-all.sh`](scripts/validate-all.sh) — run it locally before you push:
@@ -28,6 +44,11 @@ of a kustomize overlay — see its README for why. Chapter 19 also carries Pytho
 
 > **Request GPU quota on day 1** (chapter 00). Spot GPU quota approval can take days, and default quota
 > for L4/T4 in most regions is 0.
+
+Every chapter README is self-contained: it explains its own concepts before it uses them, and assumes
+nothing beyond what earlier chapters in the sequence set up (cluster, node groups, CRDs installed). Work
+through the chapters in order the first time — jumping ahead is fine once you know what a chapter needs
+from [chapter 00](00-prerequisites-and-cluster-setup/) onward.
 
 ## Course map
 

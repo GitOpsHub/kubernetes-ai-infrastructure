@@ -1,6 +1,6 @@
 # CPU-only lab: KServe's predictive InferenceServices need no GPU at all — this is just
 # ../common (namespace) + ../common/predictive on any cluster with KServe installed
-# (install-kserve.sh is identical on every cloud/local cluster; see README).
+# (the README's "Step 1: Install KServe" Helm commands are identical on any cluster).
 #   kubectl apply -k 11-kserve/cpu-lab
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

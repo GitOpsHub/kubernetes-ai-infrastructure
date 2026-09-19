@@ -1,5 +1,5 @@
-# EKS: run ./install-kserve.sh first (reuses the "spot-gpu" managed node group from
-# 01-gpu-nodes-and-scheduling for the generative/ LLMInferenceService).
+# EKS: run the README's "Step 1: Install KServe" Helm commands first (reuses the "spot-gpu"
+# managed node group from 01-gpu-nodes-and-scheduling for the generative/ LLMInferenceService).
 #   kubectl apply -k 11-kserve/eks                 # namespace + predictive (CPU, no GPU needed)
 #   kubectl apply -k 11-kserve/eks/generative       # LLMInferenceService (GPU)
 apiVersion: kustomize.config.k8s.io/v1beta1

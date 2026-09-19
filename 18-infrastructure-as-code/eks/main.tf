@@ -1,5 +1,5 @@
-# Terraform equivalent of 00-prerequisites-and-cluster-setup/eks/create-cluster.sh +
-# eks/cluster.yaml: a VPC, an EKS cluster, a spot-cpu managed node group
+# Terraform equivalent of 00-prerequisites-and-cluster-setup's `eksctl create cluster -f
+# eks/cluster.yaml` step: a VPC, an EKS cluster, a spot-cpu managed node group
 # (diversified instance types, autoscaling 1..4), and a spot-gpu managed node
 # group (autoscaling 0..1, tainted).
 #
@@ -112,8 +112,7 @@ module "eks" {
   }
 }
 
-# EKS still has no built-in autoscaler (unlike GKE/AKS): the spot-gpu group's
-# min_size/desired_size of 0 will stay at 0 until you scale it manually
-# (01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh) or install
-# Karpenter/Cluster Autoscaler (13-node-autoscaling-and-cost) - this module
+# EKS has no built-in autoscaler: the spot-gpu group's min_size/desired_size of 0 will stay
+# at 0 until you scale it manually (`eksctl scale nodegroup`, see 01-gpu-nodes-and-scheduling's
+# README) or install Karpenter/Cluster Autoscaler (13-node-autoscaling-and-cost) - this module
 # doesn't change that behavior, it's an EKS platform limitation.

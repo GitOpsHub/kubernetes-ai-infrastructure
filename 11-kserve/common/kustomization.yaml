@@ -1,6 +1,6 @@
-# Cloud-agnostic base: namespace only. KServe itself is cluster-scoped (installed by
-# <cloud>/install-kserve.sh, not by kustomize). predictive/ and generative/ are separate
-# kustomizations layered by ../gke|eks|aks.
+# Cloud-agnostic base: namespace only. KServe itself is cluster-scoped (installed via Helm,
+# the README's "Step 1: Install KServe" — not by kustomize). predictive/ and generative/ are
+# separate kustomizations layered by ../eks (or ../cpu-lab for the CPU-only path).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

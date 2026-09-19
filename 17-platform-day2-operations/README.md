@@ -48,6 +48,61 @@ production-grade platform diverge the most — chapters 00–16 taught you to bu
 correctly once; this chapter teaches you to operate all of them together, indefinitely, without a
 human staring at every node.
 
+### 1.1 "Day-2" — what the number actually means
+
+If you're new to this vocabulary: **Day-0** is designing the system (which cloud, which instance
+types, which Kubernetes version). **Day-1** is standing it up for the first time (creating the
+cluster, installing the GPU Operator, deploying the first workload) — that's what chapters 00–16
+walked you through, once each, in a controlled order. **Day-2** is everything that happens *after*
+it's live and other people depend on it, forever, on a schedule nobody chose: maintenance windows,
+version upgrades, hardware failures, capacity crunches, and the accounting questions that only come
+up once real money is being spent. A course can teach Day-0/Day-1 in a straight line; Day-2 shows
+up as interruptions, which is why this chapter is organized as runbooks (recognize → recognize
+which failure → fixed steps) rather than a single build-in-order lab.
+
+Five concrete things this chapter teaches, in plain terms, before you touch a command:
+
+- **Draining a node** means telling Kubernetes "stop scheduling new work here, and move the pods
+  that are already here somewhere else, one at a time, without breaking anything that depends on
+  them." It's how you take a node out of service for maintenance (an AMI update, a hardware
+  replacement, a GPU Operator upgrade) without a hard outage. The flag `--delete-emptydir-data`
+  matters because some pods keep working data in an `emptyDir` volume (temp storage tied to that
+  specific pod, not a real disk) — for example chapter 09's vLLM pod caching a downloaded model in
+  one before the persistent-cache option is added. Draining a node necessarily deletes that pod (to
+  move it elsewhere), and Kubernetes refuses to do so by default if it would silently throw away
+  `emptyDir` data — you must explicitly say "yes, I understand that cache is disposable and will be
+  rebuilt on the new node" via this flag, or the drain command errors out instead of guessing for you.
+- **A GPU Operator upgrade risk** is the fact that upgrading the NVIDIA GPU Operator (the software
+  that installs and manages the GPU driver, container runtime hooks, and monitoring agents on every
+  GPU node) almost always ships a new driver version too, and rolling out a new driver means
+  restarting a low-level system component on every affected node — which briefly kicks every GPU
+  workload on that node off the GPU while it happens. Get the version wrong, or roll it out to every
+  node pool at once, and you can turn "one point release" into "every GPU workload in the cluster
+  restarting simultaneously." That's why this chapter's runbook insists on a dry-run diff, a backup,
+  and rolling out to one node pool before the rest.
+- **A spot reclaim storm** is what happens when the cloud provider takes back a large batch of Spot
+  instances at once — Spot capacity is spare, discounted compute the cloud can reclaim with only a
+  couple of minutes' notice whenever it needs that capacity back for full-price customers. Because
+  this course runs spot-first (see CONVENTIONS.md), a "bad night" in one instance-type/AZ pool can
+  reclaim many nodes within minutes — very different from one node quietly failing, and it needs a
+  different diagnostic (is this widespread and is the fallback capacity actually absorbing it, not
+  "why did this one node die").
+- **Velero, backup/restore, and disaster recovery (DR)** — Velero is an open-source tool that takes
+  point-in-time backups of Kubernetes objects (Deployments, Custom Resources, Secrets, etc.) and,
+  via your cloud's snapshot APIs, the data in Persistent Volumes. "Backup/restore" means being able
+  to recreate that state later; "disaster recovery" is the broader practice of having a *plan* — not
+  just backups sitting in a bucket, but a tested, timed procedure — for what you do when a cluster,
+  namespace, or piece of storage is lost or corrupted. On a managed Kubernetes service (EKS here),
+  the control plane itself (including `etcd`, the database Kubernetes stores all its own objects in)
+  is the cloud's responsibility and isn't something you can or need to back up yourself — section 3.4
+  explains exactly where the line falls.
+- **Chargeback/cost-allocation tooling** (OpenCost here) answers "who is spending the money," not
+  just "how much are we spending." On a shared GPU cluster where multiple teams' workloads land on
+  the same nodes, a single AWS bill tells you the total but not which team's job left a $40,000 GPU
+  idle overnight — OpenCost attributes cost to the Kubernetes objects (namespace, pod, workload) that
+  actually consumed the resource, which is what lets a platform team hand a real, itemized number to
+  each team instead of splitting the bill evenly (or arguing about it).
+
 ```mermaid
 flowchart LR
   subgraph "Planned change"
@@ -73,6 +128,19 @@ flowchart LR
   PLATFORM -.nightly.-> VELERO
   PLATFORM -.continuous.-> COST
 ```
+
+**Reading this diagram if you're new to Day-2 thinking:** the top-left box is things *you* schedule
+on purpose (a maintenance window, a planned upgrade) — you control the timing, so you can prepare
+(drain first, take a backup first). The top-right box is things that happen *to* you on someone
+else's schedule — a spot reclaim, a driver crashing, a pod running out of memory, a team's quota
+filling up, a node going dark — you only find out after the fact, so the response is diagnose-then-
+act instead of prepare-then-act. Both feed into the same box in the middle: "the platform," meaning
+the actual GPU workloads users depend on (training jobs, vLLM inference, KServe endpoints). The
+bottom box is the safety net that runs regardless of what's happening above it — Velero taking
+nightly backups and OpenCost continuously tracking spend — so that no matter which top-row event
+occurs, you still have a recent backup to restore from and an accurate record of who was using what.
+The dotted arrows ("nightly", "continuous") are deliberate: unlike the solid arrows above them,
+these two run on their own schedule independent of any single incident.
 
 ## 2. Learning objectives and time plan (~3 h)
 
@@ -136,6 +204,18 @@ sequenceDiagram
   end
 ```
 
+**Reading this sequence diagram:** `cordon` and `drain` are two separate steps on purpose. Cordon
+only marks the node "don't schedule anything new here" — nothing currently running is touched, so
+it's always safe and instant. Drain is the step that actually moves work off the node, and it does
+so pod-by-pod through the **Eviction API** rather than just deleting pods outright — eviction is a
+polite request ("please terminate this pod") that the API server checks against any matching PDB
+*before* acting on it. If the PDB says removing this pod would drop the workload below its declared
+minimum, the API server refuses the individual eviction with an HTTP 429 ("Too Many Requests") — not
+an error for `kubectl drain`, but a signal to back off and retry, which is exactly what it does,
+repeatedly, until either the PDB allows it (e.g. another replica became Ready elsewhere) or
+`--timeout` is reached. This retry loop is *why* a stuck drain looks like it's hanging rather than
+failing outright — it's still trying, not broken.
+
 ### 3.2 GPU driver / GPU Operator upgrade runbook
 
 Chapter 02's checkpoint question 8 already states the shape of this: read the target release's
@@ -170,6 +250,28 @@ causes but self-inflicted by the Operator's own reconciliation, not the eviction
 
 Each runbook script is **read-only** (`kubectl get`/`describe`, no mutations) — safe to run against
 a live cluster at any time, including one you don't fully trust yet.
+
+**Why these five, specifically.** Every one of them is a failure mode that this course's *own*
+chapters can actually produce, not a generic "things that can go wrong with Kubernetes" list — the
+point is that by the time you reach chapter 17 you've already built every component that can fail
+this way, so you can reproduce most of these cheaply instead of taking them on faith:
+
+- **Spot reclaim storm** happens because chapters 00/01/13 default every node pool to spot capacity
+  to save cost — the tradeoff is that spot capacity can vanish in bulk, and a course that's
+  spot-first everywhere is more exposed to a storm than a cluster that mixes in more on-demand.
+- **DCGM Xid error** is a hardware/driver-level fault code the NVIDIA driver reports (Xid = "Xid
+  message", NVIDIA's term for GPU error events) — chapter 04 wired an alert for it because a GPU
+  silently corrupting compute results or hanging is far worse than one crashing loudly, and chapter
+  02 is what put the driver stack in place that can produce these in the first place.
+- **vLLM OOMKilled pod** happens because chapter 09 pins the pod's memory tightly to fit a GPU node
+  economically — tight memory budgets are exactly what tips over into an OOM (out-of-memory kill)
+  under real traffic.
+- **Kueue quota exhaustion** is chapter 06's whole mechanism (fair-sharing GPU quota across teams)
+  working as designed from the *cluster's* point of view while looking like a bug from the
+  *blocked team's* point of view — the report script exists to tell those two apart quickly.
+- **Node stuck `NotReady`** is disproportionately likely on a GPU node specifically, because it has
+  an extra layer (the GPU Operator's driver DaemonSet, chapter 02) that can wedge independently of
+  the kubelet itself — a plain CPU node has one less thing that can go wrong in this particular way.
 
 ### 3.4 Backup/DR with Velero — what's actually worth backing up
 
@@ -255,6 +357,16 @@ kubectl -n ch17-day2ops get pods -o wide -w   # Ctrl-C once all 3 are Running an
 Expected: 3 `drain-demo` pods, ideally on different nodes (best-effort pod anti-affinity — on a
 single-node cluster they'll share one node, which is fine for the lab, just less illustrative).
 
+`drain-node.sh` is this chapter's copy-pasteable wrapper around the real maintenance workflow: it
+cordons the node, prints what's currently scheduled there so you can see what you're about to
+disrupt, then runs `kubectl drain` with two flags that matter — `--ignore-daemonsets` (DaemonSet
+pods like the CNI or `dcgm-exporter` are meant to run on every node and would otherwise block the
+drain forever, since a DaemonSet always wants a replacement pod on that exact node) and
+`--delete-emptydir-data` (explained in section 1.1 — without it, the drain refuses to proceed past
+any pod using local scratch storage). Running it with `--dry-run` first shows you exactly what real
+command it would run without changing anything, which is worth doing before ever pointing it at a
+node with real GPU workloads on it.
+
 ```bash
 NODE=$(kubectl -n ch17-day2ops get pods -o jsonpath='{.items[0].spec.nodeName}')
 ./17-platform-day2-operations/common/scripts/drain-node.sh "${NODE}" --dry-run
@@ -298,6 +410,14 @@ guaranteed stable across versions.
 What you're about to do: render the currently-pinned and a hypothetical next `GPU_OPERATOR_VERSION`
 client-side and diff them, entirely locally — this never touches a cluster.
 
+Why a client-side render instead of just upgrading and seeing what happens: `helm template` runs the
+same templating logic `helm upgrade` would, but only prints the resulting YAML to your terminal
+instead of applying it — so `gpu-operator-upgrade-dry-run.sh` reuses chapter 02's actual
+`values-eks.yaml` (the real toggles this course's cluster uses) to render the *current* pinned
+version and the *target* version side by side, then `diff`s the two. That diff is where you'd spot a
+changed default driver/toolkit image tag before it ever reaches a real node — the single most useful
+thing to check before a GPU Operator upgrade, per chapter 02's own checkpoint question 8.
+
 ```bash
 ./17-platform-day2-operations/common/scripts/gpu-operator-upgrade-dry-run.sh v26.8.0   # v26.8.0 is illustrative -- use the real next release
 ```
@@ -328,6 +448,32 @@ What you're about to do: run each runbook script against your cluster's current 
 state to see what a clean baseline looks like, so you recognize the difference when something's
 actually wrong.
 
+What each script is actually checking, and why:
+
+- **`spot-storm-report.sh`** lists every node with its `Ready` condition and whether it's spot or
+  on-demand, then greps recent `NodeNotReady`/`Preempted` events and any currently `Pending` pods.
+  The reason it checks *all three together* is that no single signal proves a storm on its own — a
+  few `Pending` pods could just be normal scheduling lag, but several nodes going `NotReady` within
+  the same few minutes, clustered by timestamp in the events list, is the actual fingerprint of a
+  reclaim wave versus one unlucky node. It finishes by checking whether Kueue Workloads are stuck
+  `Admitted` without going `Running` — that's the one thing worth paging someone about; the storm
+  itself resolving is expected, not an incident.
+- **`kueue-quota-report.sh`** prints each ClusterQueue's quota usage per resource flavor side by side
+  with the oldest still-`Pending` Workload per queue, plus which ClusterQueues are borrowing from
+  which Cohort-mates. The reason it reports *age* of the oldest pending Workload rather than just a
+  count is that "one workload pending for 3 seconds" and "one workload pending for 3 hours" look
+  identical in a simple count but mean completely different things operationally — the script's
+  output is what tells you which ClusterQueue field (see section 6 troubleshooting) is actually the
+  blocker.
+- **`diagnose-notready-node.sh <node>`** pulls the node's full condition list (not just the headline
+  `Ready` status — `DiskPressure`, `MemoryPressure`, etc. each point at a different cause), recent
+  events for that node, every pod still scheduled to it, and specifically checks whether any
+  `gpu-operator` namespace pods are running (or crash-looping) on it. It's checking three
+  *independent* failure layers in one pass — network/kubelet ("lost contact"), node resources
+  ("actually out of disk/memory"), and the GPU driver stack ("wedged DaemonSet") — because a
+  `NotReady` GPU node in this course is disproportionately likely to be the third one, which a
+  generic Kubernetes troubleshooting guide wouldn't think to check.
+
 ```bash
 ./17-platform-day2-operations/common/scripts/spot-storm-report.sh
 ./17-platform-day2-operations/common/scripts/kueue-quota-report.sh
@@ -339,7 +485,14 @@ Workload `Admitted` (from chapter 06); `diagnose-notready-node.sh` shows every c
 for the node you pick. How to tell this worked: you have a "known-good" baseline output to compare
 against the next time one of these actually fires.
 
-**vLLM OOMKilled diagnostic** (no script — two `kubectl` commands you'll run by hand at 2am):
+**vLLM OOMKilled diagnostic** (no script — two `kubectl` commands you'll run by hand at 2am). The
+first command reads the *reason* Kubernetes recorded for the container's last termination straight
+from its status (`OOMKilled` specifically means the Linux kernel's cgroup memory controller killed
+the process for exceeding its container memory limit — a kubelet-level kill, nothing to do with the
+GPU). The second checks the *previous* container's logs (`--previous`, because the crashed container
+is gone and a new one has already started) for the distinct string a CUDA allocator prints when it
+runs out of GPU VRAM instead — the two failures produce the same visible symptom (pod restarted) but
+have opposite fixes, which is the entire point of running both checks before touching any config:
 ```bash
 kubectl -n ch09-vllm get pod -l app.kubernetes.io/name=vllm \
   -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}{"\n"}'
@@ -370,9 +523,26 @@ What you're about to do: create the Velero S3 bucket and an EKS Pod Identity ass
 AWS access keys), install Velero pinned to Helm chart `12.2.0` (Velero app `v1.18.2`) with the
 `velero-plugin-for-aws` (`v1.14.2`), then apply this chapter's `Schedule`/`Backup` objects.
 
+**Why Pod Identity instead of an access key.** Velero needs AWS permissions to write backups to S3
+and to create/delete EBS snapshots. The old way to grant that would be a long-lived AWS access
+key/secret pasted into a Kubernetes Secret — a credential that works forever, from anywhere, if it
+leaks. EKS Pod Identity instead lets you attach an IAM role directly to a Kubernetes ServiceAccount:
+AWS automatically hands that role's temporary, auto-rotating credentials to any pod running as that
+ServiceAccount, and nothing that looks like a static secret ever exists in the cluster. This is the
+same mechanism chapter 05 uses for S3 access (its Step 2), and the pattern here follows it exactly.
+
 Creates the bucket, the IAM role trusted by EKS Pod Identity, and the Pod Identity association for
-the `velero` ServiceAccount — same pattern as `05-model-storage-and-data/eks/setup-s3-iam.sh`, no
-static access keys:
+the `velero` ServiceAccount — same pattern as chapter 05's Step 2 (object storage), no static
+access keys. Walking through what this block actually does, in order: check whether the S3 bucket
+already exists (`head-bucket`) and create it only if not, so re-running this script is safe; block
+all public access on it (a backup bucket should never be publicly reachable) and turn on versioning
+(protects against accidentally overwriting/deleting a backup object); ensure the `eks-pod-identity-agent`
+add-on is installed (the cluster-side component that actually serves credentials to pods); write a
+trust policy (who is allowed to assume this role — here, EKS's own pod-identity service) and a
+least-privilege permissions policy (only the specific S3 and EBS-snapshot actions Velero needs, and
+only against this one bucket, not `*`); create or update the IAM role with those two documents; then
+create the Pod Identity association that actually wires "ServiceAccount `velero` in namespace
+`velero`" to "this IAM role" — that association is the step that makes the whole chain work:
 ```bash
 : "${AWS_REGION:?}" "${EKS_CLUSTER:?}" "${AWS_ACCOUNT_ID:?}"
 BUCKET="${VELERO_S3_BUCKET:-${AWS_ACCOUNT_ID}-ch17-velero}"
@@ -452,7 +622,15 @@ association line with no errors. The `velero` namespace/ServiceAccount itself is
 Helm install next.
 
 Install Velero via the official Helm chart, using EKS Pod Instance credentials (no static AWS
-access keys):
+access keys). The `--set` flags below configure Velero's two storage locations: a
+`backupStorageLocation` (where Kubernetes object manifests get written — the S3 bucket from the
+previous step) and a `volumeSnapshotLocation` (where EBS volume snapshots get registered — same
+region, no separate bucket needed since EBS snapshots are an AWS-native resource, not S3 objects).
+`credentials.useSecret=false` is what tells the Velero pod to use the Pod Identity credentials
+instead of looking for a mounted access-key Secret. The `velero-plugin-for-aws` init container
+supplies the actual AWS-specific backup/restore logic — Velero's core is cloud-agnostic, and plugins
+like this one are how it knows how to talk to S3 and EBS specifically (a different cloud would use a
+different plugin image, same Velero core):
 ```bash
 : "${AWS_REGION:?}"
 helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts --force-update
@@ -520,6 +698,14 @@ captured here — only real clouds exercise that part.
 
 What you're about to do: install OpenCost pointed at chapter 04's existing kube-prometheus-stack
 (no second in-cluster Prometheus), using AWS's built-in list pricing for the cost model.
+
+**How OpenCost actually computes a cost.** It doesn't call any billing API in real time — instead it
+reads the same metrics chapter 04 already collects (`DCGM_FI_DEV_GPU_UTIL` for GPU usage,
+kube-state-metrics for what each pod *requested*: CPU, memory, and `nvidia.com/gpu` count) and
+multiplies resource-time (e.g. "this pod held 1 GPU for 4.2 hours") by a price-per-hour it either
+looks up from AWS's public list pricing or you feed it from a real Cost and Usage Report. That's why
+pointing it at an *existing* Prometheus matters (the check just below) — OpenCost has nothing to
+compute from without the utilization/allocation metrics already being scraped there.
 
 ```bash
 if ! kubectl -n monitoring get svc kube-prometheus-stack-prometheus >/dev/null 2>&1; then
@@ -604,6 +790,56 @@ first, exactly as chapter 04's own troubleshooting table teaches.
 | `ChargebackIdleGPUAllocation`/`ChargebackNamespaceBudgetExceeded` never appear in Prometheus rules | Missing `release: kube-prometheus-stack` label, or OpenCost's metric names differ from what's assumed (`# VERIFY` in the manifest) | Same check as chapter 04: `kubectl get prometheusrule -A -l release=kube-prometheus-stack`; `curl localhost:9003/metrics \| grep gpu` against the OpenCost pod directly to confirm the real metric name |
 | OpenCost UI shows `$0.00` for everything | `opencost.prometheus.external.url` unreachable, or wrong Prometheus release name | `kubectl -n opencost logs deploy/opencost \| grep -i prometheus`; confirm `kube-prometheus-stack-prometheus.monitoring.svc` resolves from the `opencost` namespace |
 | Kueue quota runbook shows a team stuck `Pending` with quota apparently free elsewhere | `reclaimWithinCohort`/`borrowWithinCohort` set to `Never` (chapter 06 checkpoint Q5/Q7) | `kubectl describe clusterqueue <name>`; fix per 06-batch-jobs-and-kueue's own troubleshooting table, this chapter's script only diagnoses, chapter 06 owns the fix |
+
+### 6.1 Why these happen — drain and GPU Operator upgrade
+
+**A stuck drain isn't the drain command being broken.** As section 3.1's sequence diagram shows,
+every eviction request the drain issues gets checked against the PDB before it's allowed — with
+`replicas: 1` and `minAvailable: 1` there is, by definition, no way to remove that one pod and still
+have `minAvailable` replicas up, so the PDB refuses forever and the drain retries forever, until
+`--timeout` gives up. The fix is never "make the drain smarter" — it's either give the workload a
+second replica first (so evicting one still leaves one up) or consciously accept the outage
+(`--disable-eviction` skips the Eviction API and its PDB check entirely, which is exactly why it's
+an emergency-only flag: you're choosing to break the guarantee PDBs exist to provide).
+
+**The `emptyDir` error is Kubernetes protecting you from silent data loss**, not a bug — deleting a
+pod that has local scratch data is fine when you've explicitly acknowledged it (the flag), but
+refusing by default means nobody's cache or scratch data disappears from an accidental drain.
+
+**A missing chart version usually means you're ahead of the actual release**, not a typo — NVIDIA
+publishes GPU Operator releases on its own cadence, and this course's `${GPU_OPERATOR_VERSION}` in
+`versions.env` is pinned to whatever was actually current at verification time; a "next" version you
+pass to the dry-run script for illustration may genuinely not be published yet.
+
+### 6.2 Why these happen — Velero and backup/restore
+
+Most Velero failures in this lab trace back to one of two things: **credentials/identity not fully
+propagated yet** (EKS Pod Identity associations take a short time to become active after creation —
+this is an eventual-consistency detail of the underlying AWS control plane, not a Velero bug — so
+retrying after a minute or two is a legitimate first troubleshooting step, not a placeholder) or
+**a missing piece of cloud-specific wiring that Velero itself can't create for you** — specifically
+the `VolumeSnapshotClass` that tells the CSI driver "this is the snapshot class Velero should use,"
+which is a cluster-admin setup step separate from installing Velero itself. A `Backup` stuck
+`InProgress` almost always means Velero is waiting on a CSI snapshot that has nowhere to register.
+
+### 6.3 Why these happen — OpenCost and chargeback
+
+Both OpenCost failure modes below come back to the same root cause as chapter 04's own alerting
+troubleshooting: **label and metric-name coupling**. Prometheus only loads `PrometheusRule` objects
+that carry the specific `release: kube-prometheus-stack` label the Helm chart's Prometheus Operator
+is configured to watch for — miss that label and the rule silently never loads (no error, it just
+never appears in `Status → Rules`). Similarly, "`$0.00` for everything" almost never means "nothing
+costs anything" — it means OpenCost's queries to Prometheus are returning no data, most often because
+the external Prometheus URL is misconfigured/unreachable from the `opencost` namespace, not because
+the cost model itself is wrong.
+
+### 6.4 Why this happens — Kueue quota
+
+This is intentionally **not** a bug for this chapter's script to fix — `kueue-quota-report.sh` only
+tells you *which* two fields (`reclaimWithinCohort`, `borrowWithinCohort`) are worth checking; the
+actual quota-sharing policy decision belongs to chapter 06, which owns the ClusterQueue/Cohort
+design. A team stuck `Pending` with quota visibly free elsewhere in the cohort is Kueue behaving
+exactly as configured — it just may be configured more conservatively than the team expected.
 
 ## 7. Cleanup and cost notes
 

@@ -49,6 +49,104 @@ By the end you can:
 
 ## 3. Concepts
 
+### 3.0 Storage building blocks, for a first-timer
+
+If chapters 00–04 were your first contact with Kubernetes storage, the vocabulary below is worth
+reading slowly once — everything else in this chapter builds on it.
+
+**PersistentVolume (PV), PersistentVolumeClaim (PVC), StorageClass — and how they fit together.**
+A Pod's own filesystem disappears the moment the Pod is deleted, which is exactly what happens
+constantly on spot nodes. If a workload needs storage that outlives the Pod, Kubernetes gives you
+three cooperating objects:
+
+- A **PersistentVolume (PV)** is a cluster-wide object that represents one real piece of storage —
+  an AWS EBS volume, an EFS access point, or (as you'll see in Step 2) an S3 bucket exposed through
+  a CSI driver. A PV knows *where* the data physically lives and *how* to attach/mount it, but it
+  doesn't belong to any one namespace or Pod yet.
+- A **PersistentVolumeClaim (PVC)** is what a namespaced workload actually asks for: "give me 10Gi
+  of storage that supports one reader/writer" (or many). Kubernetes matches the claim to a PV that
+  satisfies it — either one that already exists (**static provisioning**, what this chapter mostly
+  does — the PV is hand-written YAML) or one created on demand by a provisioner (**dynamic
+  provisioning** — you'll see this pattern more in later chapters).
+- A **StorageClass** is the template a dynamic provisioner uses when it creates PVs on the fly: it
+  says which backend (EBS gp3, EFS, S3) and which parameters (throughput mode, filesystem type,
+  encryption) to use. Step 4 uses a StorageClass named `efs-models` for this; Steps 1–3 use
+  hand-written PVs instead, because Mountpoint for S3 isn't provisioned "per size" the way a disk is.
+
+In short: **PV = the actual storage resource, PVC = a namespace's claim/request against it,
+StorageClass = the recipe for making PVs automatically.** A Pod never talks to a PV directly — it
+mounts a PVC, and Kubernetes (via the CSI driver) does the rest.
+
+**What is a CSI driver?** The Container Storage Interface (CSI) is the standard plugin interface
+Kubernetes uses to talk to *any* storage backend without the Kubernetes core code needing to know
+about that backend. A CSI driver is a piece of software (usually running as Pods itself, via a
+DaemonSet/Deployment installed as an EKS add-on) that implements "mount this volume onto this
+node" for one specific backend. This chapter uses two CSI drivers: **Mountpoint for Amazon S3**
+(makes an S3 bucket appear as a mounted path — §3.3) and the **EFS CSI driver** (mounts an NFS file
+system — Step 4). Without a CSI driver, Kubernetes has no idea how to attach an S3 bucket or an EFS
+file system to a Pod at all; the driver is what turns an AWS API concept into a Linux mount point
+inside the Pod's container.
+
+**What is EKS Pod Identity, and why "keyless"?** Before Pod Identity (and its predecessor IRSA —
+IAM Roles for Service Accounts), the common way to give a Pod AWS permissions was to either bake a
+static AWS access key + secret into a Kubernetes Secret, or attach a broad IAM role to every EC2
+node (so every Pod on that node inherited the same permissions, whether it needed S3 access or
+not). Both are risky: a leaked access key is valid until someone manually rotates or revokes it,
+and a node-wide role means a compromised Pod can reach anything the node can reach.
+
+EKS Pod Identity removes the static credential entirely. Instead, it lets you say "Pods running as
+ServiceAccount `model-reader` in namespace `ch05-models` may assume IAM role
+`ch05-model-reader-<cluster>`" — a mapping stored in AWS, not in the cluster. When such a Pod
+starts, the kubelet and the **EKS Pod Identity agent** (a small add-on running as a DaemonSet)
+automatically exchange the Pod's short-lived, cluster-issued identity token for a short-lived AWS
+credential via AWS STS (`AssumeRole`). Nothing is stored on disk, nothing is committed to a YAML
+file, and the credential expires in minutes rather than being valid until manually rotated. See
+§3.4 for the full exchange, step by step.
+
+**Mountpoint for Amazon S3 — an object store made to look like a filesystem, with real limits.**
+S3 is *object storage*: you `PUT` and `GET` whole objects by key, there's no concept of "open this
+file and change 10 bytes in the middle." Mountpoint for S3 is a CSI driver + FUSE (Filesystem in
+Userspace) program that presents a bucket as a mounted directory so ordinary programs (like vLLM
+reading `.safetensors` files) can just open and read paths, without knowing they're talking to S3
+underneath. It's excellent for what this chapter needs — write once, read many times, in parallel,
+from any node — but it is **not** a real filesystem:
+- **No in-place edits and (by default) no overwrite or delete.** Mountpoint only supports creating
+  new objects; see the workaround in §3.3 (upload to a fresh path, never edit an existing one).
+- **No rename.** That's why the loader Job downloads to a local `emptyDir` first, then `cp`s the
+  finished files into the mount (§3.3 explains why `hf download`'s temp-file-then-rename pattern
+  doesn't work directly against a Mountpoint mount).
+- **Eventual consistency characteristics of S3 apply.** A `PUT` you just made is generally visible
+  immediately in S3 today, but Mountpoint's own **metadata cache** (`metadata-ttl`) can still make a
+  newly-written file (like the `_COMPLETE` marker) briefly invisible to a *different* Pod that
+  already cached the directory listing — see the Troubleshooting table.
+
+**Amazon EFS — when you actually need a shared, writable filesystem.** EFS is a managed NFS
+(Network File System) service: multiple Pods, on multiple nodes, in multiple AZs, can all mount the
+same file system read-write at the same time, with normal POSIX semantics (in-place edits, renames,
+directory locks, file permissions) — the things Mountpoint deliberately doesn't give you. That
+makes EFS the right choice when you have many small files that get modified or appended (dataset
+preprocessing, shared checkpoints multiple training workers write to concurrently, log
+aggregation) rather than a handful of large immutable weight files. The tradeoff is cost and
+complexity: EFS bills per GB stored plus throughput, needs a mount target (network endpoint) in
+every AZ your nodes might land in, and needs its own CSI driver and IAM setup (Step 4). For this
+chapter's read-mostly model-serving use case, object storage (pattern c) is usually the better
+default — EFS is here so you know when to reach for it instead.
+
+**The five delivery patterns, one more time in plain language**, before you see the taxonomy table
+in §3.2:
+
+1. **(a) Download inside every Pod** — simplest to write, worst at runtime: every Pod start
+   re-downloads the whole model from the internet.
+2. **(b) Cache on a regular disk (PVC)** — fast after the first download, but the disk is tied to
+   one availability zone and one attachment, which fights with spot's node churn.
+3. **(c) Mount a bucket (object storage + CSI)** — the model lives once in S3; every Pod, on any
+   node, in any zone, mounts it read-only. This is the pattern this chapter recommends by default.
+4. **(d) Shared filesystem (EFS)** — like (c) but with real read-write filesystem semantics, at
+   higher cost — for workloads that need to *write*, not just read.
+5. **(e) Preload onto the node itself** — the model or image is already on the node's disk before
+   any Pod starts, for the lowest possible cold start, at the cost of ops complexity (rebuilding
+   images/disks per model version).
+
 ### 3.1 How big is a model? Cold-start math
 
 **Weights size ≈ parameters × bytes per parameter**
@@ -151,6 +249,46 @@ sequenceDiagram
   K->>S: GET objects
 ```
 
+Reading the diagram, step by step, if you've never seen an OIDC/STS token exchange before:
+
+1. **`Pod->>K: mount volume`** — a Pod is scheduled with `serviceAccountName: model-reader` and a
+   volume that uses the Mountpoint CSI driver. Kubernetes needs to actually attach/mount that
+   volume before the container can start.
+2. **`K->>API: TokenRequest ...`** — the kubelet (via the CSI driver, using the Kubernetes
+   `TokenRequest` API, called "projected service account tokens") asks the Kubernetes API server to
+   mint a brand-new, short-lived **JWT** (JSON Web Token — a signed, tamper-evident piece of text
+   that encodes "this identity is who it claims to be, and expires at time T") for this Pod's
+   ServiceAccount. The `audience` field is set to `eks.amazonaws.com`, meaning "this token is only
+   valid for proving identity to EKS's Pod Identity system" — it can't be replayed against some
+   other service.
+3. **`API-->>K: short-lived JWT`** — the API server signs and returns that token. It typically lives
+   for well under an hour and is never written to a Secret or to disk outside the Pod's mounted
+   token volume.
+4. **`K->>IdP: exchange JWT via Pod Identity agent`** — the **EKS Pod Identity agent**, a small
+   process running as a DaemonSet Pod on every node, receives that JWT and calls AWS's **STS**
+   (Security Token Service) `AssumeRole` API on the Pod's behalf, presenting the JWT as proof of
+   identity. STS checks it against the **Pod Identity association** you created in Step 2 (which
+   says "namespace `ch05-models` + ServiceAccount `model-reader` ↔ IAM role
+   `ch05-model-reader-<cluster>`") and against that role's trust policy (`Principal: {"Service":
+   "pods.eks.amazonaws.com"}` — only the Pod Identity service itself is allowed to assume this role,
+   nobody else).
+5. **`IdP-->>K: short-lived AWS credential`** — STS returns a temporary AWS access key, secret key,
+   and session token, valid for a limited window (typically up to an hour, refreshed automatically
+   before it expires). This is the same *kind* of credential a long-lived IAM user's static access
+   key would produce, but it expires on its own and was never generated by, or stored by, a human.
+6. **`K->>S: GET objects`** — the Mountpoint process now has AWS credentials scoped exactly to what
+   the `model-reader` role's policy allows (`s3:ListBucket` / `s3:GetObject` on this one bucket —
+   see the reader policy JSON in Step 2), and uses them to read from S3 like any AWS SDK call would.
+
+Compare this with the older/manual pattern: create an IAM user, generate a static access key pair,
+paste it into a Kubernetes Secret, mount that Secret into every Pod that needs S3 access. That key
+works forever until someone remembers to rotate or revoke it, is visible to anyone who can read that
+Secret, and isn't scoped to any one namespace/ServiceAccount by Kubernetes RBAC. Pod Identity (and
+its predecessor, IRSA, which achieves the same result via each cluster's OIDC provider instead of
+the Pod Identity agent) replaces "a secret that has to be protected forever" with "a token that is
+minted fresh, used once, and expires" — that's what "keyless" means here: **no static AWS access
+keys ever exist**, only automatically-issued, automatically-expiring credentials.
+
 Nothing long-lived is stored in the cluster. The IAM Pod Identity association names the **namespace and ServiceAccount**.
 That makes RBAC on who can create pods with `serviceAccountName: model-writer` a security boundary (chapter `14-multi-tenancy-and-security`).
 
@@ -172,6 +310,16 @@ Layout:
 All serving pods use `vllm/vllm-openai-cpu:v0.29.0`, so these labs need **no GPU**. The storage path is exactly what a GPU pod
 would use. Chapter `09-llm-inference-with-vllm` swaps the image and adds `nvidia.com/gpu`.
 
+`source env.sh && source versions.env` loads the AWS account/region and pinned component versions
+you set up in chapter 00, so every command below can reference `${AWS_REGION}`, `${EKS_CLUSTER}`,
+etc. without you retyping them. The namespace command below is intentionally written as
+`create ... --dry-run=client -o yaml | kubectl apply -f -` rather than a plain `kubectl create
+namespace` — that idiom is idempotent (safe to re-run; `apply` won't error if the namespace already
+exists, whereas a second `kubectl create` would). `Qwen/Qwen3-0.6B` is a public model and doesn't
+need a token, but Hugging Face gated/private models do, so every loader in this chapter references
+the `hf-token` Secret as *optional* — create it now if you plan to reuse this lab layout for a gated
+model later; skip it and nothing breaks for this chapter's public model.
+
 ```bash
 source env.sh && source versions.env
 # Optional (only for gated models): the Secret is referenced as optional by every loader.
@@ -180,6 +328,14 @@ kubectl -n ch05-models create secret generic hf-token --from-literal=HF_TOKEN="$
 ```
 
 ### Step 1 · CPU lab: pattern (a), then (b)
+
+This step runs entirely on whatever cluster you already have (no AWS-specific IAM or storage
+needed) so you can *feel* the two worst-performing patterns from the table in §3.2 before spending
+any AWS setup effort on the good one. `kubectl apply -k ...` applies the kustomize overlay in
+`cpu-lab/` (pattern (a): an init container that downloads the model into `emptyDir` before the vLLM
+container starts). The `logs -f` command follows the init container's own log output live so you
+can watch the download happen — an init container's logs are only visible while it's running or
+briefly after, so run this before it finishes rather than after.
 
 ```bash
 kubectl apply -k 05-model-storage-and-data/cpu-lab
@@ -194,6 +350,14 @@ real    0m24.310s
 1.5G    /models/model
 ```
 
+`rollout status` blocks until the Deployment reports all replicas `Available`, which for this
+pattern means "the init container finished downloading and the vLLM container passed its readiness
+probe" — a good single command to know "is it actually ready" instead of polling `get pods`
+manually. `port-forward ... &` runs in the background (the trailing `&`) so the next command, a
+`curl` against vLLM's OpenAI-compatible `/v1/chat/completions` endpoint, can run in the same
+terminal session; this is the same request shape you'd send to a real hosted OpenAI-compatible
+model.
+
 ```bash
 kubectl -n ch05-models rollout status deploy/qwen-init-download --timeout=10m
 kubectl -n ch05-models port-forward svc/qwen-init-download 8000:8000 &
@@ -201,9 +365,22 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Say hi in 5 words /no_think"}],"max_tokens":30}' | jq -r '.choices[0].message.content'
 ```
 
-**Now simulate a spot reclaim:** `kubectl -n ch05-models delete pod -l app=qwen-init-download`. Watch the whole download run again.
+**Now simulate a spot reclaim:** `kubectl -n ch05-models delete pod -l app=qwen-init-download`.
+Deleting the Pod (not the Deployment) is exactly what happens when AWS reclaims a spot instance out
+from under it — the Deployment controller immediately schedules a replacement Pod, and because
+pattern (a) has nothing cached anywhere outside that one Pod's now-gone `emptyDir`, the whole
+download runs again from scratch. Watch the whole download run again — this is the "worst: full
+download every start" row from the pattern table made concrete.
 
-Next, pattern (b) with an RWO PVC on the default StorageClass:
+Next, pattern (b) with an RWO PVC on the default StorageClass. "RWO" (ReadWriteOnce) means the
+underlying disk can only be attached to one node at a time — fine for a single replica, but (as
+you'll rediscover in Step 1's own troubleshooting and §3.2's table) a poor fit once spot moves that
+single replica to a different zone. `delete -k` tears down pattern (a) first so the two Deployments
+don't compete for the same Service name/port; `apply -k .../pvc-cache` brings up a Job that
+downloads the model once into a PVC-backed volume, and a separate Deployment that serves from that
+same PVC. `wait --for=condition=complete` blocks until the populate Job's Pod finishes successfully
+— Jobs (unlike Deployments) run to completion once and stop, so "complete" is the condition to wait
+on, not "ready".
 
 ```bash
 kubectl delete -k 05-model-storage-and-data/cpu-lab
@@ -220,7 +397,11 @@ pattern (c), the "best for production" row from section 3.2.
 
 Create the spot CPU node group for this chapter (Intel instance types with AVX-512, which the vLLM
 CPU backend needs; [`eks/nodegroup-ch05.yaml`](eks/nodegroup-ch05.yaml) also defines an on-demand
-fallback group at `desiredCapacity: 0` — edit `metadata.name`/`region` to match `env.sh` first):
+fallback group at `desiredCapacity: 0` — edit `metadata.name`/`region` to match `env.sh` first).
+This is a real, billed EC2 capacity change: `eksctl create nodegroup -f <file>` reads the eksctl
+config file (a declarative alternative to passing a dozen `--flag`s) and calls the AWS EC2/Auto
+Scaling APIs to actually launch nodes and register them with your cluster — nothing before this
+point in the chapter has cost you anything or touched real infrastructure.
 ```bash
 eksctl create nodegroup -f 05-model-storage-and-data/eks/nodegroup-ch05.yaml
 ```
@@ -311,8 +492,38 @@ rm -rf "${TMP}"
 cat 05-model-storage-and-data/eks/bucket.env
 ```
 
+Walking through what that script actually did, mapped onto the concepts from §3.0/§3.4: `head-bucket`
+is a cheap existence check so re-running the script doesn't fail on "bucket already exists" — this
+whole block is written to be safely re-runnable. `put-public-access-block` is a defense-in-depth
+setting that blocks the bucket from ever being made public by a future misconfigured bucket policy
+or ACL, independent of the fact that Pod Identity never needed public access in the first place. The
+`for addon in ...` loop installs the two CSI-related EKS add-ons idempotently (skips creation if
+already present) — recall from §3.0 that without the Mountpoint CSI driver add-on, Kubernetes has no
+mechanism to turn "mount this bucket" into an actual Linux mount point, and without the Pod Identity
+agent add-on there is nothing on the node to perform the JWT→AWS-credential exchange from §3.4.
+`trust.json` is the IAM role's **trust policy** — it says *who is allowed to assume this role at
+all* (only the `pods.eks.amazonaws.com` service, i.e. only via Pod Identity); `reader.json`/
+`writer.json` are the roles' **permission policies** — what the role can *do* once assumed. Keeping
+these as two separate JSON documents mirrors how IAM itself separates "who can wear this hat" from
+"what this hat lets you do". The final `for who in reader writer` loop creates each role (if
+missing), attaches its permission policy, looks up its ARN, and creates the Pod Identity association
+that binds `namespace=ch05-models` + `serviceAccount=model-${who}` to that role ARN — this is the
+exact association §3.4's sequence diagram assumes already exists when a Pod starts. The script ends
+by writing the bucket name to `eks/bucket.env` so later steps (and cleanup) don't have to re-derive
+it.
+
 Now apply the overlay, upload the model with the loader Job, and let the serving Deployment pick it
-up from the mount:
+up from the mount. `kubectl kustomize ... | less` renders the final YAML without applying it, so you
+can read exactly what's about to be created before it touches the cluster — a good habit any time an
+overlay is unfamiliar. `apply -k` then actually creates those resources: the `ch05-models` namespace
+resources from `common/base`, the PV/PVC pair that uses the Mountpoint CSI driver
+(`eks/pv-pvc-mountpoint.yaml`), the `upload-model` Job (using the `model-writer` ServiceAccount and
+its writer role from the script above), and the `qwen-from-bucket` serving Deployment (using
+`model-reader`). Checking `mount-s3` namespace Pods confirms the Mountpoint CSI driver actually
+launched a FUSE process alongside your workload — recall from §3.3 that Mountpoint runs as a
+*separate* Pod next to your container, not inside it. Watching the upload Job's logs and then
+listing the bucket with `aws s3 ls` both confirm the same fact from two different angles: the Job's
+own log line and the object actually landing in S3.
 ```bash
 kubectl kustomize 05-model-storage-and-data/eks | less  # review first
 kubectl apply -k 05-model-storage-and-data/eks
@@ -321,6 +532,7 @@ kubectl -n ch05-models logs job/upload-model -f
 aws s3 ls "s3://$(grep S3_BUCKET 05-model-storage-and-data/eks/bucket.env | cut -d= -f2)/models/qwen3-0.6b/" --recursive --human-readable
 kubectl -n ch05-models rollout status deploy/qwen-from-bucket --timeout=15m
 ```
+
 How to tell this worked: `kubectl -n mount-s3 get pods` shows a Mountpoint pod `Running` next to
 your workload pod's node, the upload Job log ends with a `_COMPLETE` write, `aws s3 ls` lists the
 model files under `models/qwen3-0.6b/`, and `rollout status` reports the deployment available.
@@ -334,6 +546,16 @@ Things to notice:
 - Pod Identity trust policy principal: `pods.eks.amazonaws.com`, actions `sts:AssumeRole` + `sts:TagSession`.
 
 ### Step 3 · Verify the serving pod reads from the mount
+
+This step is about proving to yourself that the model files really are coming from the S3 mount and
+not from some leftover local cache. `exec ... ls -la` lists the model directory *from inside the
+container* — if the mount is working, you'll see the same files you listed with `aws s3 ls` a moment
+ago, but reachable as ordinary paths. `mount | grep -i -E "fuse|models"` looks at the container's
+mount table for a FUSE-backed mount (Mountpoint) at the model path — this is the concrete, in-Pod
+evidence that what looks like a local directory is actually backed by S3 over FUSE. Grepping the
+vLLM container's own logs for "loading/weights/took" surfaces the lines where vLLM reports how long
+it spent reading and loading the weights, so you can directly compare that number against Step 1's
+init-container download time.
 
 ```bash
 kubectl -n ch05-models exec deploy/qwen-from-bucket -c vllm -- sh -c 'ls -la /models/models/qwen3-0.6b/*/ && mount | grep -i -E "fuse|models"'
@@ -352,6 +574,22 @@ PVC), billed per GB stored plus elastic throughput.
 What you're about to do: create an EFS file system reachable from the cluster (one mount target per
 AZ, NFS port 2049 opened from the cluster security group), install the EFS CSI add-on, and give its
 controller (`efs-csi-controller-sa`) permission to manage access points via EKS Pod Identity.
+
+A quick walkthrough of why each piece is needed, since this is the most networking-heavy block in
+the chapter: EFS is reached over NFS (port 2049), and NFS traffic has to originate from inside your
+VPC, so the script first looks up the cluster's VPC, its own security group, and its subnets (one
+per AZ) with `describe-cluster`. It then creates the file system itself (`elastic` throughput mode
+auto-scales bandwidth with usage, so you don't have to pre-provision throughput). `create-mount-
+target`, run once per unique AZ found in `SUBNETS`, is what actually makes the file system reachable
+from that AZ — without a mount target in an AZ, nodes there simply can't connect, which is why the
+loop explicitly dedupes AZs (`SEEN_AZ`) rather than looping over every subnet. The new security group
+and its ingress rule open port 2049 specifically *from the cluster's own security group*, not from
+the whole internet, so only your cluster's nodes can reach the file system. Finally, the EFS CSI
+driver's *controller* component (which creates/deletes access points on your behalf when PVCs are
+created/deleted) needs its own AWS permissions — that's the Pod Identity association at the end,
+bound to the add-on's well-known ServiceAccount name `efs-csi-controller-sa`, using the AWS-managed
+`AmazonEFSCSIDriverPolicy` instead of a hand-written policy since this is a standard, well-scoped
+AWS policy for exactly this driver.
 ```bash
 : "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}"
 TMP="$(mktemp -d)"
@@ -402,7 +640,13 @@ rm -rf "${TMP}"
 echo "EFS ${FS_ID} ready"
 ```
 
-Apply the overlay and serve from the shared file system:
+Apply the overlay and serve from the shared file system. This overlay includes the `efs-models`
+StorageClass, so the PVC it creates is **dynamically provisioned**: unlike Step 2's hand-written PV
+for the S3 mount, here the EFS CSI driver's controller reacts to the PVC and creates a matching
+EFS access point automatically (the mechanism described in §3.0's PV/PVC/StorageClass explanation).
+The populate Job fills that shared volume once; then two serving replicas mount the same PVC
+read-write at the same time — something pattern (b)'s RWO PVC could never do, and the whole reason
+to reach for EFS in the first place.
 ```bash
 kubectl apply -k 05-model-storage-and-data/eks/shared-fs
 kubectl -n ch05-models wait --for=condition=complete job/populate-model-cache --timeout=20m
@@ -439,22 +683,33 @@ covered conceptually in chapter `13-node-autoscaling-and-cost`.
 
 ## 6. Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Mountpoint pod `mp-…` in `mount-s3` Pending | No room on the node for the Mountpoint pod | Leave CPU/memory headroom; see driver docs `HEADROOM_FOR_MPPOD.md` |
-| `Access Denied` on mount | No pod identity association for this namespace/SA, or `eks-pod-identity-agent` add-on missing | `aws eks list-pod-identity-associations --cluster-name ...` |
-| `cp: ... Operation not permitted` writing over an existing file | Mountpoint forbids overwrite by default | Use a new revision path, or add `allow-overwrite` |
-| Serving pod stuck in `wait-for-model` | Loader not done, or metadata cache hides the new `_COMPLETE` | Check Job logs; lower metadata/negative-cache TTLs |
-| `Multi-Attach error for volume` (pvc-cache) | RWO disk already attached on another node | Use RWX (shared-fs) or keep Job and Deployment on one node |
-| Pod evicted: `ephemeral-storage` | emptyDir/cache bigger than limits or node disk | Raise `sizeLimit`/limits; bigger boot disks |
-| Loader `429 Too Many Requests` from Hugging Face | Unauthenticated / many parallel downloads | Set `HF_TOKEN`; download once to a bucket (pattern c) |
-| vLLM CPU crashes with `Illegal instruction` | CPU lacks the instruction set vLLM's CPU build expects | Use AVX-512 instance families (m7i/m6i) |
+| Symptom | Likely cause | Why this happens | Fix |
+|---|---|---|---|
+| Mountpoint pod `mp-…` in `mount-s3` Pending | No room on the node for the Mountpoint pod | Mountpoint runs as its own Pod (§3.3) alongside your workload, scheduled by the same kubelet — if the node's CPU/memory is fully claimed by other Pods' requests, there's no room left for it, and *your* workload Pod also can't start because its volume never mounts | Leave CPU/memory headroom; see driver docs `HEADROOM_FOR_MPPOD.md` |
+| `Access Denied` on mount | No pod identity association for this namespace/SA, or `eks-pod-identity-agent` add-on missing | Without an association, step 4 of §3.4's exchange (STS `AssumeRole`) has nothing to check the JWT against, so STS refuses it and Mountpoint gets no credentials at all | `aws eks list-pod-identity-associations --cluster-name ...` |
+| `cp: ... Operation not permitted` writing over an existing file | Mountpoint forbids overwrite by default | S3 objects aren't edited in place, and Mountpoint deliberately doesn't emulate overwrite/rename for general-purpose buckets (§3.3/§3.0) — a `cp` that would replace an existing key is rejected rather than silently corrupting a file mid-write | Use a new revision path, or add `allow-overwrite` |
+| Serving pod stuck in `wait-for-model` | Loader not done, or metadata cache hides the new `_COMPLETE` | Mountpoint caches directory listings for `metadata-ttl` seconds for performance; a reader Pod that listed the directory just before the loader wrote `_COMPLETE` won't see the new file until that cache entry expires | Check Job logs; lower metadata/negative-cache TTLs |
+| `Multi-Attach error for volume` (pvc-cache) | RWO disk already attached on another node | An RWO (ReadWriteOnce) EBS volume can only be attached to one node's kernel at a time; if the scheduler puts a new Pod on a different node before the old one released the volume (common right after a spot reclaim), the attach fails outright | Use RWX (shared-fs) or keep Job and Deployment on one node |
+| Pod evicted: `ephemeral-storage` | emptyDir/cache bigger than limits or node disk | `emptyDir` volumes and Mountpoint's local file cache both consume the node's boot disk, which is counted as ephemeral storage; once usage crosses the Pod's request/limit (or the node's actual disk fills up) the kubelet evicts the Pod to protect the node | Raise `sizeLimit`/limits; bigger boot disks |
+| Loader `429 Too Many Requests` from Hugging Face | Unauthenticated / many parallel downloads | The Hugging Face Hub rate-limits anonymous and high-volume traffic per IP/token; every spot reclaim under pattern (a) means another full re-download hitting the same limits, which is exactly the "poor fit for spot" problem the pattern table warns about | Set `HF_TOKEN`; download once to a bucket (pattern c) |
+| vLLM CPU crashes with `Illegal instruction` | CPU lacks the instruction set vLLM's CPU build expects | The vLLM CPU backend is compiled to use AVX-512 instructions for performance; running it on an instance family whose CPUs don't implement AVX-512 makes the CPU itself fault on those instructions, which the kernel reports as `Illegal instruction` (SIGILL), not an application-level error | Use AVX-512 instance families (m7i/m6i) |
 
 ## 7. Cleanup & cost notes
 
 What you're about to do: delete the CPU-lab resources, then tear down the object-storage/shared-fs
 kustomize resources, IAM roles, Pod Identity associations and this chapter's node groups
 (`DELETE_BUCKET=true` also empties and deletes the S3 bucket — omit it to keep the model for ch09/ch10).
+
+Order matters here: Kubernetes resources are deleted first (`kubectl delete -k ...`), then AWS-side
+Pod Identity associations, then the IAM roles those associations pointed at, then the node groups —
+roughly the reverse of the order everything was created in, so nothing is left referencing an object
+that's already gone. The `for id in $(aws eks list-pod-identity-associations ...)` loop looks up and
+deletes every association in this chapter's namespace rather than hardcoding association IDs,
+because `create-pod-identity-association` doesn't return a predictable ID you could hardcode.
+`aws iam delete-role-policy` must run before `aws iam delete-role` — IAM refuses to delete a role
+that still has inline policies attached, which is why both appear even though the role is going away
+either way. `--ignore-not-found`/`|| true` throughout make the whole script safe to re-run if an
+earlier step already failed partway.
 ```bash
 kubectl delete -k 05-model-storage-and-data/cpu-lab --ignore-not-found
 

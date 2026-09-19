@@ -19,8 +19,9 @@ spec:
     - "oci://registry.k8s.io/kueue/charts/kueue"
     - "https://prometheus-community.github.io/helm-charts"
     # KServe ships as OCI charts (ghcr.io), not the classic https://kserve.github.io/charts repo
-    # -- matches 11-kserve/*/install-kserve.sh's `helm upgrade --install ... oci://ghcr.io/kserve/
-    # charts/kserve-crd|kserve-resources`. Corrected from the non-OCI repo URL, which would have
+    # -- matches 11-kserve's README "Step 1: Install KServe" `helm upgrade --install ...
+    # oci://ghcr.io/kserve/charts/kserve-crd|kserve-resources`. Corrected from the non-OCI repo
+    # URL, which would have
     # made app-kserve-crd.yaml/app-kserve.yaml fail to sync ("repo not permitted in project").
     - "oci://ghcr.io/kserve/charts/*"
     - "https://argoproj.github.io/argo-helm"

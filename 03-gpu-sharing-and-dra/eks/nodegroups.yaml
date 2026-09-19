@@ -1,5 +1,5 @@
 # eksctl nodegroups for chapter 03. EKS_CLUSTER / AWS_REGION placeholders are substituted by
-# create-nodegroups.sh. All groups are Spot (managed node groups label them
+# the README's Lab section (sed + eksctl create nodegroup -f). All groups are Spot (managed node groups label them
 # eks.amazonaws.com/capacityType=SPOT). EKS-optimized AL2023 NVIDIA AMIs ship the driver and
 # container toolkit and label nodes nvidia.com/gpu.present=true.
 apiVersion: eksctl.io/v1alpha5

@@ -2,10 +2,10 @@
   path: /spec/workerGroupSpecs/0/template/spec/nodeSelector
   value:
     eks.amazonaws.com/capacityType: SPOT   # set automatically on managed node groups
-    ch08.lab/gpu: l4                       # set by create-gpu-nodegroup.sh (spot + on-demand)
+    ch08.lab/gpu: l4                       # set by the eksctl create nodegroup command in README §4.2
 - op: add
   path: /spec/workerGroupSpecs/0/template/spec/tolerations
   value:
-    - key: nvidia.com/gpu                  # taint added by create-gpu-nodegroup.sh
+    - key: nvidia.com/gpu                  # taint added by that same nodegroup command
       operator: Exists
       effect: NoSchedule

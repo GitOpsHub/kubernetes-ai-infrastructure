@@ -22,6 +22,62 @@ This chapter assumes:
 
 ## 1. Why this matters
 
+### 1.0 If you've never done distributed training before, start here
+
+Every chapter before this one ran **one pod, one job**. This chapter is the first one where a
+single logical "job" is actually *several pods that must cooperate in real time*. If any of the
+vocabulary below is new, read this section before touching a command — the lab will make a lot
+more sense once you know what problem it's solving.
+
+- **Why split training across machines at all?** A model's weights and the batch of data used to
+  update them have to fit in one GPU's memory and be processed by one GPU's compute. When the
+  model is too big, or you simply want to get through more training data per hour than one GPU
+  can chew through, you split the work across multiple GPUs — possibly on multiple physical
+  machines (nodes). This chapter's lab uses the simplest and most common split: **data
+  parallelism**. The *same* model is copied onto every GPU; each GPU is handed a different slice
+  of the batch, computes gradients on its slice, and then all GPUs average ("all-reduce") their
+  gradients so every copy of the model stays identical after each step. (There are other splitting
+  strategies — model/tensor/pipeline parallelism, for models too big for one GPU's memory — but
+  this chapter doesn't use them; DDP is the one you'll meet first and most often.)
+- **What is DDP?** `DistributedDataParallel` is PyTorch's built-in implementation of the data-
+  parallel pattern above. Each GPU process is a "rank." All ranks run the identical training
+  script; DDP wraps the model so that after each backward pass, it automatically triggers an
+  **all-reduce** — a collective network operation where every rank exchanges its gradients with
+  every other rank and they all end up with the same averaged gradient — over NCCL (NVIDIA's
+  GPU-to-GPU communication library). No rank is "in charge" of the math; they're peers. But they
+  do need one coordinator moment at startup, which is where rank 0 and rendezvous come in.
+- **Rank, world size, rendezvous, `torchrun`**: `torchrun` is the PyTorch launcher that starts one
+  training process per GPU and hands each one four pieces of information: its **rank** (0, 1, 2…
+  — a unique ID for that process), the **world size** (total number of processes across *all*
+  nodes — the group can't do anything until every one of them has shown up), and how to find
+  **rank 0** (an IP/hostname + port, called `MASTER_ADDR`/`MASTER_PORT`) so every process can dial
+  in and agree "we're all here, let's start." That handshake is the **rendezvous**. Once it
+  completes, training proceeds in lockstep: every rank runs the same step number at (roughly) the
+  same time, synchronized by the all-reduce after every backward pass.
+- **Why this needs Kubernetes-native orchestration, not just a Deployment**: a plain Kubernetes
+  Deployment or Job has no concept of "these N pods are one unit that must all start together, and
+  all die together if one dies." Kubeflow Trainer exists to give you that: it creates exactly the
+  right number of pods, injects the rendezvous info (`MASTER_ADDR`, rank, world size) into each one
+  automatically, and — critically for this chapter — knows how to recreate *the whole group
+  together* when one pod is lost, instead of leaving the survivors hung forever. §3.2 below covers
+  exactly how.
+- **Why spot preemption is worse here than anywhere else in this course**: in earlier chapters, a
+  spot-reclaimed pod running a stateless inference server just gets rescheduled and traffic resumes
+  a few seconds later — no other pod cared that it briefly disappeared. In DDP, every rank is
+  waiting on every other rank at every synchronization point. If AWS reclaims the node under rank
+  1, rank 0 doesn't notice "one fewer worker" and carry on — it calls `all_reduce` and blocks
+  forever waiting for a peer that no longer exists, until a timeout eventually kills it too. One
+  preempted pod can silently stall (and, once NCCL's watchdog fires, crash) a job that was using
+  every other GPU in the group. That's the core operational problem this chapter's `failurePolicy`
+  and checkpointing solve.
+- **What checkpointing buys you**: since a preempted rank can force the *entire* gang to be
+  recreated (§3.2), you want the fresh set of pods to pick up from the last saved point in training
+  rather than starting the whole run over from step 0. A **checkpoint** is a snapshot of the
+  model's weights (and optimizer state) written to durable storage periodically during training.
+  Without one, a spot reclaim near the end of a long run throws away all of that run's progress.
+  The `cpu-lab/` variant in §4.6 deliberately skips persistent checkpoints so you can see this pain
+  first-hand before wiring up the real S3-backed version in the GPU lab.
+
 A distributed training run is not a bag of independent pods — it's a **gang**: `torchrun` needs
 every rank up and rendezvoused before any of them can make progress, and if one rank dies the
 whole NCCL process group is dead too. Plain Deployments/Jobs don't understand that. Kubeflow
@@ -29,11 +85,24 @@ Trainer v2 (the rewrite of the old `PyTorchJob`/`TFJob` operators, now generic a
 gives you:
 
 - A **`TrainJob`** — the thing you submit, with `numNodes`, `numProcPerNode`, image, command and
-  per-node resources, referencing a reusable **runtime**.
+  per-node resources, referencing a reusable **runtime**. Think of it as "run this training script
+  across this many nodes/processes, using that runtime's rules for how to lay out and recover the
+  pods." You'll write one of these per training run (§3.1, `common/trainjob-ddp-gpu.yaml`).
 - A **`ClusterTrainingRuntime`** / namespaced **`TrainingRuntime`** — the "platform team" contract:
-  built on a **JobSet** (one Kubernetes `batch/v1` Job per replicated node group, with a
+  a reusable template that says *how* any TrainJob referencing it should be run — which framework
+  plugin to use (PyTorch here), what failure/restart behavior to apply, what the pod template looks
+  like. You write the TrainJob once per run; the runtime is written once and reused by many
+  TrainJobs, the same way a Helm chart's `values.yaml` is written once and instantiated many times.
+  It's built on a **JobSet** (one Kubernetes `batch/v1` Job per replicated node group, with a
   `failurePolicy` that can recreate the *whole* gang on a single lost pod), plus a plugin that
   injects `PET_*` env vars so `torchrun` needs zero rendezvous flags.
+- A **`JobSet`** — a Kubernetes API (from the separate `jobset.sigs.k8s.io` project, installed as a
+  CRD alongside Trainer) for exactly this "group of Jobs that succeed or fail together" pattern.
+  Trainer doesn't reinvent gang scheduling — it generates a JobSet under the hood from your
+  TrainJob + TrainingRuntime, and the JobSet controller is what actually creates the per-rank Jobs,
+  watches them, and enforces the recreate-the-whole-gang policy. You won't write JobSet YAML
+  directly in this chapter, but `kubectl get jobset` and `kubectl get jobs` (plural) are how you'll
+  observe what Trainer built for you.
 - **`runtimePatches`** — strategic-merge patches the `eks/` overlay layers onto the runtime's
   JobSet template without forking the runtime itself. That's how `eks/` adds its own node
   selectors/tolerations/volumes to the `torch-ddp-spot` runtime.
@@ -92,6 +161,34 @@ flowchart TB
     J1 --> P1["Pod: torchrun train_ddp.py<br/>PET_NODE_RANK=1"]
     P0 <-.->|NCCL all-reduce| P1
 ```
+
+**Reading this diagram if you've never seen a multi-pod training topology before**: follow it top
+to bottom, then side to side at the bottom.
+
+- **Top row (what you write)**: you author one `TrainJob` object. It doesn't describe pods
+  directly — it just says "2 nodes, 1 process per node" and points at a runtime by name
+  (`runtimeRef`).
+- **Middle row (what the platform team already wrote)**: the `TrainingRuntime` it points at
+  carries the actual pod template, image defaults, and — importantly — the failure-handling policy
+  from §3.2. You didn't have to write any of that; you referenced it.
+- **Side box (what the cloud overlay adds)**: `eks/patch-trainjob-eks.yaml` layers a small patch
+  (via `runtimePatches`) on top with spot node selectors and taint tolerations, without changing
+  the shared runtime file itself. This is the same "base + overlay" idea used in every other
+  chapter's `common/` + `eks/` kustomize split, just expressed through a Trainer-native field
+  instead of kustomize.
+- **The TrainJob + TrainingRuntime + patch together produce one JobSet** — this is the object
+  Trainer actually creates in the cluster; you never write it by hand.
+- **The JobSet creates one Kubernetes `Job` per rank** (`node-0`, `node-1` in this 2-node example)
+  — each Job's `completionIndex` becomes that rank's `PET_NODE_RANK`. These are ordinary `batch/v1`
+  Jobs; `kubectl get jobs -n ch07-training` will show exactly these two.
+- **Each Job runs one pod**, and that pod runs `torchrun train_ddp.py` with `PET_*` env vars
+  already injected — no manual `--rdzv-endpoint` flags.
+- **The dashed line at the bottom (`NCCL all-reduce`) is the part that has nothing to do with
+  Kubernetes** — once both pods are up, they talk to each other directly over the pod network using
+  NCCL, exchanging gradients every training step. Kubernetes' job here is just to get both pods
+  scheduled, networked, and named predictably (via the JobSet's headless Service, so
+  `ddp-gpu-node-0-0.ddp-gpu` resolves to rank 0's pod IP) — it has no involvement in the actual
+  training math after that.
 
 The Trainer **torch plugin** reads `numNodes`/`numProcPerNode` off the TrainJob and injects
 `PET_NNODES`, `PET_NPROC_PER_NODE`, `PET_NODE_RANK` (from the Job's completion index),
@@ -154,6 +251,12 @@ kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks
 
 ### 4.1 Prereqs
 
+`source env.sh` loads your AWS account/region/cluster name into shell variables every later
+command references (`${EKS_CLUSTER}`, `${AWS_REGION}`, `${AWS_ACCOUNT_ID}`); `source versions.env`
+loads the pinned component versions (`${KUBEFLOW_TRAINER_VERSION}`, `${KUEUE_VERSION}`) so you're
+never typing a version number by hand where it could drift from what this chapter was tested
+against.
+
 ```bash
 cd kubernetes-ai-infrastructure
 source env.sh && source versions.env
@@ -161,12 +264,30 @@ source env.sh && source versions.env
 
 A running cluster from `00-prerequisites-and-cluster-setup`, and GPU quota for the table in §3.3
 (spot **and** on-demand family — spot capacity can be unavailable). `kubectl get ns kubeflow-system`
-should not yet exist (first run) or should already have Trainer installed (idempotent `install.sh`).
+should not yet exist (first run), or should already have Trainer installed — the `helm upgrade
+--install` in 4.2 below is idempotent, so re-running it on a later pass is safe.
+
+> **GPU quota check first.** Unlike CPU node groups, AWS gates GPU instance families
+> (`g6.xlarge`/`g6.2xlarge` here) behind an EC2 service quota that defaults to 0 for new accounts.
+> If you skip ahead to §4.3 without checking, `eksctl create nodegroup` will succeed but the
+> underlying Auto Scaling Group will silently fail to launch any instances — go to the EC2 console
+> → Service Quotas → "All G and VT Spot Instance Requests" (or the on-demand equivalent) and
+> request at least 16 vCPUs before starting the lab. Quota increases can take minutes to days to
+> be approved, so do this before you plan to run the lab, not during it.
 
 ### 4.2 Install Kubeflow Trainer
 
 What you're about to do: install the Trainer controller + JobSet CRDs via Helm, pinned to
 `${KUBEFLOW_TRAINER_VERSION}`, and enable the built-in `torch-distributed` ClusterTrainingRuntime.
+This is the one-time platform setup step — it installs the controller that watches for `TrainJob`
+objects and turns them into JobSets, plus the CRDs (`TrainJob`, `TrainingRuntime`,
+`ClusterTrainingRuntime`) that let `kubectl` understand those object types at all. You only need to
+run this once per cluster; every TrainJob you submit afterwards (§4.4, and any future chapter that
+reuses this cluster) reuses the same installed controller. `--set
+runtimes.torchDistributed.enabled=true` is what makes the chart's post-install hook create the
+built-in `torch-distributed` `ClusterTrainingRuntime` this chapter's own `torch-ddp-spot`
+`TrainingRuntime` (§3.2) is modeled on — without that flag the CRDs would install but no runtime
+would exist to reference.
 
 ```bash
 : "${KUBEFLOW_TRAINER_VERSION:?source versions.env first}"
@@ -197,6 +318,22 @@ What you're about to do: create a spot GPU managed node group (`CAPACITY=on-dema
 fallback group instead; requires "All G and VT Spot Instance Requests" — or on-demand G/VT — vCPU
 quota ≥ 16), then create the checkpoint bucket and wire up IRSA for the Mountpoint for S3 CSI
 driver.
+
+> **This step provisions billable GPU capacity infrastructure.** `desiredCapacity: 0` means the
+> node group is created with zero running instances (no cost yet) — nodes only launch once
+> something actually requests `nvidia.com/gpu` (§4.4). But once the TrainJob's pods are scheduled,
+> you *are* paying for real GPU instances by the hour, spot or on-demand. Don't forget §7's cleanup
+> when you're done for the day.
+
+Why a dedicated node group instead of reusing `01-gpu-nodes-and-scheduling`'s: this chapter pins a
+specific instance type (`g6.xlarge`/`g6.2xlarge`, single-GPU L4 shapes) and its own taint key/label
+so the lab's node selector in §3.3 has something predictable to target, independent of whatever GPU
+node pool an earlier chapter left behind. The **taint** (`nvidia.com/gpu=true:NoSchedule`) is what
+stops *non-GPU* pods from accidentally landing on your expensive GPU nodes — only pods that
+explicitly tolerate it (like this chapter's TrainJob pods, via the `eks/` overlay's
+`runtimePatches`) can schedule there. EKS does not add this taint for you automatically, which is
+why the node-group definition below sets it explicitly (see `01-gpu-nodes-and-scheduling` for the
+full explanation of why that matters).
 
 ```bash
 : "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}"
@@ -232,6 +369,17 @@ YAML
 Checkpoint storage — creates the S3 bucket, an IAM role for the Mountpoint for S3 CSI driver
 (IRSA), installs/updates the add-on so it tolerates the GPU taint, then writes
 `eks/storage/storage.env` so the kustomize overlay's `replacements:` can fill in the PV:
+
+This is the step that turns §1.0's "checkpointing buys you resumability" from theory into a real
+volume the training pods can write to. Without it, a checkpoint written inside the pod would live
+only in that pod's ephemeral filesystem — gone the instant the pod is deleted, which defeats the
+entire point when a spot reclaim (§4.5) is exactly the moment you need that checkpoint to still
+exist. IRSA (IAM Roles for Service Accounts) is what lets the Mountpoint-S3 CSI driver's pods
+authenticate to AWS as a specific IAM role — scoped by the policy below to only this chapter's
+bucket — instead of needing broad node-level AWS credentials. `--configuration-values
+'{"node":{"tolerateAllTaints":true}}'` matters because the CSI driver's own node-level pods must
+run *on* the tainted GPU nodes to mount the volume for the training pods there — without this flag
+the driver's daemonset would refuse to schedule onto the same taint you just added in §4.3.
 
 ```bash
 : "${EKS_CLUSTER:?source env.sh}" "${AWS_REGION:?}" "${AWS_ACCOUNT_ID:?}"
@@ -293,6 +441,15 @@ echo "Wrote ${HERE}/storage/storage.env"
 What you're about to do: apply the `eks` overlay (TrainJob + patched runtime), watch the 2-rank
 DDP TrainJob rendezvous and start writing checkpoints.
 
+This is the moment everything from §3 and §4.2–4.3 comes together: `kubectl apply` submits the
+`TrainJob`, the Trainer controller resolves its `runtimeRef` against `torch-ddp-spot` and applies
+the `eks/` overlay's `runtimePatches`, then creates the underlying JobSet, which in turn creates
+one `Job` per rank and one pod per Job. The `-w` (watch) flag on the second command lets you see
+that transition happen live instead of guessing — you're watching Trainer's reconciliation, not
+just a static snapshot. The third command tails both ranks' logs at once (`--prefix` labels each
+line with its source pod) so you can see rank 0 and rank 1 progressing through training steps
+together, which is the visible proof that rendezvous succeeded and both ranks are synchronized.
+
 ```bash
 kubectl apply -k 07-distributed-training-kubeflow-trainer/eks
 kubectl -n ch07-training get trainjob ddp-gpu -w   # Ctrl-C once JOBSSTATUS shows Running
@@ -314,6 +471,14 @@ rank) and neither log stream shows a NCCL timeout.
 What you're about to do: delete the rank-1 pod to simulate a spot reclaim mid-run, and watch the
 JobSet recreate the whole gang instead of just the one pod.
 
+Why deleting a pod is a faithful simulation of a real spot reclaim: from Kubernetes' point of
+view, AWS reclaiming a spot instance and you running `kubectl delete pod` look the same — in both
+cases, a pod that was `Running` abruptly disappears without a clean exit. This lets you rehearse
+the failure and recovery path (and time it) without needing to wait for an actual, unpredictable
+spot interruption or fake one at the EC2 level. This is the single most important exercise in the
+chapter — it's where §1.0's "one lost pod can kill the whole job" and §3.2's `Recreate` policy stop
+being theory and become something you watch happen.
+
 ```bash
 kubectl -n ch07-training delete pod \
   "$(kubectl -n ch07-training get pod -o name | grep node-1)"
@@ -327,10 +492,13 @@ restarting from `step=0` — the Job's `backoffLimit: 0` fails that Job fast, an
 
 ### 4.6 No GPU quota yet? Run it on CPU
 
-`cpu-lab/` is a self-contained CPU-only variant of the same lab — same `TrainJob`/
-`TrainingRuntime` shape, same `train_ddp.py` (it already auto-selects the `gloo` backend when
-`torch.cuda.is_available()` is `False`), just no `nvidia.com/gpu` requests and no bucket mount
-(checkpoints go to an `emptyDir`, so a pod recreate genuinely restarts from step 0 — a good
+If you don't have GPU quota approved yet (see §4.1's warning), don't skip the chapter — run this
+path instead so you can still learn the TrainJob/TrainingRuntime/JobSet mechanics, and come back to
+the GPU path once quota clears. `cpu-lab/` is a self-contained CPU-only variant of the same lab —
+same `TrainJob`/`TrainingRuntime` shape, same `train_ddp.py` (it already auto-selects the `gloo`
+backend, the CPU-only NCCL alternative, when `torch.cuda.is_available()` is `False`), just no
+`nvidia.com/gpu` requests and no bucket mount (checkpoints go to an `emptyDir`, an ephemeral
+volume tied to the pod's lifetime, so a pod recreate genuinely restarts from step 0 — a good
 contrast to see once, then go set up chapter 05's bucket-backed checkpoints for the real thing).
 It runs 2 nodes x 2 procs = 4 ranks on whatever spot CPU pool chapter 00 gave you:
 
@@ -361,14 +529,14 @@ GPUs for real.
 
 ## 6. Troubleshooting
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied `kueue/eks`) | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
-| Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node group scaled to 0 and nothing has scaled it up yet, or GPU quota exhausted | `kubectl get nodes -l ...`, check the EC2 quota console |
-| `clustertrainingruntimes` empty after install | Post-install hook Job hasn't finished | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
-| Rank 0 hangs on `all_reduce` after a delete | Deleted rank 0 itself, or `Recreate` hasn't fired yet | `kubectl -n ch07-training get jobs` — both Jobs should show a new generation |
-| Checkpoint dir empty after resume | `.done` marker never written (grace period too short, or write raced eviction) | Check pod logs for `SIGTERM received`; increase `terminationGracePeriodSeconds` |
-| Mountpoint S3 mount `permission denied` | IRSA binding from §4.3's storage setup didn't propagate yet, or SA name mismatch | Re-run the storage setup commands; confirm `serviceAccountName: trainer` matches the binding's subject |
+| Symptom | Likely cause | Why this happens | Fix |
+|---|---|---|---|
+| TrainJob stuck `Pending`/`Suspended` forever | No `kueue-system` ClusterQueue admitting it (only if you applied `kueue/eks`) | Kueue's admission webhook suspends every TrainJob labeled with a `queue-name` until its `LocalQueue`/`ClusterQueue` has quota to admit it — if the ClusterQueue's ResourceFlavors don't map to any real, schedulable nodes (e.g. the GPU node group in §4.3 was never created), the TrainJob waits forever with no error, because from Kueue's perspective it's correctly waiting for capacity that simply never shows up | `kubectl get clusterqueue team-research -o yaml`, check spot+on-demand ResourceFlavors have real nodes |
+| Pods `Pending`, event `Insufficient nvidia.com/gpu` | GPU node group scaled to 0 and nothing has scaled it up yet, or GPU quota exhausted | Kubernetes' scheduler can only place a pod on a node that already exists with the requested resource; a node group at `desiredCapacity: 0` (§4.3) has no such node until something (Cluster Autoscaler, or your own `eksctl scale nodegroup`) provisions one, and even then AWS itself will refuse to launch the instance if your account's EC2 GPU quota (§4.1) is exhausted | `kubectl get nodes -l ...`, check the EC2 quota console |
+| `clustertrainingruntimes` empty after install | Post-install hook Job hasn't finished | The Helm chart doesn't create the built-in runtime object directly in its templates — it runs a Kubernetes Job (a Helm post-install hook) that applies the runtime manifests after the controller is up, so there's a real (usually short) window where the CRDs exist but no runtime object does yet | `kubectl -n kubeflow-system get job,pod`, re-run `kubectl get clustertrainingruntimes` after it completes |
+| Rank 0 hangs on `all_reduce` after a delete | Deleted rank 0 itself, or `Recreate` hasn't fired yet | Deleting rank 0 removes the peer every other rank's `PET_MASTER_ADDR` points at, so nobody can complete rendezvous until the JobSet notices the failure and recreates the whole gang (§3.2) — if you're watching immediately after the delete, you're just seeing the (expected) gap before `Recreate` kicks in, not a stuck state | `kubectl -n ch07-training get jobs` — both Jobs should show a new generation |
+| Checkpoint dir empty after resume | `.done` marker never written (grace period too short, or write raced eviction) | The `.pt` payload and `.done` marker (§3.2) are two separate writes; if the pod is killed between them — because `terminationGracePeriodSeconds` was too short for the upload to finish — the reader on restart correctly ignores the incomplete step and falls back to the last step that *did* get a `.done` marker, which can look like "the checkpoint vanished" if you were watching the newest one | Check pod logs for `SIGTERM received`; increase `terminationGracePeriodSeconds` |
+| Mountpoint S3 mount `permission denied` | IRSA binding from §4.3's storage setup didn't propagate yet, or SA name mismatch | IRSA works by federating a Kubernetes ServiceAccount's OIDC token to an IAM role via a trust policy; if the ServiceAccount name/namespace in the trust policy doesn't exactly match what the pod actually uses, or the CSI driver's pod started before the IAM role propagated through AWS's eventually-consistent IAM, the mount will be denied even though the setup commands "succeeded" | Re-run the storage setup commands; confirm `serviceAccountName: trainer` matches the binding's subject |
 
 ## 7. Cleanup and cost notes
 

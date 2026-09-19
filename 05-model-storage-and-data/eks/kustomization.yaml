@@ -1,6 +1,7 @@
 # EKS: model bucket mounted with the Mountpoint for Amazon S3 CSI driver (v2),
 # pod-level credentials via EKS Pod Identity (authenticationSource: pod).
-#   eksctl create nodegroup -f nodegroup-ch05.yaml && ./setup-s3-iam.sh   (writes bucket.env)
+#   eksctl create nodegroup -f nodegroup-ch05.yaml, then the README's Step 2 bucket/IAM/Pod
+#   Identity block (writes bucket.env)
 #   kubectl apply -k 05-model-storage-and-data/eks
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

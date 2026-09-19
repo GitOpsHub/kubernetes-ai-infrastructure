@@ -4,11 +4,12 @@
 #   CPU steps, TEI, rag-api -> spot CPU node group "ch19-cpu-spot" (nodegroup-ch19.yaml)
 #   finetune, evaluate, vLLM -> the "spot-gpu" node group from 01-gpu-nodes-and-scheduling
 #
-# Order:  ./install.sh              (CPU spot node group + Argo Workflows with ch19-pipelines watched)
-#         ./setup-s3-iam.sh         (bucket, Pod Identity roles/associations, CSI add-on -> bucket.env)
-#         ./build-push-ecr.sh       (trainer image -> ECR -> images.env)
-#         ../../09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines   (optional)
-#         kubectl apply -k 19-llm-pipelines-huggingface-langchain/eks
+# Order (all inlined bash in the README's Lab section, no separate scripts):
+#   Step 1  CPU spot node group + Argo Workflows with ch19-pipelines watched
+#   Step 2  bucket, Pod Identity roles/associations, CSI add-on -> bucket.env
+#   Step 3  trainer image -> ECR -> images.env
+#   Step 4  kubectl create secret generic hf-token ...    (optional)
+#   Step 5  kubectl apply -k 19-llm-pipelines-huggingface-langchain/eks
 #
 # GPU budget: 01's spot-gpu group has maxSize 1. vLLM and the finetune/evaluate steps each want a
 # whole GPU, so scale vLLM to 0 while the pipeline trains (or raise maxSize to 2).
@@ -20,11 +21,11 @@ resources:
   - pv-pvc-mountpoint.yaml
 configMapGenerator:
   - name: storage-params
-    envs: [bucket.env]              # written by setup-s3-iam.sh
+    envs: [bucket.env]              # written by Step 2's IAM/Pod Identity block
     options:
       disableNameSuffixHash: true
   - name: ch19-images
-    envs: [images.env]              # written by build-push-ecr.sh
+    envs: [images.env]              # written by Step 3's build block
     options:
       disableNameSuffixHash: true
   - name: serving-params

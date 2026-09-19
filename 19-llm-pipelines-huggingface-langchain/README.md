@@ -23,8 +23,8 @@ This chapter reuses earlier chapters instead of rebuilding them:
   keyless workload identity, `_COMPLETE` markers. This chapter creates its own bucket and identities.
   It doesn't reuse chapter 05's.
 - **[09-llm-inference-with-vllm](../09-llm-inference-with-vllm)** for the vLLM deployment shape (probes,
-  `Recreate`, grace period) and its `common/create-hf-secret.sh`, which this chapter reuses. The CPU lab
-  also needs chapter 09's `cpu-lab/` Ollama.
+  `Recreate`, grace period) and its `kubectl create secret generic hf-token` step, which this chapter
+  reuses (own namespace). The CPU lab also needs chapter 09's `cpu-lab/` Ollama.
 - **Argo Workflows** from [15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines) is
   *optional*. Step 1 below installs it if it's missing, or adds `ch19-pipelines` to an existing
   Helm release's `controller.workflowNamespaces`. If chapter 15's Argo CD app-of-apps manages it,
@@ -93,6 +93,149 @@ two WorkflowTemplates and the same RAG API.
 
 ## 3. Concepts
 
+### 3.0 New to LLM pipelines or Kubernetes-native ML? Start here
+
+If chapters 05/07/09/15 are fresh in your memory, skim this and jump to §3.1. If they aren't, or you've
+never wired a fine-tune-to-serving pipeline together before, read this first — the rest of the chapter
+assumes it.
+
+**3.0.1 The end-to-end shape, in plain English.** This chapter builds one assembly line with six
+stations, and every station below maps to one WorkflowTemplate step or one Deployment you'll create in
+the Lab:
+
+1. **Pull** — download a specific, frozen version of a base model and a training dataset from the
+   Hugging Face Hub (a public catalog of models/datasets, like a package registry for ML) into shared
+   storage, once.
+2. **Fine-tune** — take that base model, which already "knows" language in general, and nudge it with a
+   small, cheap training run (LoRA, explained in §3.0.3) so it's better at *this* task, instead of
+   training a model from zero (which would take a data-center, not one GPU).
+3. **Evaluate** — automatically score the fine-tuned model against held-out examples it never trained
+   on. This is a **quality gate**: if the score is worse than a threshold, the pipeline stops here and
+   nothing bad reaches production.
+4. **Publish** *(optional)* — if the model passed the gate, optionally upload it back to the Hub as your
+   own private model repo, so it can be reused outside this cluster.
+5. **Serve** — run the model behind an HTTP API using vLLM (a high-throughput inference server that
+   speaks the same API shape as OpenAI's `/v1/chat/completions`), so any HTTP client can ask it
+   questions.
+6. **Build an application on top** — a RAG API (§3.0.4) that answers questions by first looking up
+   relevant text and then asking the LLM to answer *using* that text, plus a batch job that runs many
+   questions through the same logic offline.
+
+Steps 1–4 run as one Argo Workflow (`hf-finetune-pipeline`); step 5 is a long-running Deployment, not a
+pipeline step, because a model server isn't a job that finishes; step 6 is a second Deployment
+(`rag-api`) plus a second, shorter Argo Workflow (`langchain-batch-inference`). §3.1's diagram below
+draws all of this as boxes and arrows.
+
+**3.0.2 Argo Workflows: DAG, WorkflowTemplate, `retryStrategy`.** Chapter 15 introduced Argo Workflows
+as the pipeline engine for MLOps; here's the vocabulary you need for this chapter specifically:
+
+- A **DAG** (directed acyclic graph) is just "steps, with arrows saying which steps must finish before
+  which other steps can start". §3.1's Argo box is a DAG: `pull-model` and `pull-dataset` can run at the
+  same time (nothing depends on their order relative to each other), but both must finish before
+  `finetune` starts, which must finish before `evaluate`, which must finish before `publish`.
+- A **WorkflowTemplate** is a *reusable, saved* DAG definition sitting in the cluster as a Kubernetes
+  object (`kubectl get workflowtemplates`). You don't rewrite the DAG every time; you `argo submit
+  --from workflowtemplate/<name> -p key=value` to start a new *run* of it with different parameters
+  (Step 7 does this with `-p run-id=qwen3-sft-001`). Each run creates its own `Workflow` object, which is
+  what actually spawns pods and that you watch with `argo get`/`argo logs`.
+- A **`retryStrategy`** tells Argo what to do when a step's pod exits with a failure: retry it (up to a
+  `limit`), with what backoff between attempts, and — the part that matters most on spot — an
+  `expression` that decides *which* failures are worth retrying at all. §3.4 spells out exactly why this
+  chapter's expression treats a spot interruption (exit 143/137/-1) as "try again" and a real bug (exit
+  1) as "stop, a retry can't fix a bug".
+
+If you haven't done chapter 15's lab, none of the commands here require it — Step 1 installs Argo
+Workflows itself if it's missing.
+
+**3.0.3 LoRA fine-tuning, conceptually: why you don't retrain the whole model.** A modern LLM's weights
+are hundreds of millions to hundreds of billions of numbers, arranged in large matrices inside each
+transformer layer. Training all of them from scratch needs enormous data and enormous compute — that's
+what produced the base model in the first place, and it is *not* what happens in a single GPU-hour lab.
+
+Full **fine-tuning** (updating every one of those numbers, starting from the pretrained weights instead
+of random ones) is far cheaper than training from scratch, but for a 0.6B-parameter model it still means
+storing and updating ~600M parameters' worth of gradients and optimizer state in GPU memory — that's
+what makes fine-tuning some larger models infeasible on one consumer/cloud GPU.
+
+**LoRA** (Low-Rank Adaptation) is a shortcut: instead of updating the big weight matrices directly, it
+freezes them completely and adds a small pair of new, much smaller matrices next to each targeted layer
+(`target_modules="all-linear"` in this chapter — every linear layer gets one). Only those small "adapter"
+matrices are trained. In this chapter's run, that's about **10.1M trainable parameters out of 606M
+total** — under 2%. Three consequences that matter for this lab:
+
+- **It fits in far less GPU memory**, because the optimizer only needs state for the small adapter, not
+  the full model — this is what makes fine-tuning fit on a single `g6.xlarge`/`g4dn.xlarge` spot GPU.
+- **The saved checkpoint is tiny** (an adapter, tens of MB) compared to the full model (~1.4 GB of
+  `safetensors`). That's why `finetune.py` uploads adapter checkpoints during training and only produces
+  a full-size model once, at the end, by **merging** the adapter's numbers back into a copy of the base
+  weights (§3.4 point 5) — merging is what makes the result loadable by vLLM like any other model,
+  with no LoRA-specific code needed at serving time.
+- **The base model is never touched**, so the same pulled-once base weights in the bucket can be reused
+  by any number of fine-tunes (different `run-id`s) without re-downloading or risking corruption.
+
+<details>
+<summary>Want the one-paragraph math intuition?</summary>
+
+A weight matrix `W` (say 1024×1024) has over a million numbers. LoRA replaces "learn a new 1024×1024
+matrix `ΔW`" with "learn two small matrices `A` (1024×r) and `B` (r×1024) and use `A·B` as a low-rank
+approximation of `ΔW`", where `r` (`LORA_R` in this chapter) is small — a few to a few dozen. `A·B` has
+only `2×1024×r` numbers instead of `1024×1024`, and `lora_alpha` scales how much `A·B` is added to the
+frozen `W`. The bet, backed by a lot of empirical results, is that the *useful* adjustment for a
+fine-tuning task lives in a much lower-dimensional space than the full weight matrix — you don't need to
+touch every one of a million numbers independently to steer a model's behavior on a narrower task.
+</details>
+
+**3.0.4 RAG, TEI, and why they show up together with LangChain.** An LLM only knows what was in its
+training data, frozen at training time. **RAG (Retrieval-Augmented Generation)** fixes that for
+question-answering without retraining: before asking the LLM a question, first *retrieve* the most
+relevant chunks of your own documents, then paste them into the prompt so the LLM answers using that
+text instead of (or in addition to) what it memorized. This also gives you **citations** ("sources" in
+this chapter's `/ask` response) and lets you update the knowledge base by editing documents, not by
+retraining a model.
+
+Retrieval needs three pieces, and this chapter uses one component for each:
+
+- **An embedding model** turns text into a vector of numbers (384 numbers here) such that
+  semantically-similar text ends up as nearby vectors. **TEI (Text Embeddings Inference)** is a small,
+  fast HTTP server whose only job is running an embedding model — here `BAAI/bge-small-en-v1.5` — so
+  turning text into vectors is a network call, not something every consumer reimplements. It runs on
+  CPU because embedding models are far smaller than the LLM.
+- **A vector store** holds those vectors and answers "which stored vectors are closest to this query
+  vector?" (nearest-neighbor search). This chapter uses LangChain's `InMemoryVectorStore` — good enough
+  for the five-document lab corpus, rebuilt from scratch every time `rag-api` starts. A real deployment
+  swaps this for a persistent vector database (pgvector, Qdrant, OpenSearch — §3.6 says so explicitly).
+- **LangChain** is the glue: it defines the pipeline ("embed the question → fetch the top-`k` nearest
+  chunks → format them into a prompt → call the LLM → parse the answer") as a composable chain (LCEL,
+  §3.6's diagram) so each piece (embeddings, vector store, prompt, LLM client) is swappable without
+  rewriting the whole flow.
+
+The LLM itself is still served by vLLM exactly as in chapter 09 — RAG doesn't change how the model is
+served, only what gets put in the prompt before the request reaches it.
+
+**3.0.5 The `_COMPLETE` marker convention, and why idempotent steps matter on spot.** Every multi-step
+write in this chapter (a model pull, a checkpoint, a merged model, a batch of results) follows the same
+rule: write everything to a scratch disk first, copy the finished files into a **new** bucket directory,
+and only then write a small `_COMPLETE` file as the very last write. Any reader (another pipeline step,
+vLLM, you with the AWS CLI) is only allowed to trust a directory if `_COMPLETE` is present in it.
+
+Why this matters specifically because of **spot**: spot nodes can disappear at any moment (§3.4's spot
+budget), which means any step can be killed midway through writing its output. Without a marker
+convention, "the directory exists" and "the directory is complete and correct" would be indistinguishable
+— a reader (or a retry) could pick up a half-written file and either crash or, worse, silently train on
+or serve corrupted data. With the marker:
+
+- **A killed step leaves no trace a reader will act on.** A half-copied model directory has files but no
+  `_COMPLETE`, so nothing downstream treats it as ready.
+- **A retried step is idempotent** — running it again produces the *same* result as if it had succeeded
+  the first time, at low cost. On restart, every script in this chapter first checks for `_COMPLETE`
+  (or, for a still-in-progress fine-tune, the newest checkpoint that has one) and skips straight to "done"
+  or "resume from here" instead of redoing finished work. That's what makes it safe for Argo to retry a
+  step automatically instead of you babysitting it, and it's what makes re-submitting the same `run-id`
+  cheap (§3.3, §3.4, §3.5 all rely on this one convention for a different kind of file).
+
+Keep this one rule in your head while reading the Lab: **"does this directory have `_COMPLETE`?" is the
+answer to almost every "is it safe to read/skip/resume this?" question in the chapter.**
+
 ### 3.1 The whole picture
 
 ```mermaid
@@ -130,9 +273,20 @@ flowchart LR
   BATCH -- "results.jsonl + _COMPLETE" --> S3
 ```
 
+**Reading this diagram if you're new to it:** the top box (`TRAIN`) is the Argo `WorkflowTemplate`
+`hf-finetune-pipeline` — it runs once per `run-id` and then exits. The bottom box (`SERVE`) is three
+plain Kubernetes `Deployments` — they run forever (until you scale or delete them), which is why serving
+is drawn separately from the pipeline. `S3` in the middle is the one shared bucket every piece reads
+from or writes to; every arrow into or out of it is a `_COMPLETE`-gated read/write (§3.0.5). The dotted
+arrow (`day 1: MODEL_PATH=Qwen/Qwen3-0.6B`) is the *before-you've-trained-anything* path: on day 1 vLLM
+serves the stock base model straight from the Hub, and only switches to the bucket path (the solid arrow
+from `S3`) after Step 10, once a fine-tune has actually produced a model. `BATCH` at the bottom is the
+second, shorter Argo `WorkflowTemplate` (`langchain-batch-inference`) — it's independent of `TRAIN` and
+can run at any time once `SERVE` is up.
+
 Everything runs in the namespace `ch19-pipelines` with three ServiceAccounts (`common/base/serviceaccounts.yaml`):
 
-| ServiceAccount | Used by | Cloud permissions (EKS: `setup-s3-iam.sh`) |
+| ServiceAccount | Used by | Cloud permissions (EKS: Step 2's IAM/Pod Identity block) |
 |---|---|---|
 | `pipeline-runner` | every Argo step pod (pull, finetune, evaluate, publish, batch) | `s3:ListBucket`, `s3:GetObject`, `s3:PutObject`, `s3:AbortMultipartUpload`. **No `s3:DeleteObject`**: nothing in this chapter deletes or overwrites |
 | `model-reader` | `vllm` | `s3:ListBucket`, `s3:GetObject` only |
@@ -236,6 +390,18 @@ sequenceDiagram
   P->>P: trainer.train(resume_from_checkpoint=...)
 ```
 
+**Reading this diagram:** time flows top to bottom, and each arrow is one event. Read it as a story: the
+training pod (`P`) is periodically saving checkpoints to the bucket (`B`) *before* anything goes wrong.
+Then EC2's spot reclamation (`Spot`) notifies the kubelet (`K`), which forwards a SIGTERM to the running
+process (`P`) — this is the *only* moment the pod is asked nicely to stop; if it doesn't finish within
+its grace period, Kubernetes kills it outright. `P` uses that window to save one more checkpoint, then
+exits with a specific failure code. The Argo controller (`A`) is watching the exit code, decides "this
+looks like an interruption, not a bug," and schedules a fresh pod — which then rediscovers the last
+completed checkpoint in the bucket and picks up training where the dead pod left off. Nothing here is
+Kubernetes automatically "resuming" a process; every step of the resume is application code in
+`finetune.py` reading `_COMPLETE` markers, which is why §3.0.5's convention is what actually makes this
+diagram true.
+
 1. **Bucket checkpoints.** `Trainer` saves to `/scratch/trainer-output` every `SAVE_STEPS` (50). The
    `BucketCheckpointCallback.on_save` hook copies each `checkpoint-N` to
    `$RUN_DIR/checkpoints/checkpoint-N/` and then writes `_COMPLETE`. Scratch keeps only 2 checkpoints
@@ -295,6 +461,14 @@ flowchart LR
   OUT --> RESP["{answer, sources}"]
 ```
 
+**Reading this diagram:** this is a LangChain **LCEL chain** — a pipeline of small, swappable steps
+(`Runnable`s) wired together with `|`, similar in spirit to a shell pipe. `RunnableParallel` runs its two
+branches (retrieve context, pass the question through unchanged) at the same time and merges their
+outputs into one object. Nothing here talks to a database in the traditional sense: `RET` (the
+retriever) is a similarity search over vectors already sitting in memory (§3.0.4), and `LLM` is a plain
+HTTP call to vLLM's OpenAI-compatible API — from LangChain's point of view, vLLM is indistinguishable
+from calling OpenAI itself, which is the whole point of vLLM exposing that API shape.
+
 - **vLLM** (`common/serving/vllm-deployment.yaml`) has the same shape as chapter 09: `Recreate`, a
   10-minute `startupProbe`, a `preStop` sleep, a 25 s grace period and `--shutdown-timeout=10`. It
   also adds `--served-model-name=ch19-model`. Clients always ask for `ch19-model`, so swapping base
@@ -348,7 +522,8 @@ make the retry skip itself and hide the failure.
 ### 3.8 The GPU budget
 
 Chapter 01's EKS `spot-gpu` node group has **`maxSize: 1`**, and EKS doesn't install a cluster
-autoscaler, so you scale it with `01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh`. `vllm`,
+autoscaler, so you scale it yourself with `eksctl scale nodegroup` (chapter 01 §4, or the one-liner
+in Step 5 below). `vllm`,
 `finetune` and `evaluate` each request `nvidia.com/gpu: 1`. With one GPU node, they can't run at the
 same time. Either **scale vLLM to 0 while the pipeline trains** (what the lab does) or raise the
 node group's `maxSize` to 2 and pay for two GPU nodes during training.
@@ -362,7 +537,7 @@ Layout:
 ├── common/
 │   ├── kustomization.yaml            ConfigMaps from src/ (ch19-scripts, ch19-langchain-app, ch19-rag-docs, ch19-prompts)
 │   │                                 + replacements params.env -> WorkflowTemplate defaults
-│   ├── install-argo-workflows.sh     install/extend Argo Workflows to watch ch19-pipelines (called by every install.sh)
+│   ├── install-argo-workflows.sh     install/extend Argo Workflows to watch ch19-pipelines (called from the eks/cpu-lab lab steps)
 │   ├── base/                         namespace, 3 ServiceAccounts, Argo executor RBAC, params.env -> ConfigMap pipeline-params
 │   ├── training/                     WorkflowTemplate hf-finetune-pipeline
 │   ├── batch/                        WorkflowTemplate langchain-batch-inference
@@ -395,10 +570,10 @@ kubectl kustomize 19-llm-pipelines-huggingface-langchain/eks | less
 
 #### Step 1: CPU spot node group + Argo Workflows
 
-What you're about to do: `eks/install.sh` creates the managed node group `ch19-cpu-spot`
+What you're about to do: the block below creates the managed node group `ch19-cpu-spot`
 (`nodegroup-ch19.yaml`: spot `m7i.xlarge`/`m6i.xlarge`/`m6a.xlarge`/`m5.xlarge`, `minSize 0`,
 `desiredCapacity 2`, `maxSize 3`, 100 GB disks for scratch and uv caches). The pull, publish and
-batch steps, TEI and rag-api run on it. The script then calls `common/install-argo-workflows.sh`,
+batch steps, TEI and rag-api run on it. It then calls `common/install-argo-workflows.sh`,
 which installs Argo Workflows (chart `${ARGO_WORKFLOWS_VERSION}` = 2.0.6, app v4.1.3). If Argo
 Workflows is already installed, the script adds `ch19-pipelines` to the controller's existing
 `workflowNamespaces` list instead of replacing it. In chart 2.0.6 that list does **not** limit what
@@ -407,6 +582,16 @@ decides where the chart creates its default `argo-workflow` ServiceAccount and e
 chapter's steps run as `pipeline-runner`, which has its own executor RBAC in `common/base`, so listing
 `ch19-pipelines` is harmless and keeps the Helm path consistent with chapter 15's GitOps values file. `INCLUDE=ch19-cpu-ondemand` creates the on-demand
 fallback group instead of the spot one.
+
+> **New to EKS node groups or `eksctl`?** A **managed node group** is a set of EC2 instances that EKS
+> keeps registered as Kubernetes nodes for you (auto-replacing unhealthy ones), as opposed to you
+> managing raw EC2 instances by hand. `eksctl` is a CLI wrapper around the underlying CloudFormation
+> stacks — `eksctl create nodegroup -f <file>` reads the node group's shape (instance types, sizes,
+> spot vs. on-demand, taints) from a YAML file and creates the real AWS resources. `--include` picks
+> which named node group(s) in that file to actually create, since one file can define several. This
+> step's node group is deliberately CPU-only (no GPU): it hosts the lightweight pipeline steps and
+> supporting Deployments, keeping the (expensive, quota-limited) GPU node group from chapter 01 free
+> for the one thing that needs a GPU — training and evaluation.
 
 ```bash
 : "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}"
@@ -438,10 +623,8 @@ Argo Workflows 2.0.6: controller.workflowNamespaces={ch19-pipelines}
 deployment "argo-workflows-workflow-controller" successfully rolled out
 Argo Workflows ready. UI: kubectl -n argo port-forward svc/argo-workflows-server 2746:2746
 
-Next:
-  .../eks/setup-s3-iam.sh        # bucket + Pod Identity + Mountpoint CSI add-on -> bucket.env
-  .../eks/build-push-ecr.sh      # trainer image -> ECR -> images.env
-  kubectl apply -k .../eks
+Next: Step 2 (bucket + Pod Identity + Mountpoint CSI add-on -> bucket.env), Step 3 (trainer image
+-> ECR -> images.env), then `kubectl apply -k .../eks`.
 ```
 
 If chapter 15 already installed Argo Workflows with Helm, the namespace list also shows
@@ -459,13 +642,26 @@ contains `"ch19-pipelines"`, and `kubectl get crd workflowtemplates.argoproj.io`
 
 #### Step 2: Bucket, Pod Identity, Mountpoint add-on
 
-What you're about to do: `setup-s3-iam.sh` creates the bucket `${AWS_ACCOUNT_ID}-ch19-pipelines` in
+What you're about to do: the block below creates the bucket `${AWS_ACCOUNT_ID}-ch19-pipelines` in
 `$AWS_REGION` with public access blocked. It installs the `eks-pod-identity-agent` and
 `aws-mountpoint-s3-csi-driver` add-ons if they're missing. It then creates two IAM roles trusted by
 `pods.eks.amazonaws.com`, `ch19-pipeline-runner-${EKS_CLUSTER}` (read/write) and
 `ch19-model-reader-${EKS_CLUSTER}` (read-only), each with the inline policy `s3-ch19`, and associates
 them with the `pipeline-runner` and `model-reader` ServiceAccounts in `ch19-pipelines`. Last, it
-writes `eks/bucket.env`, which kustomize injects into the PV's `bucketName`. The script is idempotent.
+writes `eks/bucket.env`, which kustomize injects into the PV's `bucketName`. It's idempotent — safe
+to re-run.
+
+> **New to IAM roles, trust policies, or Pod Identity?** A pod can't use your personal AWS credentials —
+> it needs its own identity in AWS. **Pod Identity** is EKS's mechanism for handing a pod temporary AWS
+> credentials based on which Kubernetes `ServiceAccount` it runs as, with no long-lived secret keys
+> stored anywhere. Two pieces make that work: an **IAM role** (a named, reusable set of permissions in
+> AWS) and a **trust policy** attached to it (`trust.json` below) that says *who* is allowed to assume
+> that role — here, `pods.eks.amazonaws.com`, the Pod Identity service itself. The **inline policy**
+> (`pipeline-runner.json`/`model-reader.json`) is the actual permission list: which S3 actions the role
+> may perform, and on which bucket. `aws eks create-pod-identity-association` is the final link: "pods
+> running as ServiceAccount `X` in namespace `Y` may assume role `Z`." This is why `pipeline-runner` and
+> `model-reader` get *different* roles with different permissions (read/write vs. read-only, §3.1's
+> table) even though they're used by pods in the same namespace — least privilege, applied per workload.
 
 ```bash
 : "${AWS_REGION:?source env.sh}" "${EKS_CLUSTER:?}" "${AWS_ACCOUNT_ID:?}"
@@ -553,7 +749,7 @@ Expected output (abridged, `create-addon` also prints JSON the first time):
 role ch19-pipeline-runner-eks-ai-lab -> ch19-pipelines/pipeline-runner
 role ch19-model-reader-eks-ai-lab -> ch19-pipelines/model-reader
 bucket s3://123456789012-ch19-pipelines ready; .../eks/bucket.env updated
-# written by setup-s3-iam.sh
+# written by chapter 19 setup
 S3_BUCKET=123456789012-ch19-pipelines
 ```
 
@@ -577,6 +773,15 @@ kustomize injects into the `finetune`, `evaluate` and `publish` templates. The t
 current git commit, and `TAG=v2` overrides it. `--platform linux/amd64` matters on Apple silicon: an
 arm64 image fails on the GPU node with `exec format error`. The image is large (~6–8 GB of torch +
 CUDA libraries), so the first build and push take a while.
+
+> **New to ECR or `docker buildx`?** **ECR** (Elastic Container Registry) is AWS's private Docker image
+> registry — like Docker Hub, but access-controlled to your account and colocated with your cluster for
+> fast pulls. A Kubernetes pod's `image:` field can only reference an image that's been pushed
+> *somewhere* pods can pull from; this step is what gets the trainer code from your laptop into a place
+> the GPU node can reach. **`docker buildx build --push`** builds the image and pushes it to that
+> registry in one command, and `--platform linux/amd64` controls *which CPU architecture* the image is
+> built for — EKS GPU instances are `x86_64` (Intel/AMD), but a laptop with Apple silicon is `arm64` by
+> default, so without this flag you'd silently build an image the GPU node can't run at all.
 
 ```bash
 : "${AWS_REGION:?source env.sh}" "${AWS_ACCOUNT_ID:?}"
@@ -613,7 +818,7 @@ Expected output (abridged):
 Login Succeeded
 ...
 pushed 123456789012.dkr.ecr.us-east-1.amazonaws.com/ch19-trainer:02f48c2; .../eks/images.env updated
-# written by build-push-ecr.sh
+# written by chapter 19 build
 TRAINER_IMAGE=123456789012.dkr.ecr.us-east-1.amazonaws.com/ch19-trainer:02f48c2
 ```
 
@@ -622,13 +827,19 @@ TRAINER_IMAGE=123456789012.dkr.ecr.us-east-1.amazonaws.com/ch19-trainer:02f48c2
 
 #### Step 4: Hugging Face token Secret (optional)
 
-What you're about to do: create the Secret `hf-token` (key `HF_TOKEN`) in `ch19-pipelines` with
-chapter 09's script. Every pod references it with `optional: true`, so the lab works without it. A
-token avoids anonymous Hub rate limits. Put it in `env.sh`'s `HF_TOKEN`, or pass it inline
-(`HF_TOKEN=hf_xxx ./create-hf-secret.sh ch19-pipelines`); an inline value wins over `env.sh`.
+What you're about to do: create the Secret `hf-token` (key `HF_TOKEN`) in `ch19-pipelines`, the same
+one-line `kubectl create secret` pattern chapter 09 uses. Every pod references it with
+`optional: true`, so the lab works without it. A token avoids anonymous Hub rate limits. Put it in
+`env.sh`'s `HF_TOKEN`, or export it inline before running the command below; an inline value wins
+over `env.sh`.
 
 ```bash
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines
+NAMESPACE=ch19-pipelines
+: "${HF_TOKEN:?export HF_TOKEN=hf_xxx, or skip — optional, see above}"
+kubectl create secret generic hf-token \
+  --namespace "$NAMESPACE" \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 Expected output:
@@ -650,9 +861,19 @@ creates the S3-backed PV `ch19-model-store-s3` + PVC `model-store`, both Workflo
 `vllm`, `tei` and `rag-api` Deployments. On day 1, vLLM serves `Qwen/Qwen3-0.6B` straight from the Hub.
 Chapter 01's `spot-gpu` group sits at 0 nodes with no autoscaler, so start one GPU node.
 
+> **New to `kubectl apply -k`?** The `-k` flag applies a **kustomize overlay**: a directory
+> (`19-llm-pipelines-huggingface-langchain/eks`) that layers cloud-specific tweaks (node selectors, the
+> real bucket name, the image tag you just pushed) on top of the shared, cloud-agnostic manifests in
+> `common/`. It's how this repo avoids maintaining a separate copy of every YAML file per cloud (§3.2
+> also explains why some of the generated ConfigMaps get a random hash suffix in their name and others
+> don't — it controls whether editing a `.env` file automatically triggers a pod restart). Re-running
+> `kubectl apply -k` is always safe: kustomize renders the same YAML, and `kubectl apply` only changes
+> what's actually different from what's already in the cluster.
+
 ```bash
 kubectl apply -k 19-llm-pipelines-huggingface-langchain/eks
-NODES=1 ./01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh
+eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name spot-gpu \
+  --nodes 1 --nodes-min 0 --nodes-max 1
 kubectl -n ch19-pipelines get workflowtemplates,pvc
 kubectl -n ch19-pipelines get pods -w
 ```
@@ -724,6 +945,14 @@ no-ops (§3.4). Always pass `-p run-id=`. The template's default (`{{workflow.na
 item (see Troubleshooting). The other defaults come from `common/base/params.env` (model and dataset
 SHAs, `max-steps=200`, `max-eval-loss=2.5`), and you can override any of them with `-p`
 (`-p max-steps=50` gives a quick run).
+
+> **New to `argo submit`?** This is the moment the WorkflowTemplate from §3.0.2 turns into a running
+> DAG: `argo submit --from workflowtemplate/<name>` creates one new `Workflow` object with a generated
+> name (`hf-finetune-pipeline-x7k2p` below), copies in the template's steps and defaults, and applies
+> any `-p key=value` overrides on top. `--watch` streams the live step tree to your terminal (equivalent
+> to running `argo get -n ch19-pipelines <name> --watch` yourself right after). Each step in the tree
+> below is a Kubernetes pod that Argo created and is tracking; you can `kubectl -n ch19-pipelines get
+> pods` at any time to see them directly.
 
 ```bash
 argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline \
@@ -1043,7 +1272,12 @@ What you're about to do: re-submit the **same** `run-id` with `hf-push-repo` set
 requests a GPU even though it exits immediately, so vLLM must release it first.
 
 ```bash
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines     # HF_TOKEN in env.sh = a WRITE token
+NAMESPACE=ch19-pipelines
+: "${HF_TOKEN:?export HF_TOKEN=hf_xxx, a WRITE token this time}"
+kubectl create secret generic hf-token \
+  --namespace "$NAMESPACE" \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -   # HF_TOKEN in env.sh = a WRITE token
 kubectl -n ch19-pipelines scale deploy/vllm --replicas=0
 argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline \
   -p run-id=qwen3-sft-001 -p hf-push-repo=<your-hf-user>/ch19-qwen3-0.6b-sft --watch
@@ -1109,7 +1343,12 @@ lists the image (kind only).
 **Step C3: Deploy, then run the pipeline.**
 
 ```bash
-./09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines   # optional
+NAMESPACE=ch19-pipelines
+: "${HF_TOKEN:?export HF_TOKEN=hf_xxx, or skip — optional}"
+kubectl create secret generic hf-token \
+  --namespace "$NAMESPACE" \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -   # optional
 kubectl apply -k 19-llm-pipelines-huggingface-langchain/cpu-lab
 kubectl -n ch19-pipelines get pods -w                                   # tei + rag-api -> 1/1 (no vllm)
 argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline -p run-id=smol-sft-001 --watch
@@ -1179,19 +1418,30 @@ Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Ins
 
 ## 6. Troubleshooting
 
+**Pod states, if you haven't debugged Kubernetes workloads before:** `Pending` means the pod is
+accepted but the scheduler can't yet place it on any node (usually: no node has the resources or
+tolerations it needs — see the GPU/CPU rows below). `Init:0/1` means an init container is still
+running and the main container hasn't started yet (this chapter's `wait-for-model` init container is
+often the one blocking, deliberately, until `_COMPLETE` shows up). `ContainerCreating` means the node
+was picked but something before the container starts is still in progress — commonly a volume mount.
+`CrashLoopBackOff` means the container starts and exits repeatedly; Kubernetes backs off between
+restarts. `kubectl -n ch19-pipelines describe pod <name>` (Events section, at the bottom) almost always
+names the exact blocking condition; `kubectl -n ch19-pipelines logs <pod> [-c <container>]` shows what
+the process itself printed before it exited.
+
 | Symptom | Cause | Fix |
 |---|---|---|
-| `finetune`/`evaluate` pod `Pending`: `Insufficient nvidia.com/gpu` | vLLM holds the only GPU (`spot-gpu` `maxSize: 1`), or the EKS GPU group is at 0 nodes (no autoscaler) | `kubectl -n ch19-pipelines scale deploy/vllm --replicas=0`; `NODES=1 ./01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh`; or raise `maxSize` to 2 |
+| `finetune`/`evaluate` pod `Pending`: `Insufficient nvidia.com/gpu` | vLLM holds the only GPU (`spot-gpu` `maxSize: 1`), or the EKS GPU group is at 0 nodes (no autoscaler) | `kubectl -n ch19-pipelines scale deploy/vllm --replicas=0`; `eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name spot-gpu --nodes 1 --nodes-min 0 --nodes-max 1`; or raise `maxSize` to 2 |
 | A pull step or TEI `Pending`: `Insufficient cpu` on EKS | `ch19-cpu-spot` is below 2 nodes (spot reclaim, or `CPU_NODES=1`) and EKS has no cluster autoscaler. The two parallel pulls (1 CPU each), TEI (1 CPU) and rag-api don't fit on one 4-vCPU node | `eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name ch19-cpu-spot --nodes 2 --nodes-max 3` |
 | `argo submit` works but no pods ever start; the workflow has no status | The workflow controller isn't running, or was installed with `singleNamespace=true` for a different namespace. With chart defaults it watches every namespace, so `workflowNamespaces` isn't the cause | `kubectl -n argo get deploy argo-workflows-workflow-controller`; `kubectl -n argo logs deploy/argo-workflows-workflow-controller \| tail`; re-run `common/install-argo-workflows.sh` |
 | Steps "succeed" but the DAG hangs or fails with `failed to create WorkflowTaskResult ... forbidden` | Executor RBAC missing (`common/base/rbac-argo-executor.yaml`: `workflowtaskresults` create/patch for `pipeline-runner`) | `kubectl apply -k <overlay>`; check `kubectl -n ch19-pipelines get rolebinding pipeline-runner-argo-executor` |
 | A directory literally named `{{workflow.name}}` appears under `runs/` | **`# VERIFY:`** in `workflowtemplate-hf-finetune.yaml`: the `run-id` default is itself a tag, which relies on Argo substituting a second time. Not verified against Argo v4.1.3 | Always pass `-p run-id=<name>` (the lab does) |
-| Step pod stuck `ContainerCreating`, `MountVolume.SetUp failed ... AccessDenied` (EKS) | No Pod Identity association for the pod's ServiceAccount, or the pod started before it existed | Re-run `eks/setup-s3-iam.sh`; delete the pod; `kubectl -n mount-s3 get pods -o wide` shows the Mountpoint pod for that node |
+| Step pod stuck `ContainerCreating`, `MountVolume.SetUp failed ... AccessDenied` (EKS) | No Pod Identity association for the pod's ServiceAccount, or the pod started before it existed | Re-run Step 2's IAM/Pod Identity block (it's idempotent); delete the pod; `kubectl -n mount-s3 get pods -o wide` shows the Mountpoint pod for that node |
 | `FileExistsError: ... already exists with different content` / `exists with a different size and the bucket cannot overwrite it` | An earlier attempt left partial files with different bytes (e.g. after you changed `LORA_R`, or a different image tag, for the same `run-id`). `pipeline-runner` has no `s3:DeleteObject` on purpose | Use a new `run-id`, or delete the prefix yourself: `aws s3 rm "s3://${S3_BUCKET}/runs/<run-id>/model/" --recursive` |
 | `evaluate` fails, log `GATE FAILED: eval_loss X > MAX_EVAL_LOSS 2.5`, no retry | Working as designed: exit 1 is final | Train more (new `run-id`, higher `-p max-steps`), or re-judge the recorded numbers: same `run-id` with `-p max-eval-loss=<higher>` (no retraining) |
 | `finetune` Failed after one attempt, message `OOMKilled (exit code 137)` | Host memory above the 13 Gi limit. The retry expression deliberately doesn't retry OOMKilled (it would OOM again) | Lower `PER_DEVICE_BATCH`/`MAX_LENGTH` in `params.env`, `kubectl apply -k`, then resubmit with the same `run-id` to resume from the last checkpoint |
 | `finetune` fails once with `CUDA out of memory`, no retry | Exit 1, deterministic by design | Lower `PER_DEVICE_BATCH` or `MAX_LENGTH` (T4s have 16 GB and run fp32 master weights) |
-| Trainer pod `exec format error` | Image built for arm64 on Apple silicon | Use the `build-push-*.sh` scripts (they pass `--platform linux/amd64`); don't `docker build` by hand for the GPU clouds |
+| Trainer pod `exec format error` | Image built for arm64 on Apple silicon | Use Step 3's `docker buildx build --platform linux/amd64` command; don't `docker build` by hand for the GPU clouds |
 | vLLM stuck `Init:0/1`, log `waiting for /mnt/store/runs/.../model/_COMPLETE` | Typo or wrong `run-id` in `serving.env`, or training hasn't finished | Compare with the workflow's `model-path` output (Step 10); `aws s3 ls "s3://${S3_BUCKET}/runs/"` |
 | rag-api `0/1` for minutes, log `TEI at ... not ready (attempt N)` | First start: uv installs dependencies from PyPI, then waits for TEI to download bge-small | Normal for up to ~15 min (`startupProbe` 90 × 10 s). After `EMBEDDINGS_WAIT_SECONDS` (600) `/healthz` returns 503 and the pod restarts; check `kubectl -n ch19-pipelines logs deploy/tei` |
 | `/ask` or `/chat` returns **502** while `/readyz` is 200 | vLLM (or Ollama) unreachable: scaled to 0, rolling out, or wrong `OPENAI_BASE_URL` | Readiness deliberately ignores the LLM; `kubectl -n ch19-pipelines get deploy vllm`; scale it back to 1 |
@@ -1279,7 +1529,7 @@ Cost notes (EKS, us-east-1 ballpark; check current pricing):
   but they're billed as NAT gateway data processing if your nodes sit in private subnets. That's
   another reason to pull once into the bucket.
 - **ECR:** the trainer image is ~6–8 GB, billed per GB-month. Every rebuild with a new tag adds its
-  changed layers, so `build-push-ecr.sh` sets a lifecycle policy on `ch19-trainer` that keeps only
+  changed layers, so Step 3's build block sets a lifecycle policy on `ch19-trainer` that keeps only
   the newest 5 images. `DELETE_CLOUD_RESOURCES=true` removes the whole repository.
 - **cpu-lab:** free apart from your laptop, but the 20 Gi PVC holds real data until `cpu-lab/cleanup.sh`
   deletes the namespace.
@@ -1408,7 +1658,7 @@ second GPU node during training.
 - Storage semantics: [Mountpoint for S3 semantics](https://github.com/awslabs/mountpoint-s3/blob/main/doc/SEMANTICS.md), [Mountpoint S3 CSI driver](https://github.com/awslabs/mountpoint-s3-csi-driver), [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - Spot: [EC2 Spot interruption notices](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html), [EKS managed node groups and Spot](https://docs.aws.amazon.com/eks/latest/userguide/managed-node-groups.html#managed-node-group-capacity-types)
 - uv: [Running scripts with inline metadata (PEP 723)](https://docs.astral.sh/uv/guides/scripts/)
-- Cross-links: `01-gpu-nodes-and-scheduling` (the GPU pool), `05-model-storage-and-data` (bucket CSI + workload identity), `07-distributed-training-kubeflow-trainer` (multi-GPU training), `09-llm-inference-with-vllm` (vLLM shape, `create-hf-secret.sh`, cpu-lab Ollama), `10-autoscaling-inference` (scaling vLLM, incl. to zero), `15-mlops-gitops-and-pipelines` (Argo Workflows, MLflow, GitOps)
+- Cross-links: `01-gpu-nodes-and-scheduling` (the GPU pool), `05-model-storage-and-data` (bucket CSI + workload identity), `07-distributed-training-kubeflow-trainer` (multi-GPU training), `09-llm-inference-with-vllm` (vLLM shape, `hf-token` Secret pattern, cpu-lab Ollama), `10-autoscaling-inference` (scaling vLLM, incl. to zero), `15-mlops-gitops-and-pipelines` (Argo Workflows, MLflow, GitOps)
 
 ### Versions tested
 
@@ -1430,4 +1680,4 @@ Tested 2026-09-18 on Kubernetes 1.35. Keep in sync with `versions.env`, `common/
 | numpy / fastapi / uvicorn | `2.5.3` / `0.141.1` / `0.53.0` | `rag_api.py` (fastapi/uvicorn), both scripts (numpy) |
 | busybox (`wait-for-model`) | `1.37` | `vllm-deployment.yaml` |
 | Models / dataset | `Qwen/Qwen3-0.6B@c1899de…`, `HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f…`, `trl-lib/Capybara@e235e84…`, `BAAI/bge-small-en-v1.5@5c38ec7…` | `params.env`, `cpu-lab/params.env`, `tei-deployment.yaml` |
-| Mountpoint S3 CSI / GCS FUSE CSI / Blob CSI | managed add-on versions (depend on cluster version) | installed by `setup-s3-iam.sh` / `install.sh` |
+| Mountpoint S3 CSI / GCS FUSE CSI / Blob CSI | managed add-on versions (depend on cluster version) | installed by Step 2's `eksctl create addon` block |

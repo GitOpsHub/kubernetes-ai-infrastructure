@@ -1,5 +1,5 @@
 # GPU managed node groups for an existing eksctl cluster (metadata must match the cluster).
-# create-gpu-nodegroup.sh envsubsts ${EKS_CLUSTER} and ${AWS_REGION}.
+# The README's Lab section envsubsts ${EKS_CLUSTER} and ${AWS_REGION} before `eksctl create nodegroup -f`.
 apiVersion: eksctl.io/v1alpha5
 kind: ClusterConfig
 metadata:

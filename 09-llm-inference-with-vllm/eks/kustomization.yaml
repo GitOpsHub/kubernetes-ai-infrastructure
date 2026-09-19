@@ -1,6 +1,6 @@
 # EKS: 1x L4/T4 spot node (reuses the "spot-gpu" managed node group from
 # 01-gpu-nodes-and-scheduling — create it + the device plugin first if you haven't).
-#   ../common/create-hf-secret.sh ch09-vllm
+# See the README's Step 2 for the `kubectl create secret generic hf-token` command, then:
 #   kubectl apply -k 09-llm-inference-with-vllm/eks
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

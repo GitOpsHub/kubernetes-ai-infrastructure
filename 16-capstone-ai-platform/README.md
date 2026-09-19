@@ -5,10 +5,25 @@
 > observability, multi-tenant security, and GitOps — then break it on purpose (game day) and tear
 > it down.
 
+**New to Kubernetes and to GPU/AI infrastructure?** Read this paragraph before anything else.
+Every chapter before this one taught you one Kubernetes *object type* in isolation — a `Job`, a
+`TrainJob`, a `Deployment`, a `Gateway` — the same way you'd learn one instrument at a time. This
+chapter is the first time you play them together, as an orchestra, and the first time you'll feel
+the specific pain of a real platform: not "I don't understand Kubernetes," but "I understand every
+piece, and it still isn't working, because two pieces built by two different chapters (i.e., two
+different teams, in a real company) don't quite line up." That mismatch — not a new concept — is
+the actual subject of this chapter. If a term below is unfamiliar (ClusterQueue, TrainJob,
+Deployment, Gateway, HPA, spot instance), it was taught in an earlier chapter; the "Before you
+start" list right below tells you exactly which one, so you can jump back rather than guess.
+
 ## Before you start
 
 This chapter assumes **every prior chapter's output, applied fresh in the order section 4 lays
-out** — it is not a chapter you can jump into cold. Concretely:
+out** — it is not a chapter you can jump into cold. If you skip ahead without doing this, the
+symptom is always the same shape: a command from this chapter's README refers to a namespace,
+CustomResourceDefinition (CRD), or Kubernetes object that simply doesn't exist yet, and `kubectl`
+will tell you so with a `NotFound` error. That is not a bug in this chapter — it is confirmation
+that a dependency below is missing. Concretely, you need:
 
 - A cluster from [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup) with
   spot CPU + spot GPU node pools ([01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling))
@@ -46,6 +61,80 @@ Kubernetes/AI concept — every concept here was taught already — it's to teac
 stack you didn't build end-to-end yourself and find where the joints don't line up, exactly the
 skill you need when you inherit (or build) a real platform.
 
+### 1.1 The big picture: what "one platform" actually means
+
+Think of what you're building as a single pipe that a machine-learning idea flows through, from
+"we have an idea for a model" to "a user is getting answers from it in production," with cost and
+safety controls at every joint. Each earlier chapter built one segment of that pipe:
+
+- **Chapters 00–02 (the foundation):** a Kubernetes cluster that actually has GPUs in it, and knows
+  how to hand them out to Pods. Without this, nothing below has anywhere to run — this is the
+  concrete and rebar, not a feature of the platform, but the ground it stands on.
+- **Chapters 04–05 (see and store):** you can't run a platform you can't observe (ch04 — metrics,
+  dashboards, alerts) or that has nowhere durable to put multi-gigabyte model weights and
+  checkpoints (ch05 — object storage mounted into Pods). These aren't optional extras; a training
+  job that dies with no checkpoint, or an outage nobody's dashboard shows, is a platform failure
+  either way.
+- **Chapter 06 (the gatekeeper):** GPUs are scarce and expensive, so before any workload is allowed
+  to *use* one, something has to decide *whether* it's allowed to, right now, given what else is
+  running. That's Kueue: a queue with a budget (a `ClusterQueue`) sitting in front of the cluster's
+  scheduler, so "everyone submits Jobs whenever they want" doesn't turn into "everyone's Jobs fight
+  over GPUs with no fairness policy."
+- **Chapters 07, 09, 11 (do the actual AI work):** train a model on GPUs (ch07) and serve one for
+  inference (ch09 vLLM, or ch11 KServe as an alternative). This is the part most people think of as
+  "the AI platform," but notice it's chapter 3 of 6 groups — most of what makes it a *platform*
+  rather than a science project is everything around it.
+- **Chapters 10, 12–13 (make it reachable and elastic):** a model server nobody can reach isn't
+  useful (ch12's Gateway gives it one stable address and does load-balancing/routing), and a fixed
+  number of replicas is either wasteful at 3 a.m. or overwhelmed at noon (ch10's autoscaler adds/
+  removes replicas, ch13's node autoscaler adds/removes the *nodes* those replicas run on).
+- **Chapter 14 (don't trust everyone equally):** once multiple teams share one cluster, you need
+  walls between them — quotas so one team can't starve another, RBAC so a team's ServiceAccount
+  can't touch another team's namespace, network policy so a compromised Pod can't reach everything.
+- **Chapter 15 (repeatability):** doing all of the above by hand once proves it *can* work; GitOps
+  (Argo CD declaratively syncing manifests) and a pipeline engine (Argo Workflows sequencing steps)
+  prove it can work *again*, the same way, without a human re-typing commands from memory.
+
+Read top to bottom, that list is a believable AI platform. But each chapter built its slice with
+its own toy names, its own assumed namespaces, and its own "good enough for teaching this concept"
+shortcuts — because making every chapter also handle every other chapter's edge cases would have
+made each one unteachable on its own. That's the deliberate trade-off, and it's why gluing them
+together is *this* chapter's whole job, explained next.
+
+### 1.2 Why a "kueue-bridge" and a "pipeline" component exist at all
+
+You might reasonably ask: if chapters 06 and 07 were both tested and both work, why do they need a
+bridge to work *together*? Because "tested in isolation" and "tested together" are different
+claims, and the gap between them is exactly where real platforms break:
+
+- Chapter 06 teaches Kueue by shipping two CPU-only ClusterQueues (`team-a-cq`, `team-b-cq`) — GPUs
+  would have been a distraction from the concept it's teaching (fair-share queueing).
+- Chapter 07 teaches distributed GPU training by shipping a `LocalQueue` that points at a
+  ClusterQueue named `team-research` — a name chosen to sound realistic for its own lab, written
+  without reference to chapter 06's specific queue names, because chapter 07 doesn't know (and
+  shouldn't have to know) what chapter 06 called its queues.
+- Put them on the same cluster and nothing crashes — you just get a `TrainJob` that sits `Pending`
+  forever, because `team-research` doesn't exist anywhere. No error message points you at the fix;
+  you have to know to look at Kueue's admission status. **That silent gap is exactly what a
+  "kueue-bridge" fixes**: `common/kueue-bridge/clusterqueue-team-research.yaml` is a small,
+  reviewable file whose only job is to create the missing `team-research` ClusterQueue, joined to
+  chapter 06's existing cohort (so it still shares/borrows that cohort's CPU budget) and covering
+  the one resource (`nvidia.com/gpu`) chapter 06 never needed.
+- Similarly, nothing in chapters 06–15 sequences the *business process* "train a model, register it
+  if training succeeded, promote it to serving, then prove serving actually works" as one operation
+  — each chapter proves its own step works, not that the steps chain together. The **pipeline**
+  (`common/pipeline/workflowtemplate-platform-e2e.yaml`, an Argo Workflows `WorkflowTemplate`) is
+  the thing that actually calls chapter 07's TrainJob, then chapter 15's MLflow, then patches
+  chapter 09's Deployment, then curls through chapter 12's Gateway — in that order, with each step
+  depending on the previous one succeeding. It's the executable version of the sentence "these
+  chapters work together," instead of just an assertion in a README.
+
+The general lesson, useful far beyond this course: **integration seams are where independently-
+built, independently-correct components fail**, and the fix is never to rewrite either component —
+it's a small, explicit, separately-owned piece of glue that names the assumption each side didn't
+know it was making. That is what `kueue-bridge` and `pipeline` are, and it's why they live in this
+chapter (`16-`) instead of being merged into chapter 06 or chapter 07's own files.
+
 This chapter is a **read-and-run playbook**, not a new set of from-scratch labs. `common/` and
 `eks/` ship the glue that earlier chapters deliberately don't own: a bridging `ClusterQueue`
 (`common/kueue-bridge/`) so chapter 07's GPU `TrainJob` actually gets admitted through chapter 06's
@@ -53,6 +142,12 @@ Kueue setup, and an Argo Workflows `WorkflowTemplate` (`common/pipeline/`) that 
 `TrainJob` → MLflow registration → vLLM promotion → a live smoke test through the Gateway. You run
 it by applying each earlier chapter's own manifests in the order below, then this chapter's bridge
 on top.
+
+> **Cost warning up front:** this is the most expensive chapter in the course, because it is the
+> only one that runs *every* GPU-and-node-autoscaling chapter's resources at the same time instead
+> of one at a time. A GPU node group left running overnight is the single most common way learners
+> get a surprise cloud bill from this repo — read section 5 (Spot considerations) and section 9
+> (Cleanup) before you start, not after.
 
 ## 2. Learning objectives and time plan (~3 h, GPU path; the CPU lab below is a separate ~2 h session)
 
@@ -76,11 +171,43 @@ By the end you can:
 | 0:00–0:20 | Read section 3 (reference architecture); read `common/pipeline/workflowtemplate-platform-e2e.yaml` and `common/kueue-bridge/clusterqueue-team-research.yaml` in full — they're commented as design docs, not just manifests |
 | 0:20–1:30 | Build order (section 4): bring up phases 0–3 (cluster → observability/storage → Kueue → training/serving) on **one** cloud |
 | 1:30–2:00 | Build order phases 4–6 (gateway/autoscaling/node-autoscaling → security → GitOps/pipelines), then apply this chapter's `kubectl apply -k 16-capstone-ai-platform/<cloud>` |
-| 2:00–2:20 | Run `validate-platform.sh`, then submit the capstone pipeline (`argo submit --watch --from workflowtemplate/platform-e2e -n ch15-pipelines`) |
+| 2:00–2:20 | Run §4's "Validate everything at once" block, then submit the capstone pipeline (`argo submit --watch --from workflowtemplate/platform-e2e -n ch15-pipelines`) |
 | 2:20–2:50 | Game day (section 6): pick 2–3 scenarios, run them, write down what you observed |
 | 2:50–3:00 | Checkpoint questions, cleanup |
 
 ## 3. Reference architecture
+
+If this is the first architecture diagram of this scope you've read, here's how to read it rather
+than just look at it. Each dashed box (`P0` through `P6`) is one "phase" — a group of chapters whose
+resources get installed together, in the order the phase numbers imply, because later phases depend
+on earlier ones existing (you cannot autoscale a Deployment in P4 that P3 hasn't created yet). Solid
+arrows (`-->`) mean "a real request or piece of data flows this way at runtime" — a client's HTTPS
+request, a checkpoint file being written, a pipeline step calling an API. Dashed arrows (`-.->`)
+mean "this component watches or manages that one, but no request-shaped traffic flows on the arrow"
+— Prometheus (`OBS`) scraping metrics, Argo CD (`ARGOCD`) reconciling a Deployment's spec, RBAC
+(`RBAC`) governing what a workload is allowed to do. The distinction matters operationally: if a
+solid-arrow path breaks, users see errors immediately (a 503 through the Gateway); if a dashed-arrow
+path breaks, nothing looks wrong *yet* — you just lose visibility or governance until you notice.
+
+Walking it left-to-right in plain English: a client sends an HTTPS request to the Gateway (`GW`,
+ch12), which forwards it to the running model server (`SERVE`, ch09's vLLM). Two autoscalers watch
+that server from the side — KEDA/HPA (`HPA`, ch10) adds or removes *replicas* of the server based on
+load, and Karpenter/NAP (`NAP`, ch13) adds or removes the *underlying nodes* those replicas need,
+including nodes for the training job (`TRAIN`, ch07). Training itself writes its checkpoints out to
+durable storage (`STORE`, ch05) — that's what protects a multi-hour training run from a spot
+reclaim (see section 5). Off to the side, Prometheus (`OBS`, ch04) is scraping both `TRAIN` and
+`SERVE` continuously — this is how you'd actually notice a problem, versus needing to remember to
+check by hand. Kueue (`KUEUE`, ch06) sits in front of `TRAIN`, deciding whether it's allowed to run
+at all given the cluster's current GPU/CPU budget; this chapter's `BRIDGE` box is the small piece
+this chapter itself adds so that decision actually resolves instead of hanging forever (see
+section 1.2 for why that gap exists). RBAC (`RBAC`, ch14) governs what `TRAIN` and `SERVE` are
+allowed to do and who can touch them. Argo CD (`ARGOCD`, ch15) is the thing that keeps `KUEUE`,
+`SERVE`, and the model registry (`REG`, ch15's MLflow) matching what's declared in Git, rather than
+whatever a human last typed by hand. And finally the pipeline (`PIPE`, this chapter) is the one
+component that actually *drives* the sequence end to end: it submits the TrainJob (1), registers the
+resulting model with MLflow (2), promotes that model into the serving Deployment (3), and runs a
+live smoke test through the Gateway to prove the whole chain actually worked (4) — the four numbered
+arrows are, in order, this chapter's entire reason for existing.
 
 ```mermaid
 flowchart TB
@@ -166,21 +293,58 @@ copy-pasteable there — not repeated here) plus, where noted, this chapter's ow
 same sequence, as commented-out reference commands you uncomment a phase at a time, lives in
 [`eks/deploy-platform.sh`](eks/deploy-platform.sh).
 
+**Why phases, and why this order specifically:** Kubernetes will generally let you `kubectl apply`
+things in any order — a `TrainJob` that references a `ClusterQueue` that doesn't exist yet is
+accepted by the API server just fine, it just never gets admitted. That's the trap: nothing errors
+loudly when you apply out of order, you just get silent `Pending` objects later and have to
+reverse-engineer why. The phase order below exists specifically so each phase's *inputs* (a CRD, a
+namespace, a ResourceFlavor, a running Service) already exist before the next phase's manifests
+reference them. If you only remember one rule from this section: **when in doubt, apply the
+thing being depended *on* first** (the queue before the job that uses it, the namespace before the
+RoleBinding that grants access to it, the Deployment before the Gateway that routes to it).
+
 ### Phase 0 — cluster + GPU (ch00–02)
+
+This phase exists to answer one question before anything else: does this AWS account actually have
+a place to run GPU workloads? Everything downstream assumes yes. `env.sh` holds account-specific
+values (region, cluster name, account ID) that every later chapter's commands interpolate — you set
+it once, here, so you don't have to repeat AWS account details in every subsequent command.
 
 ```bash
 cp env.sh.example env.sh && "$EDITOR" env.sh   # fill in your AWS account/region
 source env.sh && source versions.env
 ```
 
+`source`ing (not just running) `env.sh` and `versions.env` matters: `source` loads the variables
+into your *current* shell so every later `kubectl`/`helm`/`eksctl` command in this README can use
+them (e.g. `$EKS_CLUSTER`, `$KUEUE_VERSION`); running the file as a script instead would set those
+variables in a subshell that disappears the moment the script exits, leaving your actual terminal
+without them.
+
 Run chapter 00 §4 (cluster), chapter 01 §4 (GPU node group + device plugin), chapter 02 §4 (GPU
-Operator).
+Operator). In one sentence each: chapter 00 creates the EKS cluster and its control plane; chapter
+01 adds a node group (including a **spot** GPU node group — see section 5) and makes Kubernetes
+aware that GPUs are a schedulable resource at all (`nvidia.com/gpu`, an "extended resource" that
+plain vanilla Kubernetes has no built-in concept of); chapter 02's GPU Operator installs the NVIDIA
+driver, container toolkit, and device plugin as Kubernetes DaemonSets so you never have to SSH into
+a node and install a GPU driver by hand.
 
 **Acceptance criteria:** `kubectl get nodes -L eks.amazonaws.com/capacityType` shows at least one
 spot CPU node Ready; `kubectl -n gpu-operator get pods` all Running; `kubectl describe node
-<gpu-node> | grep nvidia.com/gpu` shows the extended resource advertised.
+<gpu-node> | grep nvidia.com/gpu` shows the extended resource advertised. If that last check comes
+back empty, the node exists but Kubernetes doesn't yet know it has a GPU — nothing later in this
+chapter can schedule a GPU Pod on it until the GPU Operator's DaemonSets are actually Running there.
 
 ### Phase 1 — observability + storage (ch04–05)
+
+Why this phase comes before training/serving rather than after: you want Prometheus and durable
+storage *watching and ready* before you generate anything worth watching or storing. Installing
+observability after the fact means you retroactively wonder "was GPU utilization actually low
+during that first training run, or did I just not have a dashboard yet" — you can never answer
+that once the run is over. Chapter 04 installs `kube-prometheus-stack` (Prometheus + Grafana +
+the DCGM exporter, which reads GPU metrics straight from the NVIDIA driver); chapter 05 wires up a
+CSI (Container Storage Interface) driver so Pods can mount S3 as if it were a local filesystem —
+that's where model weights and training checkpoints will actually live.
 
 Run chapter 04 §4 (kube-prometheus-stack) and chapter 05 §4 (S3 CSI + IAM setup, then
 `kubectl apply -k 05-model-storage-and-data/eks`).
@@ -190,11 +354,28 @@ Running; a `DCGM_FI_DEV_GPU_UTIL` series exists in Prometheus once phase 3 has a
 
 ### Phase 2 — queueing (ch06 + this chapter's bridge)
 
+This is the phase that puts a gatekeeper in front of your (expensive, limited) GPUs. Without Kueue,
+Kubernetes' default scheduler would happily start every submitted Pod immediately in first-come
+order, with no concept of "team A's fair share" or "don't let one team's Jobs starve everyone
+else's" — fine for a single learner's lab, a real liability the moment a second team shares the
+cluster. The first command below applies chapter 06's cloud-agnostic base (namespace, Resource
+Flavors describing "spot" vs "on-demand" capacity, a Cohort that lets queues share budget, and the
+CPU-only queues chapter 06 teaches with) — deliberately from its `cpu-lab/` overlay here, because
+that overlay is the cloud-agnostic base every cloud's Kueue install shares, not a CPU-only
+substitute for the real thing:
+
 ```bash
 kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab   # namespace + flavors + cohort + queues (cloud-agnostic)
 ```
 
-Run chapter 06 §4 (node group + Kueue install, then `kubectl apply -k 06-batch-jobs-and-kueue/eks`).
+Run chapter 06 §4 (node group + Kueue install, then `kubectl apply -k 06-batch-jobs-and-kueue/eks`)
+— this installs the Kueue controller itself (a Helm chart) and then layers EKS-specific pieces
+(node selectors matching your actual node group labels) on top of the cloud-agnostic base you just
+applied.
+
+Then apply this chapter's own bridge (explained in full in section 1.2) — this is the step that
+actually makes chapter 07's `TrainJob` admissible later in Phase 3, so skipping it is the single
+most common reason a learner's GPU TrainJob sits `Pending` with no obvious error:
 
 ```bash
 kubectl apply -k 16-capstone-ai-platform/eks   # applies common/kueue-bridge + common/pipeline too — see note below
@@ -210,14 +391,43 @@ kubectl apply -k 16-capstone-ai-platform/eks   # applies common/kueue-bridge + c
 
 ### Phase 3 — training + serving (ch07, 09, optionally 11)
 
+This is the phase where the platform does the AI work everything else exists to support: chapter 07
+runs a real distributed PyTorch training job across 2 GPU nodes (using Kubeflow Trainer's `TrainJob`
+CRD, which is admitted through the Kueue queue and bridge you just set up in Phase 2 — if Phase 2's
+`team-research` ClusterQueue isn't there yet, this is where you'll see it), and chapter 09 serves a
+model for inference with vLLM.
+
 Run chapter 07 §4 (GPU node group, checkpoint storage, Trainer install, then
 `kubectl apply -k 07-distributed-training-kubeflow-trainer/eks` and
 `kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks`).
 
+The block below sets up vLLM's namespace and, if you're serving a gated Hugging Face model, its
+access token. Why this is inlined as a raw `kubectl create secret` rather than a helper script:
+a Secret holds a credential, so the safest way to create one is the one command that puts it
+directly into the cluster's API — no intermediate file on disk to forget to delete, no script to
+audit for what it does with the token in between. `--dry-run=client -o yaml | kubectl apply -f -` is
+a standard idiom here, not vLLM-specific: it renders the object as YAML locally without touching the
+API server, then pipes it into `apply`, which makes the command safely re-runnable (a second run
+updates the existing Secret instead of erroring that it already exists, the way a plain
+`kubectl create` would):
+
 ```bash
-HF_TOKEN="$HF_TOKEN" ./09-llm-inference-with-vllm/common/create-hf-secret.sh ch09-vllm
+NAMESPACE=ch09-vllm
+: "${HF_TOKEN:?export HF_TOKEN=hf_xxx, or skip — optional for the ungated Qwen3-0.6B}"
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic hf-token \
+  --namespace "$NAMESPACE" \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 kubectl apply -k 09-llm-inference-with-vllm/eks
 ```
+
+The `: "${HF_TOKEN:?...}"` line is a bash idiom for "fail with this message if the variable is
+unset or empty" — it stops you here with a clear instruction instead of letting an empty token
+silently reach the Secret and fail later, deep inside a Pod's logs, with a less obvious 401 error.
+This chapter's own lab uses Qwen3-0.6B, which is ungated, so you can also just leave `HF_TOKEN`
+unset entirely and the model will still download.
 
 Optional: chapter 11 §4 for the KServe path instead of/alongside raw vLLM.
 
@@ -228,6 +438,18 @@ ch07-training` for the admission reason if it's stuck); `kubectl -n ch09-vllm ge
 localhost:8000/v1/models` returns the served model.
 
 ### Phase 4 — gateway, autoscaling, node autoscaling (ch10, 12–13)
+
+Up to this point, vLLM is running but only reachable inside the cluster (via `port-forward`, as
+Phase 3's acceptance check did) — this phase makes it reachable from outside, and elastic under
+load. Chapter 12 installs the Gateway API (a newer, more expressive successor to Ingress) plus the
+Gateway API Inference Extension's `InferencePool`, which is inference-aware routing (it understands
+that not all backend Pods are equally busy, unlike a plain round-robin load balancer). Chapter 10
+installs KEDA, which scales the number of vLLM *replica Pods* up or down based on a custom metric
+(queue depth, GPU utilization) rather than just CPU%, which is a poor proxy for how busy a GPU
+inference server actually is. Chapter 13 installs Karpenter, which watches for Pods that can't be
+scheduled (because no node has room, or the right GPU type) and provisions a brand-new *node* to fit
+them — the layer below KEDA, since KEDA can create more Pods, but if there's no node with a free GPU
+for them to land on, they'd sit `Pending` without Karpenter.
 
 Run chapter 12 §4 (Gateway API CRDs, LWS, gateway controller, then
 `kubectl apply -k 12-inference-gateway-and-multinode-serving/eks`), chapter 10 §4 (KEDA +
@@ -240,6 +462,14 @@ Prometheus Adapter, then `kubectl apply -k 10-autoscaling-inference/eks`), and c
 
 ### Phase 5 — multi-tenancy + security (ch14)
 
+Everything so far has been built as if one trusted person is running the whole cluster — realistic
+for you, right now, but not for a real platform with multiple teams. This phase retroactively adds
+the walls that should exist between them: chapter 14 installs External Secrets (so credentials live
+in a real secret store, not hand-typed `kubectl create secret` commands like Phase 3's, once you're
+past the lab stage) and Kyverno (a policy engine that can reject non-compliant Pods at admission
+time — e.g. a Pod missing required labels never gets created at all, rather than being created and
+then flagged later).
+
 Run chapter 14 §4 (External Secrets + Kyverno install, then
 `kubectl apply -k 14-multi-tenancy-and-security/eks`).
 
@@ -249,6 +479,18 @@ system:serviceaccount:ch16-capstone:capstone-pipeline` returns `no` (RBAC is sco
 grants); a Pod without required labels is rejected by the ValidatingAdmissionPolicy from ch14.
 
 ### Phase 6 — GitOps, pipeline, registry (ch15, this chapter's bridge)
+
+This is the phase where everything built above finally gets *driven end to end* instead of just
+sitting there ready. Argo Workflows is the engine that runs multi-step pipelines as Kubernetes
+objects (each step is its own Pod); MLflow is the model registry — the thing that remembers "this
+training run produced this specific set of weights, and here's its accuracy," so "promote this
+model to serving" means something concrete rather than "hope you copied the right checkpoint file."
+`argo submit --watch --from workflowtemplate/platform-e2e` is the moment this entire chapter has
+been building toward: it runs the four-step pipeline this chapter added (train → register → promote
+→ smoke-test, see section 1.2 and section 3's diagram) against everything you deployed in Phases
+0–5. `--watch` streams the pipeline's step-by-step progress to your terminal instead of returning
+immediately, which is what lets you see *which* step fails if one does, rather than only a final
+pass/fail:
 
 ```bash
 ./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh   # or via Argo CD app-of-apps, see ch15 README
@@ -260,13 +502,23 @@ argo submit --watch -n ch15-pipelines --from workflowtemplate/platform-e2e
 **Acceptance criteria:** `argo get -n ch15-pipelines @latest` shows all four steps (`train`,
 `register`, `promote`, `smoke-test`) `Succeeded`; `kubectl -n ch09-vllm get deploy vllm -o
 jsonpath='{.spec.template.metadata.annotations}'` shows the
-`ch16.kubernetes-ai-infrastructure/model-version` annotation the pipeline just set.
+`ch16.kubernetes-ai-infrastructure/model-version` annotation the pipeline just set. `@latest` is
+Argo's shorthand for "the most recently submitted Workflow in this namespace," so you don't need to
+copy-paste the auto-generated Workflow name it prints when you submitted.
 
 ### Validate everything at once
 
 What you're about to do: run a read-only health check across every layer of the platform — the
 capstone's "is it actually wired together" checklist, runnable at any point during/after the phases
-above. Nothing here mutates the cluster.
+above. Nothing here mutates the cluster. This is the single most useful block in this chapter for a
+first-timer: rather than guessing which phase is broken from a vague symptom, run this, then read
+top to bottom and stop at the first section that looks wrong (Pending, CrashLoopBackOff, or a
+resource that should exist but returns "not found") — everything above that point is confirmed
+healthy, so the problem is there or in the phase right after it. The repeated `|| true` after many
+commands is deliberate: it stops `kubectl` from making the whole block exit early just because one
+resource type doesn't exist yet (e.g. you haven't reached that phase) — a bare `kubectl get` on a
+CRD that isn't installed yet would otherwise abort the script instead of showing you which layer is
+missing.
 
 ```bash
 echo "== Kueue: quota + admission (ch06, ch16 bridge) =="
@@ -304,8 +556,16 @@ Review each section above for CrashLoopBackOff/Pending/0-ready before calling th
 
 ## 5. Spot considerations
 
-Every compute-bearing chapter above defaults to spot; this chapter changes nothing about that, but
-running them *together* surfaces interactions a single chapter's lab doesn't:
+**If you take one warning from this whole chapter, take this one: GPU spot capacity is the most
+expensive thing this course touches, and this is the only chapter that keeps several GPU/autoscaling
+chapters' resources running simultaneously instead of one at a time.** A spot instance is spare AWS
+EC2 capacity sold at a discount (often 60–90% off on-demand) with one condition: AWS can reclaim it
+with only a couple minutes' notice when it needs that capacity back. That trade — cheap, but
+revocable — is why every chapter in this course defaults to it, and why "what happens when a node
+disappears mid-work" is a first-class design question, not an edge case, for everything you build
+here. This chapter changes nothing about that trade-off itself, but running every earlier chapter's
+spot-backed workload *together* surfaces interactions a single chapter's lab never demonstrates on
+its own:
 
 - **A spot reclaim during phase 3's TrainJob** triggers chapter 07's `TrainingRuntime` restart
   policy (`maxRestarts: 10`, `restartStrategy: Recreate`) — the *whole* 2-node gang is recreated and
@@ -325,6 +585,13 @@ running them *together* surfaces interactions a single chapter's lab doesn't:
   you hand-write a new Pod for the game day, don't forget it.
 
 ## 6. Game day
+
+A "game day" is a deliberate, planned exercise where you break something on purpose, on a system
+you understand, so the first time you see that failure mode isn't during a real, unplanned incident.
+It's standard practice at companies running production infrastructure (often called chaos
+engineering when automated) — the value isn't the outage, it's building the muscle memory of "I've
+seen this exact symptom before and I know where to look," under conditions where nobody's paging you
+and nothing catastrophic happens if you get it wrong.
 
 Read-only observation first (§4's "Validate everything at once"), then break one thing at a time
 and write down what recovered on its own vs. what needed a human. None of these commands touch
@@ -346,7 +613,15 @@ intervention. That table is what a real on-call runbook looks like.
 ## 7. SLOs
 
 These are the numbers a platform team would actually track. None require new tooling — every metric
-source below is something chapters 04, 09, 10 and 13 already installed.
+source below is something chapters 04, 09, 10 and 13 already installed. If the jargon in this table
+is new: an **SLO** (Service Level Objective) is a target a team commits to and measures against, not
+just an aspiration — "TTFT p95 < 500ms" is a real SLO because it's a specific number with a specific
+measurement, "the API should be fast" is not. **TTFT** is Time To First Token — how long a user
+waits after sending a prompt before the model starts streaming a response back; it's the inference
+equivalent of "page load time," and it's what users actually perceive as latency, more than total
+response time. **p95** means "95% of requests are at or below this value" — a stronger, more honest
+claim than an average, because an average can hide a bad tail (e.g. 95% of requests at 200ms and 5%
+at 5 seconds still averages to a deceptively fine-looking number).
 
 | SLO | Target (this lab's scale: 1 vLLM replica, L4/T4, Qwen3-0.6B–class model) | Source |
 |---|---|---|
@@ -362,22 +637,42 @@ source below is something chapters 04, 09, 10 and 13 already installed.
 
 ## 8. Troubleshooting
 
+The through-line in almost every row below: **a resource that references another resource by name
+or namespace doesn't validate that the target exists when you apply it** — Kubernetes' API server
+accepts a `TrainJob` pointing at a nonexistent queue, or a `WorkflowTemplate` step pointing at a
+nonexistent Service, without complaint. The failure only shows up later, at the moment something
+tries to actually *use* that reference (admission, a network call) — which is why so many of these
+symptoms are "stuck" or "silent" rather than a loud error at apply time. Once you internalize that
+pattern, most of platform troubleshooting is just "find the reference, confirm the target exists."
+
 | Symptom | Cause | Fix |
 |---|---|---|
-| TrainJob stuck `Pending`, `Workload` shows no `ClusterQueue` match | Applied chapter 07 without this chapter's `common/kueue-bridge` (or applied it to the wrong cloud overlay) | `kubectl apply -k 16-capstone-ai-platform/common/kueue-bridge`; confirm `kubectl get clusterqueue team-research` exists |
-| Pipeline's `register-model` step fails: `Connection refused` to MLflow | MLflow (ch15) not installed yet, or wrong namespace/port | `kubectl -n mlflow get pods`; the pipeline hard-codes `http://mlflow.mlflow.svc.cluster.local:5000` — that must match your ch15 install |
-| Pipeline's `submit-trainjob` step fails with a Forbidden error | `common/pipeline/namespace-rbac.yaml` wasn't applied, or you're running the Workflow under a different ServiceAccount than `capstone-pipeline` | `kubectl apply -k 16-capstone-ai-platform/common/pipeline`; check the WorkflowTemplate's `spec.serviceAccountName` |
-| `promote-vllm` step succeeds but the served model doesn't change | vLLM's Deployment uses `Recreate` strategy — the patch only changes a Pod *annotation*, it doesn't change the served weights on its own; wire your own `initContainer`/args to read the annotation, or treat this as a "deployment marker", not a real model swap | See the comment in `common/pipeline/workflowtemplate-platform-e2e.yaml`'s `promote-vllm` template |
-| `smoke-test-gateway` step 404s / times out | Gateway (ch12) not yet `Programmed`, or the in-cluster placeholder check in that step isn't a real substitute for hitting the Gateway's external address | Read the template's comment: swap in `kubectl get gateway -n ch12-gateway -o jsonpath=...` and curl that externally for a real check |
-| `validate-platform.sh` shows empty output for a whole section | That phase isn't deployed yet (fine — most `\|\| true` sections mean "not installed", not "broken") | Cross-check against the build-order phase for that section above |
+| TrainJob stuck `Pending`, `Workload` shows no `ClusterQueue` match | Applied chapter 07 without this chapter's `common/kueue-bridge` (or applied it to the wrong cloud overlay). This happens because chapter 07's `LocalQueue` references a ClusterQueue named `team-research` by name, and that name only exists once *this chapter's* bridge is applied (section 1.2) — chapter 07 on its own has no way to know that name is missing | `kubectl apply -k 16-capstone-ai-platform/common/kueue-bridge`; confirm `kubectl get clusterqueue team-research` exists |
+| Pipeline's `register-model` step fails: `Connection refused` to MLflow | MLflow (ch15) not installed yet, or wrong namespace/port. `Connection refused` specifically (not a timeout) means the pipeline's Pod reached the right IP but nothing was listening on that port — a strong signal the Service exists but the MLflow Pod behind it isn't up yet, versus a typo'd hostname (which would show `NXDOMAIN`/DNS failure instead) | `kubectl -n mlflow get pods`; the pipeline hard-codes `http://mlflow.mlflow.svc.cluster.local:5000` — that must match your ch15 install |
+| Pipeline's `submit-trainjob` step fails with a Forbidden error | `common/pipeline/namespace-rbac.yaml` wasn't applied, or you're running the Workflow under a different ServiceAccount than `capstone-pipeline`. Kubernetes RBAC defaults to deny — a ServiceAccount can do nothing until a Role/RoleBinding explicitly grants it a verb (`create`, `get`, …) on a resource in a namespace, so a missing grant looks exactly like this: not a crash, a clean `403 Forbidden` | `kubectl apply -k 16-capstone-ai-platform/common/pipeline`; check the WorkflowTemplate's `spec.serviceAccountName` |
+| `promote-vllm` step succeeds but the served model doesn't change | vLLM's Deployment uses `Recreate` strategy — the patch only changes a Pod *annotation*, it doesn't change the served weights on its own; wire your own `initContainer`/args to read the annotation, or treat this as a "deployment marker", not a real model swap. This is a deliberate simplification of this lab's pipeline, not a bug: a real promotion step would need the container's launch args (e.g. `--model <new-path>`) to actually change, which this teaching pipeline leaves as a documented next step rather than hiding behind extra complexity | See the comment in `common/pipeline/workflowtemplate-platform-e2e.yaml`'s `promote-vllm` template |
+| `smoke-test-gateway` step 404s / times out | Gateway (ch12) not yet `Programmed` (its own control plane hasn't finished configuring routing yet — check with `kubectl get gateway -n ch12-gateway`), or the in-cluster placeholder check in that step isn't a real substitute for hitting the Gateway's external address, since an in-cluster curl can succeed via a path that never goes through the Gateway's actual routing rules at all | Read the template's comment: swap in `kubectl get gateway -n ch12-gateway -o jsonpath=...` and curl that externally for a real check |
+| §4's "Validate everything at once" shows empty output for a whole section | That phase isn't deployed yet (fine — most `\|\| true` sections mean "not installed", not "broken"). Remember `\|\| true` exists precisely so a missing CRD/resource type doesn't abort the whole diagnostic script — an empty section is the script telling you "nothing here yet," not "something failed here" | Cross-check against the build-order phase for that section above |
 
 ## 9. Cleanup
+
+**Do not skip this section, and do not leave the platform running "for later."** GPU nodes and
+autoscaled node groups bill by the hour whether or not you're actively using them — the most common
+way to turn a free/cheap lab into a real bill is walking away from this chapter with a GPU node
+group still up. Set a calendar reminder if you're stopping mid-chapter.
 
 See [`eks/cleanup.sh`](eks/cleanup.sh) — reverse dependency order, every line commented, pointing
 at each chapter's own README §7 (Cleanup) for the exact commands. Uncomment and run a phase at a
 time so you can inspect anything that fails to drain cleanly before deleting the node group under
-it. **Node groups are the expensive part and the cluster deletion in Phase 0 is last on purpose** —
-verify nothing GPU-backed is still Running before you get there.
+it. Reverse order matters for the same reason build order did (section 4): deleting a namespace
+before the Workflow running inside it finishes can leave orphaned Pods still holding a GPU, and
+deleting a ClusterQueue while a TrainJob still references it can leave that TrainJob's Workload
+object stuck in a confusing state. **Node groups are the expensive part and the cluster deletion in
+Phase 0 is last on purpose** — verify nothing GPU-backed is still Running before you get there. A
+quick way to double-check before tearing down the cluster itself: `kubectl get pods -A | grep -i
+gpu` and `kubectl get nodes` should show nothing GPU-backed left, and your cloud console's EC2/node
+group view should agree with `kubectl` — if they disagree, trust the cloud console, since that's
+what's actually being billed.
 
 ## 10. Brief vs. reality (read this before you file a bug against your own run)
 
@@ -398,7 +693,9 @@ things worth knowing before you rely on cross-chapter paths:
 
 ## 11. CPU lab: the same platform, no GPU quota required
 
-Everything above needs GPU quota on at least one cloud. This section reaches the same milestone —
+If you don't yet have GPU quota approved on your AWS account (a real, common blocker — GPU quota
+increases can take days and aren't guaranteed), don't let that stop you from learning the *shape* of
+this platform. Everything above needs GPU quota on at least one cloud. This section reaches the same milestone —
 train something, register it, promote it, serve it, prove it end to end — with **zero** GPU and
 **zero** cloud account, reusing each earlier chapter's existing `cpu-lab/` where one exists and this
 chapter's own new `cpu-lab/` for the two pieces no chapter's CPU lab covers (queue-gated training,
@@ -550,7 +847,7 @@ cohort's CPU quota.
 </details>
 
 <details>
-<summary>8. Your <code>validate-platform.sh</code> run shows the Kueue and GPU sections healthy, but the GitOps section (<code>ch15-pipelines</code>) is empty. Is the platform broken?</summary>
+<summary>8. Your §4 "Validate everything at once" run shows the Kueue and GPU sections healthy, but the GitOps section (<code>ch15-pipelines</code>) is empty. Is the platform broken?</summary>
 
 Depends where you are in the build order — check section 4's Phase 6 was actually run. The script
 is read-only and intentionally silent (`\|\| true`) for anything not yet deployed, so an empty

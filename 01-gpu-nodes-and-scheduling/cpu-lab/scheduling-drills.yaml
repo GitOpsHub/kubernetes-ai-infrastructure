@@ -1,5 +1,5 @@
-# Run after 00-prerequisites-and-cluster-setup/cpu-lab/advertise-fake-gpu.sh has given one CPU node
-# nvidia.com/gpu=2, label fake-gpu=true and taint nvidia.com/gpu=present:NoSchedule.
+# Run after the README's Step 2 has patched one CPU node to report nvidia.com/gpu=2, labeled it
+# fake-gpu=true and tainted it nvidia.com/gpu=present:NoSchedule.
 # Predict each pod's outcome BEFORE applying. None of these containers can use a GPU.
 ---
 # A: requests a GPU, no toleration -> Pending: untolerated taint {nvidia.com/gpu: present}
