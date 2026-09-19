@@ -38,17 +38,12 @@ import os
 import shutil
 import signal
 import sys
+import traceback
 from pathlib import Path
 
 import torch
 from datasets import load_dataset
 from peft import LoraConfig, PeftModel
-from store import (
-    copy_tree_new_files,
-    is_complete,
-    latest_complete_checkpoint,
-    mark_complete,
-)
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -59,6 +54,13 @@ from transformers import (
     TrainingArguments,
 )
 from trl import SFTConfig, SFTTrainer
+
+from store import (
+    copy_tree_new_files,
+    is_complete,
+    latest_complete_checkpoint,
+    mark_complete,
+)
 
 # ----------------------------------------------------------------- config (env)
 BASE_MODEL_PATH = Path(os.environ["BASE_MODEL_PATH"])
@@ -86,7 +88,13 @@ STOP_REQUESTED = False
 def on_sigterm(_signum, _frame):
     global STOP_REQUESTED
     STOP_REQUESTED = True
-    log("SIGTERM received: will checkpoint at the end of the current step and exit")
+    # os.write, not print(): a handler that prints while the main thread is mid-print on the
+    # same stream raises "RuntimeError: reentrant call", which would turn a spot SIGTERM into
+    # an uncaught exception, i.e. exit 1 = "deterministic failure, never retried".
+    os.write(
+        2,
+        b"[finetune] SIGTERM received: will checkpoint at the end of the step and exit\n",
+    )
 
 
 def log(msg: str) -> None:
@@ -97,7 +105,10 @@ def log(msg: str) -> None:
 def precision() -> str:
     """bf16 on Ampere+; fp16 AMP on T4 (g4dn has no bf16); fp32 on CPU."""
     if torch.cuda.is_available():
-        return "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+        # including_emulation=False: the default (True) also answers True on a T4 (sm_75),
+        # because a bf16 tensor can be allocated there - it just runs emulated and slowly.
+        native_bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+        return "bf16" if native_bf16 else "fp16"
     return "fp32"
 
 
@@ -135,10 +146,12 @@ class BucketCheckpointCallback(TrainerCallback):
             return control
         try:
             copied = copy_tree_new_files(local, remote)
-        except FileExistsError as err:
-            # An earlier attempt left a partial checkpoint-N with different bytes,
-            # and the bucket cannot overwrite it. Leave it unmarked (never a resume
-            # point) and keep training; the next save goes to a new directory.
+        except OSError as err:
+            # FileExistsError: an earlier attempt left a partial checkpoint-N with
+            # different bytes, and the bucket cannot overwrite it. Any other OSError: a
+            # transient bucket/FUSE error (throttling, the mount going away while the
+            # node drains). Either way leave it unmarked (never a resume point) and keep
+            # training - crashing here would exit 1, which the workflow never retries.
             log(f"WARNING: not uploading {name}: {err}")
             return control
         mark_complete(remote)
@@ -275,4 +288,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # After SIGTERM the node is going away (the bucket mount may already be gone), so
+        # any failure is an interruption, not a bug: exit 143 so Argo retries, never 1.
+        if not STOP_REQUESTED:
+            raise
+        traceback.print_exc()
+        sys.exit(143)

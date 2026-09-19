@@ -12,7 +12,8 @@ Env
   MAX_LENGTH     truncate each conversation, same as training (default 1024)
 
 Loss is the token-weighted mean next-token cross-entropy over whole chat-formatted
-conversations - the same objective SFT optimised - and perplexity = exp(loss).
+conversations - the same objective SFT optimised (finetune.py keeps TRL's default
+assistant_only_loss=False, so system/user tokens count in both) - and perplexity = exp(loss).
 
 Results go to $RUN_DIR/eval/metrics.json, written once as a new file (the bucket
 cannot overwrite). If it already exists, a retried step re-reads it instead of
@@ -32,8 +33,9 @@ from pathlib import Path
 
 import torch
 from datasets import load_dataset
-from store import is_complete
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from store import is_complete
 
 MODEL_PATH = Path(os.environ["MODEL_PATH"])
 DATASET_PATH = Path(os.environ["DATASET_PATH"])
@@ -52,10 +54,15 @@ def log(msg: str) -> None:
 
 
 def device_and_dtype() -> tuple[str, torch.dtype]:
-    """bf16 on Ampere+, fp16 on T4 (no bf16), fp32 on CPU."""
+    """bf16 on Ampere+, fp32 on T4 and CPU.
+
+    Not fp16 on T4: Qwen-family activations can overflow fp16 and turn the loss into
+    inf/NaN, and a 0.6B model in fp32 fits a 16 GB T4 easily. including_emulation=False
+    because the default also reports bf16 "supported" (emulated, slow) on a T4.
+    """
     if torch.cuda.is_available():
-        bf16 = torch.cuda.is_bf16_supported()
-        return "cuda", torch.bfloat16 if bf16 else torch.float16
+        bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+        return "cuda", torch.bfloat16 if bf16 else torch.float32
     return "cpu", torch.float32
 
 
@@ -95,7 +102,8 @@ def score() -> dict:
     eval_loss = total_nll / total_tokens
     return {
         "eval_loss": round(eval_loss, 6),
-        "perplexity": round(math.exp(eval_loss), 4),
+        # min(): math.exp raises OverflowError above ~709; the gate catches such a loss anyway.
+        "perplexity": round(math.exp(min(eval_loss, 700.0)), 4),
         "eval_samples": len(ds),
         "eval_tokens": total_tokens,
         "max_length": MAX_LENGTH,
@@ -124,7 +132,8 @@ def main() -> None:
     LOSS_PARAM_FILE.write_text(f"{metrics['eval_loss']}")
 
     loss = metrics["eval_loss"]
-    if loss > MAX_EVAL_LOSS:
+    # NaN > x is False, so a NaN loss (numerical blow-up) would otherwise PASS the gate.
+    if not math.isfinite(loss) or loss > MAX_EVAL_LOSS:
         log(f"GATE FAILED: eval_loss {loss} > MAX_EVAL_LOSS {MAX_EVAL_LOSS}")
         sys.exit(1)
     log(f"gate passed: eval_loss {loss} <= MAX_EVAL_LOSS {MAX_EVAL_LOSS}")

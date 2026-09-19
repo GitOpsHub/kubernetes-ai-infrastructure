@@ -5,7 +5,11 @@
 #   HF_TOKEN=hf_xxx ./create-hf-secret.sh ch09-vllm
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# env.sh.example ships `export HF_TOKEN=""`, so sourcing it would wipe a token passed inline
+# (HF_TOKEN=hf_xxx ./create-hf-secret.sh): keep the caller's value if one was given.
+CALLER_HF_TOKEN="${HF_TOKEN:-}"
 [[ -f "$ROOT/env.sh" ]] && source "$ROOT/env.sh"
+HF_TOKEN="${CALLER_HF_TOKEN:-${HF_TOKEN:-}}"
 : "${HF_TOKEN:?export HF_TOKEN=hf_xxx or set it in env.sh}"
 NAMESPACE="${1:-ch09-vllm}"
 

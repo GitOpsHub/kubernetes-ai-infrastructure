@@ -13,8 +13,11 @@
 #      fork has that line, push, and let Argo CD sync. This script only prints that and exits
 #      (FORCE_HELM=true overrides).
 #
-# What workflowNamespaces buys you: the chart creates the controller's per-namespace Role/RoleBinding
-# there. Our steps run as ServiceAccount pipeline-runner, whose executor RBAC ships in common/base.
+# What workflowNamespaces buys you (chart 2.0.6, singleNamespace=false): NOT what the controller
+# watches -- it watches all namespaces through its ClusterRole. The list only decides where the
+# chart creates its default workflow ServiceAccount "argo-workflow" + executor Role/RoleBinding.
+# Our steps run as ServiceAccount pipeline-runner, whose executor RBAC ships in common/base, so
+# listing ch19-pipelines is belt-and-braces (keeps it in line with ch15's GitOps values file).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091

@@ -19,6 +19,11 @@ INCLUDE="${INCLUDE:-ch19-cpu-spot}"
 # --- 1. CPU spot node group ---
 if eksctl get nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${INCLUDE%%,*}" >/dev/null 2>&1; then
   echo "node group ${INCLUDE%%,*} already exists"
+  # cleanup.sh scales it to 0 without deleting it, and there is no cluster autoscaler in this lab:
+  # bring it back to its working size (2 nodes: parallel hf-pull steps + TEI + rag-api don't fit
+  # on one 4 vCPU node).
+  eksctl scale nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${INCLUDE%%,*}" \
+    --nodes "${CPU_NODES:-2}" --nodes-min 0 --nodes-max 3
 else
   TMP="$(mktemp -d)"; trap 'rm -rf "${TMP}"' EXIT    # rendered copy stays out of the repo
   RENDERED="${TMP}/nodegroup-ch19.yaml"

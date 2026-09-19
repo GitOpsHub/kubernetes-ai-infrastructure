@@ -27,9 +27,9 @@ This chapter reuses earlier chapters instead of rebuilding them:
   `Recreate`, grace period) and its `common/create-hf-secret.sh`, which this chapter reuses. The CPU lab
   also needs chapter 09's `cpu-lab/` Ollama.
 - **Argo Workflows** from [15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines) is
-  *optional*. Every `<cloud>/install.sh` installs it or extends it so the controller watches
-  `ch19-pipelines`. If chapter 15's Argo CD app-of-apps manages it, the script prints the GitOps path
-  and doesn't touch it.
+  *optional*. Every `<cloud>/install.sh` installs it if it's missing, or adds `ch19-pipelines` to an
+  existing Helm release's `controller.workflowNamespaces`. If chapter 15's Argo CD app-of-apps manages
+  it, the script prints the GitOps path and doesn't touch it.
 - Tools beyond chapter 00's list: the **`argo` CLI** (`brew install argo`), **Docker with buildx**
   (the trainer image is built locally), **`envsubst`** (`brew install gettext`, used by
   `eks/install.sh`) and `jq`. The CPU lab also needs `kind` or `minikube`.
@@ -245,13 +245,16 @@ sequenceDiagram
    to `resume_from_checkpoint`. That restores the optimizer, LR scheduler, RNG and data position.
 3. **SIGTERM save.** The handler only sets a flag. The callback's `on_step_end` then sets
    `control.should_save` and `control.should_training_stop`. The script exits **143**, so Argo sees a
-   failure to retry, not a success. The step runs `exec python /app/finetune.py`, so Python is the
-   process that receives the signal. A plain `sh -c "python ..."` would swallow it.
+   failure to retry, not a success. Argo's emissary executor signals the step's whole process group,
+   and the step `exec`s Python, so finetune.py's own exit code (143) is what the retry rule sees.
 4. **Retry only what an interruption could explain.** The retry policy is `limit: "10"`,
-   `retryPolicy: Always`, `expression: 'lastRetry.exitCode != "1"'`. Exit 1 means a Python exception:
-   a bad config, CUDA OOM, a conflicting partial upload. That failure is deterministic, and retrying
-   it only burns GPU-hours. 143 (SIGTERM), 137 (SIGKILL) and -1 (pod deleted) are treated as
-   interruptions.
+   `retryPolicy: Always`, `expression: 'lastRetry.exitCode != "1" && !(lastRetry.message contains
+   "OOMKilled")'`. Exit 1 means a Python exception: a bad config, CUDA OOM, a conflicting partial
+   upload. That failure is deterministic, and retrying it only burns GPU-hours. A container
+   OOMKilled by its memory limit exits 137 just like a spot SIGKILL, so the expression also checks the
+   node message Argo sets (`OOMKilled (exit code 137)`). Other 137s, 143 (SIGTERM) and -1 (pod
+   deleted) are treated as interruptions. After a SIGTERM, finetune.py turns any exception (e.g. the
+   bucket mount going away mid-drain) into 143 so an interruption is never misread as a real failure.
 5. **Idempotent completion.** If `$RUN_DIR/model/_COMPLETE` exists, the script exits 0 right away. If
    the newest checkpoint already reached `MAX_STEPS`, meaning the pod died while uploading the merged
    model, training is skipped and that checkpoint is merged directly. The merge is always "fresh base
@@ -271,7 +274,9 @@ and drain the node (chapter 00 §3.3). A hard node loss with no SIGTERM loses at
 over `EVAL_SAMPLES` (200) chat-formatted conversations from the dataset's **test** split. That's the
 same objective SFT optimized, and perplexity = exp(loss). It writes `$RUN_DIR/eval/metrics.json`
 once (create-only). It exposes `eval_loss` as the workflow output `eval-loss`, and **exits 1 if
-`eval_loss > MAX_EVAL_LOSS`** (2.5 by default). Exit 1 is excluded from the step's retry expression,
+`eval_loss > MAX_EVAL_LOSS`** (2.5 by default) **or if the loss is not finite**. `NaN > 2.5` is false
+in Python, so a numerically blown-up model would otherwise pass. It scores in bf16 on L4 and in
+fp32 on T4, not fp16, because fp16 can overflow to inf/NaN on Qwen-family models. Exit 1 is excluded from the step's retry expression,
 so a failed gate ends the DAG before `publish`. A retry *after* metrics exist re-reads the recorded
 numbers instead of re-scoring. The gate therefore always judges the same numbers, and re-submitting
 the same `run-id` with a different `-p max-eval-loss` re-judges them without retraining.
@@ -314,8 +319,12 @@ flowchart LR
 - **Qwen3 thinking.** By default Qwen3 emits `<think>…</think>` before answering, which costs tokens
   and latency. With `DISABLE_THINKING=true`, `build_llm` sends
   `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`. vLLM forwards it to the chat
-  template. `strip_think` still removes any reasoning that gets through, for example from a server
-  that ignores the field, or from an answer cut off mid-thought by `max_tokens`.
+  template. Ollama (cpu-lab) drops `chat_template_kwargs` and thinks by default, returning the
+  reasoning in a separate `reasoning` field. Its only off-switch on `/v1` is
+  `reasoning_effort: "none"`, so `cpu-lab/params.env` sets `REASONING_EFFORT=none` and `build_llm`
+  adds it to `extra_body`. Leave it unset for vLLM, which validates that field (a `# VERIFY:` item).
+  `strip_think` still removes any `<think>` text that gets through, for example from an answer cut
+  off mid-thought by `max_tokens`.
 - **No image build for the app.** `rag-api` runs the stock uv image with
   `uv run /opt/app/rag_api.py`. The script is PEP 723, so its dependency pins are inline, and uv
   installs them on first start. That's why the `startupProbe` allows 15 minutes. For production,
@@ -390,11 +399,15 @@ kubectl kustomize 19-llm-pipelines-huggingface-langchain/eks | less
 
 What you're about to do: `eks/install.sh` creates the managed node group `ch19-cpu-spot`
 (`nodegroup-ch19.yaml`: spot `m7i.xlarge`/`m6i.xlarge`/`m6a.xlarge`/`m5.xlarge`, `minSize 0`,
-`desiredCapacity 1`, `maxSize 3`, 100 GB disks for scratch and uv caches). The pull, publish and
+`desiredCapacity 2`, `maxSize 3`, 100 GB disks for scratch and uv caches). The pull, publish and
 batch steps, TEI and rag-api run on it. The script then calls `common/install-argo-workflows.sh`,
 which installs Argo Workflows (chart `${ARGO_WORKFLOWS_VERSION}` = 2.0.6, app v4.1.3). If Argo
 Workflows is already installed, the script adds `ch19-pipelines` to the controller's existing
-`workflowNamespaces` list instead of replacing it. `INCLUDE=ch19-cpu-ondemand` creates the on-demand
+`workflowNamespaces` list instead of replacing it. In chart 2.0.6 that list does **not** limit what
+the controller watches: the controller watches all namespaces through its ClusterRole. The list only
+decides where the chart creates its default `argo-workflow` ServiceAccount and executor Role. This
+chapter's steps run as `pipeline-runner`, which has its own executor RBAC in `common/base`, so listing
+`ch19-pipelines` is harmless and keeps the Helm path consistent with chapter 15's GitOps values file. `INCLUDE=ch19-cpu-ondemand` creates the on-demand
 fallback group instead of the spot one.
 
 ```bash
@@ -425,8 +438,8 @@ kubectl get nodes -l eks.amazonaws.com/nodegroup=ch19-cpu-spot -L eks.amazonaws.
 helm get values argo-workflows -n argo -o json | jq '.controller.workflowNamespaces'
 ```
 
-**How to tell this worked**: one `Ready` node with `CAPACITYTYPE` `SPOT`, and the namespace list
-contains `"ch19-pipelines"`.
+**How to tell this worked**: one `Ready` node with `CAPACITYTYPE` `SPOT`, the namespace list
+contains `"ch19-pipelines"`, and `kubectl get crd workflowtemplates.argoproj.io` succeeds.
 
 #### Step 2: Bucket, Pod Identity, Mountpoint add-on
 
@@ -467,7 +480,8 @@ What you're about to do: build `common/src/trainer/` for `linux/amd64` with `TOR
 The Dockerfile starts from `python:3.12-slim-trixie` and copies in the uv 0.12.15 binary. It installs
 `torch==2.13.0` from the PyTorch cu129 wheel index, then installs `requirements.txt` with a
 `torch==2.13.0` constraint so nothing swaps in another torch build. The script pushes the image to the
-ECR repo `ch19-trainer`, creating it with scan-on-push if needed. It writes `eks/images.env`, which
+ECR repo `ch19-trainer`, creating it with scan-on-push if needed and setting a lifecycle policy
+that keeps the newest 5 images. It writes `eks/images.env`, which
 kustomize injects into the `finetune`, `evaluate` and `publish` templates. The tag defaults to the
 current git commit, and `TAG=v2` overrides it. `--platform linux/amd64` matters on Apple silicon: an
 arm64 image fails on the GPU node with `exec format error`. The image is large (~6–8 GB of torch +
@@ -495,9 +509,8 @@ TRAINER_IMAGE=123456789012.dkr.ecr.us-east-1.amazonaws.com/ch19-trainer:02f48c2
 
 What you're about to do: create the Secret `hf-token` (key `HF_TOKEN`) in `ch19-pipelines` with
 chapter 09's script. Every pod references it with `optional: true`, so the lab works without it. A
-token avoids anonymous Hub rate limits. The script sources `env.sh`, so **put the token in
-`env.sh`'s `HF_TOKEN`**. An inline `HF_TOKEN=... ./create-hf-secret.sh` prefix is overwritten when
-`env.sh` sets `HF_TOKEN=""`.
+token avoids anonymous Hub rate limits. Put it in `env.sh`'s `HF_TOKEN`, or pass it inline
+(`HF_TOKEN=hf_xxx ./create-hf-secret.sh ch19-pipelines`); an inline value wins over `env.sh`.
 
 ```bash
 ./09-llm-inference-with-vllm/common/create-hf-secret.sh ch19-pipelines
@@ -690,6 +703,13 @@ Expected output (abridged):
 interrupted>`, not "starting from scratch". `argo get -n ch19-pipelines @latest` shows `finetune` with
 two attempts, the first failed with exit 143 and the second succeeded. The evaluate step then prints
 its metrics JSON and `[evaluate] gate passed: eval_loss ... <= MAX_EVAL_LOSS 2.5`.
+
+If a whole workflow fails, for example because it ran out of retries while spot capacity was dry, two
+recoveries resume the same checkpoints. `argo retry -n ch19-pipelines <wf>` re-runs the failed nodes of
+the **same** workflow, with the same parameters and so the same `run-id`. Submitting again with the same
+`-p run-id=qwen3-sft-001` works too. Avoid `argo resubmit` unless you also pass `-p run-id=...`: it
+creates a new workflow, and a `run-id` that came from the `{{workflow.name}}` default would change,
+which means starting from scratch.
 
 #### Step 9: Inspect the bucket
 
@@ -1044,7 +1064,7 @@ mount (see the comment at the top of `setup-blob-iam.sh`).
 What changes (`cpu-lab/kustomization.yaml`): `model-store` is a plain `ReadWriteOnce` PVC (`pvc.yaml`,
 20 Gi from the default StorageClass). `pipeline-params` is **replaced** by `cpu-lab/params.env`:
 `HuggingFaceTB/SmolLM2-135M-Instruct`, `MAX_STEPS=20`, `SAVE_STEPS=10`, `MAX_EVAL_LOSS=3.5`,
-`TRAIN_SAMPLES=200`, `EVAL_SAMPLES=50`, `MAX_LENGTH=512`. The trainer image uses CPU torch.
+`TRAIN_SAMPLES=200`, `EVAL_SAMPLES=50`, `MAX_LENGTH=512`, and `REASONING_EFFORT=none` to turn off Ollama's Qwen3 thinking. The trainer image uses CPU torch.
 `patch-cpu-steps.yaml` strips the GPU requests, tolerations and `/dev/shm` from `finetune` and
 `evaluate`. **There's no vLLM** (`patch-delete-vllm.yaml`): rag-api and the batch pipeline call chapter
 09's Ollama at `http://ollama.ch09-vllm-cpu.svc.cluster.local:11434/v1` with model `qwen3:0.6b`. TEI
@@ -1155,23 +1175,24 @@ Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Ins
 | Symptom | Cause | Fix |
 |---|---|---|
 | `finetune`/`evaluate` pod `Pending`: `Insufficient nvidia.com/gpu` | vLLM holds the only GPU (`spot-gpu` `maxSize: 1`), or the EKS GPU group is at 0 nodes (no autoscaler) | `kubectl -n ch19-pipelines scale deploy/vllm --replicas=0`; `NODES=1 ./01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh`; or raise `maxSize` to 2 |
-| A pull step or TEI `Pending`: `Insufficient cpu` on EKS | `ch19-cpu-spot` has one node and EKS has no cluster autoscaler. The two parallel pulls (1 CPU each), TEI (1 CPU) and rag-api fill a 4-vCPU node | `eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name ch19-cpu-spot --nodes 2 --nodes-max 3` |
-| `argo submit` works but no pods ever start; the workflow has no status | The controller doesn't watch `ch19-pipelines` | Re-run `common/install-argo-workflows.sh`; if Argo CD owns Argo Workflows, sync `ch15-argo-workflows` with `ch19-pipelines` in `values-argo-workflows.yaml` |
+| A pull step or TEI `Pending`: `Insufficient cpu` on EKS | `ch19-cpu-spot` is below 2 nodes (spot reclaim, or `CPU_NODES=1`) and EKS has no cluster autoscaler. The two parallel pulls (1 CPU each), TEI (1 CPU) and rag-api don't fit on one 4-vCPU node | `eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name ch19-cpu-spot --nodes 2 --nodes-max 3` |
+| `argo submit` works but no pods ever start; the workflow has no status | The workflow controller isn't running, or was installed with `singleNamespace=true` for a different namespace. With chart defaults it watches every namespace, so `workflowNamespaces` isn't the cause | `kubectl -n argo get deploy argo-workflows-workflow-controller`; `kubectl -n argo logs deploy/argo-workflows-workflow-controller \| tail`; re-run `common/install-argo-workflows.sh` |
 | Steps "succeed" but the DAG hangs or fails with `failed to create WorkflowTaskResult ... forbidden` | Executor RBAC missing (`common/base/rbac-argo-executor.yaml`: `workflowtaskresults` create/patch for `pipeline-runner`) | `kubectl apply -k <overlay>`; check `kubectl -n ch19-pipelines get rolebinding pipeline-runner-argo-executor` |
 | A directory literally named `{{workflow.name}}` appears under `runs/` | **`# VERIFY:`** in `workflowtemplate-hf-finetune.yaml`: the `run-id` default is itself a tag, which relies on Argo substituting a second time. Not verified against Argo v4.1.3 | Always pass `-p run-id=<name>` (the lab does) |
 | Step pod stuck `ContainerCreating`, `MountVolume.SetUp failed ... AccessDenied` (EKS) | No Pod Identity association for the pod's ServiceAccount, or the pod started before it existed | Re-run `eks/setup-s3-iam.sh`; delete the pod; `kubectl -n mount-s3 get pods -o wide` shows the Mountpoint pod for that node |
 | `FileExistsError: ... already exists with different content` / `exists with a different size and the bucket cannot overwrite it` | An earlier attempt left partial files with different bytes (e.g. after you changed `LORA_R`, or a different image tag, for the same `run-id`). `pipeline-runner` has no `s3:DeleteObject` on purpose | Use a new `run-id`, or delete the prefix yourself: `aws s3 rm "s3://${S3_BUCKET}/runs/<run-id>/model/" --recursive` |
 | `evaluate` fails, log `GATE FAILED: eval_loss X > MAX_EVAL_LOSS 2.5`, no retry | Working as designed: exit 1 is final | Train more (new `run-id`, higher `-p max-steps`), or re-judge the recorded numbers: same `run-id` with `-p max-eval-loss=<higher>` (no retraining) |
-| `finetune` retried again and again with exit 137 | `OOMKilled` by the 13 Gi memory limit. The retry expression treats 137 like a spot SIGKILL | `kubectl -n ch19-pipelines describe pod <pod> \| grep -i oomkilled`; lower `PER_DEVICE_BATCH`/`MAX_LENGTH` in `params.env`, `kubectl apply -k`, new `run-id` |
+| `finetune` Failed after one attempt, message `OOMKilled (exit code 137)` | Host memory above the 13 Gi limit. The retry expression deliberately doesn't retry OOMKilled (it would OOM again) | Lower `PER_DEVICE_BATCH`/`MAX_LENGTH` in `params.env`, `kubectl apply -k`, then resubmit with the same `run-id` to resume from the last checkpoint |
 | `finetune` fails once with `CUDA out of memory`, no retry | Exit 1, deterministic by design | Lower `PER_DEVICE_BATCH` or `MAX_LENGTH` (T4s have 16 GB and run fp32 master weights) |
 | Trainer pod `exec format error` | Image built for arm64 on Apple silicon | Use the `build-push-*.sh` scripts (they pass `--platform linux/amd64`); don't `docker build` by hand for the GPU clouds |
 | vLLM stuck `Init:0/1`, log `waiting for /mnt/store/runs/.../model/_COMPLETE` | Typo or wrong `run-id` in `serving.env`, or training hasn't finished | Compare with the workflow's `model-path` output (Step 10); `aws s3 ls "s3://${S3_BUCKET}/runs/"` |
 | rag-api `0/1` for minutes, log `TEI at ... not ready (attempt N)` | First start: uv installs dependencies from PyPI, then waits for TEI to download bge-small | Normal for up to ~15 min (`startupProbe` 90 × 10 s). After `EMBEDDINGS_WAIT_SECONDS` (600) `/healthz` returns 503 and the pod restarts; check `kubectl -n ch19-pipelines logs deploy/tei` |
 | `/ask` or `/chat` returns **502** while `/readyz` is 200 | vLLM (or Ollama) unreachable: scaled to 0, rolling out, or wrong `OPENAI_BASE_URL` | Readiness deliberately ignores the LLM; `kubectl -n ch19-pipelines get deploy vllm`; scale it back to 1 |
-| Answers include reasoning text or are empty in cpu-lab | **`# VERIFY:`** in `cpu-lab/params.env`: whether Ollama's `qwen3:0.6b` puts its `<think>` block in `content` over `/v1`. `chat_template_kwargs` is a vLLM extension that Ollama ignores | `strip_think` removes `<think>...</think>` blocks and dangling tags. If reasoning still eats `MAX_TOKENS`, raise it in `rag-api-deployment.yaml` |
-| `batch-infer` exits 1: `N/12 (>50%) failed -- writing nothing` | The LLM went away mid-batch (`wait-for-llm` only checks `/models` once) | Fix vLLM, then `argo retry -n ch19-pipelines <wf>` or submit again; nothing partial was written |
+| Empty answers in cpu-lab | Ollama ignores `chat_template_kwargs`, so `qwen3:0.6b` spends all of `MAX_TOKENS` reasoning. `REASONING_EFFORT=none` (in `cpu-lab/params.env`) is the off-switch; the batch step gets it via `envFrom` and rag-api via an `optional` key ref | `kubectl -n ch19-pipelines exec deploy/rag-api -- env \| grep REASONING` must print `REASONING_EFFORT=none`; if not, re-apply `cpu-lab` so rag-api picks up the ConfigMap |
+| HTTP 400 mentioning `reasoning_effort` from vLLM | **`# VERIFY:`** in `rag_chain.py`: vLLM v0.29 is believed to accept only `low\|medium\|high`, not `none` | Leave `REASONING_EFFORT` unset for the GPU overlays (`common/base/params.env` doesn't set it) |
+| `batch-infer` exits 1: `N/12 (>50%) failed -- writing nothing` | The LLM went away mid-batch (`wait-for-llm` only checks `/models` once) | Fix vLLM, then `argo retry -n ch19-pipelines <wf>` (same workflow name, so the same `batch/<wf>/` output dir) or submit again (new dir); nothing partial was written |
 | GKE step pods stay `Running` after the main container finished | **`# VERIFY:`** in `gke/patch-workflow-gke.yaml`: step pods can complete only if the gcsfuse sidecar is injected as a *native* sidecar (GKE ≥ 1.29) | Check the control-plane version; the sidecar should appear under `initContainers` |
-| GKE `install.sh`/`cleanup.sh`: cluster or node pool `not found` | The scripts pass `--location "${REGION}"`, but chapter 00 creates a **zonal** cluster (`--location "$ZONE"`) | Run those two scripts as `REGION="$ZONE" ./gke/install.sh` (they only use `REGION` for cluster commands). Don't do that for `setup-gcs-iam.sh` or the build script, which need the real region |
+| GKE `install.sh`/`cleanup.sh`: cluster or node pool `not found` | The scripts address the cluster with `--location "${GKE_LOCATION}"`, which defaults to `$ZONE` because chapter 00 creates a zonal cluster. A regional cluster isn't found there | `GKE_LOCATION="$REGION" ./gke/install.sh` (same for `cleanup.sh`). The bucket and Artifact Registry always use `$REGION` |
 | cpu-lab TEI pod `exec format error` / `CrashLoopBackOff` on an arm64 laptop | The pinned TEI CPU image may not ship an arm64 variant | `docker manifest inspect ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4`; run kind on an amd64 host or enable amd64 emulation in Docker Desktop |
 
 ## 7. Cleanup and cost notes
@@ -1204,9 +1225,8 @@ installed, since it's shared with chapter 15 (`helm uninstall argo-workflows -n 
 uses it). GKE's and AKS's `DELETE_CLOUD_RESOURCES=true` delete the bucket or storage account, the
 registry and the chapter's CPU pool(s) the same way.
 
-Coming back after a default cleanup on EKS: `install.sh` skips node-group creation because the group
-still exists, so scale it back up yourself:
-`eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name ch19-cpu-spot --nodes 1`.
+Coming back after a default cleanup on EKS: re-run `eks/install.sh`. When `ch19-cpu-spot` already
+exists it scales it back to 2 nodes (`CPU_NODES=1 ./install.sh` for one) instead of creating it.
 
 Cost notes (EKS, us-east-1 ballpark; check current pricing):
 
@@ -1215,15 +1235,16 @@ Cost notes (EKS, us-east-1 ballpark; check current pricing):
   g6.xlarge --product-descriptions Linux/UNIX --max-items 5`. The pipeline needs the GPU for training
   and evaluation (tens of minutes). vLLM holds it for as long as it runs, because nothing here scales
   it to zero. Scale it to 0 or run chapter 01's cleanup when you stop.
-- **CPU node:** one spot `m7i.xlarge`-class node for as long as `ch19-cpu-spot` has `desiredCapacity`
-  1. The default cleanup scales it to 0.
+- **CPU nodes:** two spot `m7i.xlarge`-class nodes for as long as `ch19-cpu-spot` is at its
+  `desiredCapacity` of 2. The default cleanup scales it to 0.
 - **S3:** one run stores roughly 3–4 GB: base model ~1.5 GB, merged model ~1.5 GB, the dataset, and
   adapter checkpoints of tens to low hundreds of MB each. That's cents per month at S3 Standard, and
   it grows with every `run-id` until you delete it. Downloads from the Hub are internet ingress (free),
   but they're billed as NAT gateway data processing if your nodes sit in private subnets. That's
   another reason to pull once into the bucket.
 - **ECR:** the trainer image is ~6–8 GB, billed per GB-month. Every rebuild with a new tag adds its
-  changed layers. `DELETE_CLOUD_RESOURCES=true` removes the whole repository.
+  changed layers, so `build-push-ecr.sh` sets a lifecycle policy on `ch19-trainer` that keeps only
+  the newest 5 images. `DELETE_CLOUD_RESOURCES=true` removes the whole repository.
 - **cpu-lab:** free apart from your laptop, but the 20 Gi PVC holds real data until `cpu-lab/cleanup.sh`
   deletes the namespace.
 
@@ -1253,13 +1274,14 @@ no SIGTERM save, so it resumes from the last periodic checkpoint (`checkpoint-50
 </details>
 
 <details>
-<summary>3. Why does the finetune retry strategy exclude exit code 1, and which kind of failure does that expression still retry even though it arguably shouldn't?</summary>
+<summary>3. Why does the finetune retry strategy exclude exit code 1, and why does it need a second check besides the exit code?</summary>
 
 Exit 1 is what Python returns for an unhandled exception or `sys.exit("message")`: a bad config, CUDA
 OOM, a conflicting partial upload. It fails the same way every time, so ten retries would only burn
 GPU-hours. Everything else (143 SIGTERM, 137 SIGKILL, -1 pod deleted) looks like an interruption. The
-catch is that a container **OOMKilled** by its memory limit also exits 137, so it's retried like a spot
-kill until the retry limit or `activeDeadlineSeconds` stops it. Check `describe pod` for `OOMKilled`.
+catch is that a container **OOMKilled** by its memory limit also exits 137, and it would OOM again on
+every retry. Exit codes can't tell the two apart, so the expression also rejects retries whose node
+message contains `OOMKilled` (Argo writes `OOMKilled (exit code 137)` there).
 </details>
 
 <details>
@@ -1306,8 +1328,9 @@ per request because that's TEI's default `--max-client-batch-size`. Bigger reque
 
 `build_llm` adds `extra_body={"chat_template_kwargs": {"enable_thinking": False}, "max_tokens": ...}`
 to every chat completion. vLLM passes `chat_template_kwargs` to Qwen3's chat template, which then skips
-the `<think>` block. `strip_think` is a safety net for servers that ignore the field (Ollama in
-cpu-lab, which is a `# VERIFY:` item), a dangling `</think>` whose opening tag was in the prompt, or an
+the `<think>` block. Ollama (cpu-lab) ignores the field, which is why `cpu-lab/params.env` also sets
+`REASONING_EFFORT=none` (sent as `reasoning_effort`). `strip_think` is a safety net for anything that
+still leaks: a dangling `</think>` whose opening tag was in the prompt, or an
 answer cut off mid-thought by `max_tokens`.
 </details>
 

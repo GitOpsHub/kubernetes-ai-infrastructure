@@ -39,9 +39,13 @@ spec:
       value: REPLACED_FROM_PARAMS
     # Checkpoints + final model live under /mnt/store/runs/<run-id>/. Re-submitting with the SAME
     # run-id resumes from its last complete checkpoint (or is a no-op if the model is complete).
-    # VERIFY: a global parameter whose value is itself a tag ("{{workflow.name}}") relies on Argo
-    # substituting the result a second time; if you see a literal "{{workflow.name}}" directory in
-    # the bucket, always pass -p run-id=<name> explicitly.
+    # Default "{{workflow.name}}" resolves because run-id only reaches a pod through a template
+    # INPUT: the DAG passes the literal tag on, and Argo's SubstituteParams replaces globals
+    # (workflow.name) inside inputs.parameters before it substitutes {{inputs.parameters.*}}
+    # (v4.1.3 workflow/common/util.go). Keep it that way: referencing
+    # {{workflow.parameters.run-id}} directly inside a container/env would stay a literal tag.
+    # `argo retry` keeps the name (resumes); `argo resubmit` gets a new name = fresh run unless
+    # you pass -p run-id=<old run-id>.
     - name: run-id
       value: "{{workflow.name}}"
     - name: max-steps
@@ -195,7 +199,9 @@ spec:
     retryStrategy:
       limit: "10"
       retryPolicy: Always
-      expression: 'lastRetry.exitCode != "1"'
+      # OOMKilled also exits 137 like a spot SIGKILL, but it will OOM again on every retry: stop.
+      # Argo sets the node message to "... OOMKilled (exit code 137) ..." (operator.go, v4.1.3).
+      expression: 'lastRetry.exitCode != "1" && !(lastRetry.message contains "OOMKilled")'
       backoff:
         duration: "30s"                   # time for the node group / autoscaler to bring a new node
         factor: "2"
@@ -211,8 +217,10 @@ spec:
       effect: NoSchedule
     container:
       image: ch19-trainer:REPLACED_BY_OVERLAY
-      # Write the output parameter first, then exec: python becomes the process argoexec signals
-      # directly (a plain `sh -c "python ..."` would swallow SIGTERM and lose the graceful save).
+      # Write the output parameter first, then exec so python replaces the shell. Argo's emissary
+      # (PID 1 in the container) forwards SIGTERM to the child's whole process group, so python
+      # gets the signal either way; exec just removes the shell so finetune.py's exit code
+      # (143 after a graceful SIGTERM save) is exactly what retryStrategy.expression sees.
       command: ["/bin/sh", "-c"]
       args:
       - printf '%s' "${RUN_DIR}/model" > /tmp/model-path.txt && exec python /app/finetune.py
@@ -312,9 +320,11 @@ spec:
       parameters:
       - name: model-path
       - name: hf-push-repo
+    # Exit 1 = missing/read-only token or bad repo name: retrying can't fix it. Network errors retry.
     retryStrategy:
       limit: "3"
       retryPolicy: Always
+      expression: 'lastRetry.exitCode != "1"'
       backoff:
         duration: "20s"
         factor: "2"

@@ -81,7 +81,7 @@ flowchart LR
 | 18 | [Infrastructure as Code](18-infrastructure-as-code/) | How would a platform team actually provision these clusters (Terraform, not CLI scripts)? | 1–2 |
 | 19 | [LLM pipelines on EKS: Hugging Face + LangChain](19-llm-pipelines-huggingface-langchain/) | How do I wire a Hugging Face model → fine-tune → serve → LangChain app pipeline on AWS? | 2 |
 
-**About 30–36 days at 3 hours/day** (roughly 6–7 weeks at 5 days/week).
+**About 29–37 days at 3 hours/day** (roughly 6–8 weeks at 5 days/week).
 
 ## Suggested daily rhythm (3 hours)
 

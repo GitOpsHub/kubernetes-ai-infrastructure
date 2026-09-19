@@ -42,6 +42,10 @@ spec:
         - name: DISABLE_THINKING
           valueFrom:
             configMapKeyRef: {name: pipeline-params, key: DISABLE_THINKING}
+        # Only cpu-lab sets it (=none: the one switch that turns off qwen3 thinking on Ollama's /v1).
+        - name: REASONING_EFFORT
+          valueFrom:
+            configMapKeyRef: {name: pipeline-params, key: REASONING_EFFORT, optional: true}
         - {name: OPENAI_API_KEY, value: not-needed}
         - {name: DOCS_DIR, value: /opt/rag-docs}
         - {name: TOP_K, value: "4"}

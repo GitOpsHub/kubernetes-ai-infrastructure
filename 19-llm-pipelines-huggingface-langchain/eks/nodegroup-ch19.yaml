@@ -13,7 +13,7 @@ managedNodeGroups:
     spot: true
     instanceTypes: ["m7i.xlarge", "m6i.xlarge", "m6a.xlarge", "m5.xlarge"]
     minSize: 0
-    desiredCapacity: 1
+    desiredCapacity: 2             # no autoscaler: 2x hf-pull (1 CPU each) + TEI + rag-api need 2 nodes
     maxSize: 3
     volumeSize: 100                # hf-pull scratch + uv caches live on node ephemeral storage
     labels:

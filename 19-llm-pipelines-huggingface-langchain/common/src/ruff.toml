@@ -1,0 +1,7 @@
+# Lint config for this chapter's Python. store.py / rag_chain.py are sibling modules imported by
+# plain name (the scripts run as `python /app/x.py` / `uv run /opt/app/x.py`), so tell isort they
+# are first-party -- otherwise the import order ruff wants depends on the directory it runs from.
+target-version = "py312"
+
+[lint.isort]
+known-first-party = ["store", "rag_chain"]

@@ -21,6 +21,10 @@ if ! aws ecr describe-repositories --repository-names "${REPO}" --region "${AWS_
   aws ecr create-repository --repository-name "${REPO}" --region "${AWS_REGION}" \
     --image-scanning-configuration scanOnPush=true >/dev/null
 fi
+# Every rebuild pushes another ~6-8 GB image, and ECR bills per GB-month: keep only the newest 5.
+aws ecr put-lifecycle-policy --repository-name "${REPO}" --region "${AWS_REGION}" \
+  --lifecycle-policy-text '{"rules":[{"rulePriority":1,"description":"keep last 5 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":5},"action":{"type":"expire"}}]}' \
+  >/dev/null
 aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
 
 # --platform: EKS GPU nodes are x86_64; building on an Apple-silicon laptop would otherwise
