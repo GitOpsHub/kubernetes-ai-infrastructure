@@ -1,9 +1,0 @@
-# AKS: run ./install-kserve.sh first (reuses the "gpuspot" node pool from
-# 01-gpu-nodes-and-scheduling for the generative/ LLMInferenceService).
-#   kubectl apply -k 11-kserve/aks                 # namespace + predictive (CPU, no GPU needed)
-#   kubectl apply -k 11-kserve/aks/generative       # LLMInferenceService (GPU)
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- ../common
-- ../common/predictive

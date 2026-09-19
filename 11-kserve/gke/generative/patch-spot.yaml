@@ -1,7 +1,0 @@
-# GKE adds the nvidia.com/gpu=present:NoSchedule taint automatically (base already tolerates it,
-# see common/generative/llminferenceservice-qwen.yaml).
-- op: add
-  path: /spec/template/nodeSelector
-  value:
-    cloud.google.com/gke-spot: "true"
-    cloud.google.com/gke-accelerator: nvidia-l4

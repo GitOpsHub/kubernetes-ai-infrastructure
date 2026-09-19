@@ -1,8 +1,7 @@
 # 01 · GPU Nodes and Scheduling
 
 > How a GPU actually reaches a Pod: node images, drivers, the device plugin, extended resources, and
-> the labels/taints/tolerations you need on GKE, EKS and AKS. Ends with a real CUDA job on spot GPU
-> nodes on each cloud.
+> the labels/taints/tolerations you need on EKS. Ends with a real CUDA job on a spot GPU node.
 
 ## Before you start
 
@@ -28,14 +27,14 @@ By the end you can:
 1. Explain the four things a GPU node needs before a pod can use `nvidia.com/gpu`: driver, container
    runtime/toolkit integration, device plugin, and scheduler-visible labels/taints.
 2. Read `kubectl describe node` and explain every GPU-related label, taint, and allocatable field.
-3. Create a spot GPU node pool/nodegroup on at least one cloud and run a real CUDA job on it.
-4. Explain why GKE, EKS and AKS each ship the driver differently, and what that means for chapter 02.
+3. Create a spot GPU managed node group on EKS and run a real CUDA job on it.
+4. Explain how EKS ships the driver (baked into the AMI), and what that means for chapter 02.
 5. Debug the four or five most common "GPU pod stuck" failure modes without guessing.
 
 | Time | Activity |
 |---|---|
 | 0:00–0:30 | Read section 3 (concepts). Skim `common/` manifests |
-| 0:30–1:15 | Create a GPU node pool on your cloud (`<cloud>/create-gpu-node*.sh`), install the device plugin where needed |
+| 0:30–1:15 | Create a GPU node group, install the device plugin |
 | 1:15–1:45 | Run `nvidia-smi-pod` and `cuda-vectoradd-job`, read `kubectl describe node` |
 | 1:45–2:15 | `cpu-lab/scheduling-drills.yaml` — predict-then-run the taint/toleration/nodeSelector drills |
 | 2:15–2:45 | Break things on purpose (remove a toleration, request 0.5 GPU, scale to 2 replicas on a 1-GPU pool) |
@@ -75,27 +74,27 @@ flowchart TD
   (Kubernetes rejects anything else for extended resources; see `00-prerequisites-and-cluster-setup`
   fake-GPU lab for the same rule with a fake resource).
 
-### 3.2 Who installs the driver, per cloud
+### 3.2 Who installs the driver
 
-| | GKE | EKS | AKS |
-|---|---|---|---|
-| Driver install | GKE-managed DaemonSet on Container-Optimized OS / Ubuntu, chosen by `--accelerator gpu-driver-version=...` at node-pool create time | Baked into the **AL2023 NVIDIA-accelerated AMI** (`amiFamily: AmazonLinux2023` + a GPU instance type); driver, CUDA libs, nvidia-container-toolkit preinstalled by `nodeadm` | AKS's own **AKSGPUDriver** installer, default on NVIDIA VM sizes (`--gpu-driver Install`, the default) |
-| Container toolkit | Preinstalled with the driver | Preinstalled on the AL2023 NVIDIA AMI | Not installed by AKS — you install the device plugin yourself; the plugin's runtime hook needs the toolkit, which ships with the driver-enabled image |
-| Device plugin | GKE installs its own by default | **Not installed** (this chapter installs a pinned one) | **Not installed** (this chapter installs a pinned one) |
-| Skip the cloud's driver (for chapter 02, GPU Operator) | `gpu-driver-version=disabled` | N/A — the AMI always has one; Operator installs on top with `driver.enabled=false` | `--gpu-driver none` (az CLI ≥ 2.72.2) |
+| | EKS |
+|---|---|
+| Driver install | Baked into the **AL2023 NVIDIA-accelerated AMI** (`amiFamily: AmazonLinux2023` + a GPU instance type); driver, CUDA libs, nvidia-container-toolkit preinstalled by `nodeadm` |
+| Container toolkit | Preinstalled on the AL2023 NVIDIA AMI |
+| Device plugin | **Not installed** (this chapter installs a pinned one) |
+| Skip the driver (for chapter 02, GPU Operator) | N/A — the AMI always has one; the Operator installs on top with `driver.enabled=false` |
 
-This chapter uses each cloud's own driver path. Chapter 02 (NVIDIA GPU Operator) replaces parts of
-this stack with a single cross-cloud Helm chart — useful when you want the same DCGM/GFD/MIG story
-everywhere, at the cost of managing the driver yourself on GKE/AKS.
+This chapter uses EKS's own driver path (baked into the AMI). Chapter 02 (NVIDIA GPU Operator)
+replaces parts of this stack with a single Helm chart — useful when you want the same DCGM/GFD/MIG
+story managed by one component instead of the AMI.
 
-### 3.3 Labels, taints, tolerations per cloud
+### 3.3 Labels, taints, tolerations
 
-| | GKE (`spot-gpu` pool, this chapter's script) | EKS (`spot-gpu` nodegroup) | AKS (`gpuspot` pool) |
-|---|---|---|---|
-| GPU taint | `nvidia.com/gpu=present:NoSchedule` (**GKE adds this automatically**) | `nvidia.com/gpu=present:NoSchedule` (set explicitly in `gpu-nodegroups.yaml`) | `nvidia.com/gpu=present:NoSchedule` (set explicitly with `--node-taints`) |
-| GPU label | `cloud.google.com/gke-accelerator=nvidia-l4` (automatic) | `nvidia.com/gpu.present=true` (set at boot by `nodeadm` on the AL2023 NVIDIA AMI) | `nvidia.com/gpu.present=true` (we set it with `--labels`; AKS has no NFD to set it for us) |
-| Spot label | `cloud.google.com/gke-spot=true` | `eks.amazonaws.com/capacityType=SPOT` | `kubernetes.azure.com/scalesetpriority=spot` |
-| Spot taint (automatic?) | No | No | **Yes** — every AKS spot pool is auto-tainted |
+| | EKS (`spot-gpu` nodegroup) |
+|---|---|
+| GPU taint | `nvidia.com/gpu=present:NoSchedule` (set explicitly in `gpu-nodegroups.yaml`) |
+| GPU label | `nvidia.com/gpu.present=true` (set at boot by `nodeadm` on the AL2023 NVIDIA AMI) |
+| Spot label | `eks.amazonaws.com/capacityType=SPOT` |
+| Spot taint (automatic?) | No |
 
 Every pod in `common/` requests `nvidia.com/gpu: 1` with no cloud-specific fields; each cloud's
 `kustomization.yaml` applies a JSON6902 patch (`patch-pod.yaml`, `patch-job.yaml`) adding the right
@@ -120,61 +119,47 @@ source env.sh && source versions.env
 
 Read them before applying anything — this is the entire cloud-agnostic surface.
 
-What you're about to do next: create a real GPU node pool on your cloud, install a device plugin
-where the cloud doesn't ship one, then run `nvidia-smi-pod` and `cuda-vectoradd-job` to prove the
-whole chain works end to end.
+What you're about to do next: create a real GPU node group on EKS, install a device plugin (the AMI
+doesn't ship one), then run `nvidia-smi-pod` and `cuda-vectoradd-job` to prove the whole chain works
+end to end.
 
-<details><summary>GKE</summary>
-
+Create the spot GPU managed node group (`INCLUDE=ondemand-gpu` also creates the on-demand fallback
+defined in [`eks/gpu-nodegroups.yaml`](eks/gpu-nodegroups.yaml); existing groups are skipped):
 ```bash
-./01-gpu-nodes-and-scheduling/gke/create-gpu-nodepool.sh   # spot-gpu, g2-standard-4 + 1x L4, min 0 max 1
-```
-Expected output:
-```
-config.accelerators:
-- acceleratorCount: '1'
-  acceleratorType: nvidia-l4
-  gpuDriverInstallationConfig: {gpuDriverVersion: LATEST}
-config.spot: true
-autoscaling: {enabled: true, maxNodeCount: 1}
-```
-How to tell this worked: the pool shows up in `gcloud container node-pools list`. The driver and
-GKE's own device plugin come with the pool — nothing else to install.
-```bash
-NODES=1 ./01-gpu-nodes-and-scheduling/gke/scale-gpu-pool.sh   # pre-warm; or let a Pending pod trigger it
-kubectl apply -k 01-gpu-nodes-and-scheduling/gke
-kubectl -n ch01-gpu get pods -w
-```
-Expected output (after node boot + driver load, ~3–5 min from 0 nodes):
-```
-nvidia-smi   1/1   Running
-cuda-vectoradd   0/1   Completed
-```
-How to tell this worked:
-```bash
-kubectl -n ch01-gpu logs nvidia-smi | head -15
-kubectl describe node -l cloud.google.com/gke-nodepool=spot-gpu | grep -A6 "Allocated resources"
-```
-```
-Allocated resources:
-  Resource           Requests   Limits
-  nvidia.com/gpu     1          1
-```
-`nvidia-smi` logs show a real GPU (model, driver/CUDA version) and `cuda-vectoradd` reaches `Completed`.
-
-</details>
-
-<details><summary>EKS</summary>
-
-```bash
-./01-gpu-nodes-and-scheduling/eks/create-gpu-nodegroup.sh   # spot-gpu, g6.xlarge/g4dn.xlarge, min 0 max 1
-./01-gpu-nodes-and-scheduling/eks/install-device-plugin.sh  # pinned nvdp Helm chart (${DEVICE_PLUGIN_VERSION})
+: "${AWS_REGION:?}" "${EKS_CLUSTER:?}"
+INCLUDE="${INCLUDE:-spot-gpu}"
+envsubst '${EKS_CLUSTER} ${AWS_REGION}' < 01-gpu-nodes-and-scheduling/eks/gpu-nodegroups.yaml \
+  > 01-gpu-nodes-and-scheduling/eks/.gpu-nodegroups.rendered.yaml
+eksctl create nodegroup -f 01-gpu-nodes-and-scheduling/eks/.gpu-nodegroups.rendered.yaml \
+  --include "$INCLUDE" --install-nvidia-plugin=false
+eksctl get nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION"
 ```
 The AL2023 NVIDIA AMI ships the driver and toolkit; `--install-nvidia-plugin=false` (chapter 00's
-`create-cluster.sh` and this chapter's nodegroup script) is intentional — we install a **pinned**
-plugin instead of eksctl's unpinned default DaemonSet.
+cluster create and this node group) is intentional — we install a **pinned** plugin instead of
+eksctl's unpinned default DaemonSet.
+
+Install the pinned NVIDIA device plugin via Helm (do not combine with the GPU Operator, chapter 02,
+or the DRA driver on the same nodes):
 ```bash
-NODES=1 ./01-gpu-nodes-and-scheduling/eks/scale-gpu-nodegroup.sh   # EKS has no autoscaler by default
+CHART_VERSION="${DEVICE_PLUGIN_VERSION#v}"
+# If a nodegroup was ever created without --install-nvidia-plugin=false, remove eksctl's auto-installed
+# static DaemonSet first: kubectl -n kube-system delete ds nvidia-device-plugin-daemonset
+helm repo add nvdp https://nvidia.github.io/k8s-device-plugin --force-update
+helm repo update nvdp
+helm upgrade --install nvdp nvdp/nvidia-device-plugin \
+  --namespace nvidia-device-plugin --create-namespace \
+  --version "$CHART_VERSION" \
+  -f 01-gpu-nodes-and-scheduling/eks/values-device-plugin.yaml
+kubectl -n nvidia-device-plugin get ds
+```
+
+Scale the GPU group up (EKS has no autoscaler by default: `--nodes 0` later stops paying) and run
+the workloads:
+```bash
+NG="${NG:-spot-gpu}"; NODES=1
+eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name "$NG" \
+  --nodes "$NODES" --nodes-min 0 --nodes-max 1
+kubectl get nodes -l eks.amazonaws.com/nodegroup="$NG" -L node.kubernetes.io/instance-type,eks.amazonaws.com/capacityType
 kubectl apply -k 01-gpu-nodes-and-scheduling/eks
 kubectl -n ch01-gpu get pods -w
 ```
@@ -191,36 +176,6 @@ kubectl get nodes -l eks.amazonaws.com/nodegroup=spot-gpu -L nvidia.com/gpu.pres
 ```
 The `nvdp` DaemonSet shows `DESIRED == READY == 1`, and the node is labeled
 `nvidia.com/gpu.present=true` and `eks.amazonaws.com/capacityType=SPOT`.
-
-</details>
-
-<details><summary>AKS</summary>
-
-```bash
-./01-gpu-nodes-and-scheduling/aks/create-gpu-nodepool.sh    # gpuspot, Standard_NC4as_T4_v3, min 0 max 1
-./01-gpu-nodes-and-scheduling/aks/install-device-plugin.sh  # pinned nvdp Helm chart (${DEVICE_PLUGIN_VERSION})
-```
-`--gpu-driver Install` (the default) makes AKS install the driver; AKS installs **no** device plugin,
-which is why we run `install-device-plugin.sh`.
-```bash
-MIN=1 ./01-gpu-nodes-and-scheduling/aks/scale-gpu-pool.sh
-kubectl apply -k 01-gpu-nodes-and-scheduling/aks
-kubectl -n ch01-gpu get pods -w
-```
-Expected output:
-```
-nvidia-smi        1/1     Running
-cuda-vectoradd-xxxxx   0/1   Completed
-```
-How to tell this worked:
-```bash
-kubectl -n nvidia-device-plugin get ds
-kubectl get nodes -l agentpool=gpuspot -L kubernetes.azure.com/scalesetpriority,nvidia.com/gpu.present
-```
-The `nvdp` DaemonSet is `1/1` Ready on the `gpuspot` node, and the node carries both the
-`scalesetpriority=spot` and `nvidia.com/gpu.present=true` labels.
-
-</details>
 
 ### Step 2: Fake-GPU scheduling drills (no GPU needed, any cluster)
 
@@ -258,52 +213,51 @@ comments have the answer:
 
 ```bash
 kubectl delete -k 01-gpu-nodes-and-scheduling/cpu-lab
-NODE=$NODE 00-prerequisites-and-cluster-setup/cpu-lab/remove-fake-gpu.sh
+kubectl patch node "$NODE" --subresource=status --type=json \
+  -p '[{"op":"remove","path":"/status/capacity/nvidia.com~1gpu"}]' || true
+kubectl label node "$NODE" fake-gpu- || true
+kubectl taint node "$NODE" nvidia.com/gpu=present:NoSchedule- || true
 ```
 
 ## 5. Spot considerations
 
-- **A cold spot GPU node takes minutes, not seconds.** From 0 nodes: instance boot + driver
-  attach/load (GKE/AKS) or AMI boot (EKS, driver already baked in) + image pull is commonly 3–8 min.
-  Don't confuse this with a broken device plugin when a pod sits `Pending` right after scale-up.
+- **A cold spot GPU node takes minutes, not seconds.** From 0 nodes: AMI boot (driver already baked
+  in) + image pull is commonly 3–8 min. Don't confuse this with a broken device plugin when a pod
+  sits `Pending` right after scale-up.
 - **The `Job` matters more than the `Pod` here.** `cuda-vectoradd-job.yaml` has `backoffLimit: 3`
   specifically so a spot reclaim mid-run gets retried instead of failing the whole workload.
   `nvidia-smi-pod.yaml` is a bare Pod — spot preemption just kills it, no retry. Use Jobs (or higher
   controllers) for anything that must survive a reclaim.
-- **The device plugin must tolerate the spot taint too**, not just your workload. On AKS specifically,
-  the auto-added `kubernetes.azure.com/scalesetpriority=spot:NoSchedule` taint is in
-  `values-device-plugin.yaml`'s `tolerations` — miss it and the plugin DaemonSet itself never
-  schedules onto the spot GPU pool, so `nvidia.com/gpu` never shows up as allocatable at all.
-- **On-demand fallback**: every `create-gpu-node*.sh` script takes `ON_DEMAND=true` (GKE: no
-  `--spot`; AKS: pool named `gpuod`, no `--priority Spot`; EKS: `INCLUDE=ondemand-gpu` creates the
-  second nodegroup in `gpu-nodegroups.yaml`).
+- **The device plugin must tolerate the spot taint too**, not just your workload — check
+  `values-device-plugin.yaml`'s `tolerations` if the plugin DaemonSet never schedules onto the spot
+  GPU pool (`nvidia.com/gpu` never shows up as allocatable at all).
+- **On-demand fallback**: `INCLUDE=ondemand-gpu` when creating the node group creates the second,
+  non-spot nodegroup defined in `gpu-nodegroups.yaml`.
 
 ## 6. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Pod `Pending`: `0/N nodes are available: 1 Insufficient nvidia.com/gpu` | No node has an allocatable GPU yet — pool at 0, or device plugin not running | Scale the pool up; `kubectl -n nvidia-device-plugin get ds` (EKS/AKS) |
-| Pod `Pending`: `node(s) had untolerated taint {nvidia.com/gpu: present}` | Missing toleration | Use the cloud overlay (`kubectl apply -k .../gke` etc.), not `common/` directly |
-| Pod `Pending`: `didn't match Pod's node affinity/selector` | `nodeSelector` doesn't match this cloud's label (e.g. applied the GKE overlay on an EKS cluster) | Apply the matching cloud overlay |
-| `nvidia-smi` pod: `command not found` or empty GPU list | Container runtime isn't injecting the device/driver (toolkit misconfigured, or driver not finished installing) | `kubectl describe node` → check `Allocatable`; wait for driver DaemonSet/AMI init; re-check taints |
-| EKS: two device-plugin DaemonSets running, GPUs double-counted or flapping | `eksctl create nodegroup` ran without `--install-nvidia-plugin=false` | `kubectl -n kube-system delete ds nvidia-device-plugin-daemonset`, keep only the pinned `nvdp` one |
-| AKS: device plugin `CrashLoopBackOff` / `Pending` on the GPU pool | Missing the `kubernetes.azure.com/scalesetpriority=spot` toleration in `values-device-plugin.yaml`, or `nvidia.com/gpu.present` label missing (chart's default affinity needs it — AKS has no NFD) | Confirm `--labels nvidia.com/gpu.present=true` was set on the pool; reinstall the plugin |
+| Pod `Pending`: `0/N nodes are available: 1 Insufficient nvidia.com/gpu` | No node has an allocatable GPU yet — node group at 0, or device plugin not running | Scale the node group up; `kubectl -n nvidia-device-plugin get ds` |
+| Pod `Pending`: `node(s) had untolerated taint {nvidia.com/gpu: present}` | Missing toleration | Use the `eks` overlay (`kubectl apply -k .../eks`), not `common/` directly |
+| `nvidia-smi` pod: `command not found` or empty GPU list | Container runtime isn't injecting the device/driver (toolkit misconfigured, or driver not finished installing) | `kubectl describe node` → check `Allocatable`; wait for AMI init; re-check taints |
+| Two device-plugin DaemonSets running, GPUs double-counted or flapping | `eksctl create nodegroup` ran without `--install-nvidia-plugin=false` | `kubectl -n kube-system delete ds nvidia-device-plugin-daemonset`, keep only the pinned `nvdp` one |
 | Pod requesting `nvidia.com/gpu: 0.5` rejected at `kubectl apply` | Extended resources are integer-only | Request whole GPUs; see chapter 03 for MPS/time-slicing/MIG fractional sharing |
 | `nvidia.com/gpu` request accepted with `limits != requests` | It isn't — the API server always rejects this for extended resources | N/A, this is expected; see `cpu-lab` drill `e-overcommit` |
-| GKE: accelerator not available in zone | Wrong `ZONE` for that GPU type | `gcloud compute accelerator-types list --filter=name:nvidia-l4`, or switch `GPU_TYPE=nvidia-tesla-t4 MACHINE=n1-standard-4` |
 
 ## 7. Cleanup and cost notes
 
 ```bash
-./01-gpu-nodes-and-scheduling/gke/cleanup.sh                 # DELETE_POOL=true also removes the node pool
-DELETE_POOL=true ./01-gpu-nodes-and-scheduling/eks/cleanup.sh   # UNINSTALL_PLUGIN=true also removes nvdp
-DELETE_POOL=true ./01-gpu-nodes-and-scheduling/aks/cleanup.sh
+kubectl delete -k 01-gpu-nodes-and-scheduling/eks --ignore-not-found
+for ng in spot-gpu ondemand-gpu; do
+  eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name "$ng" --nodes 0 --nodes-min 0 2>/dev/null || true
+done
+helm -n nvidia-device-plugin uninstall nvdp   # if you'll let the GPU Operator (ch02) manage the same nodes
 ```
-- A single L4/T4 spot node is usually tens of cents/hour; on-demand is 2–4× that. Scale-to-zero pools
-  (`min 0`) mean idle time between lab sessions costs nothing on GKE/AKS. **EKS does not autoscale** —
-  a forgotten `desiredCapacity: 1` GPU node keeps billing until you run `scale-gpu-nodegroup.sh NODES=0`.
+- A single G4dn/G6 spot node is usually tens of cents/hour; on-demand is 2–4× that. **EKS does not
+  autoscale** — a forgotten `desiredCapacity: 1` GPU node keeps billing until you scale it to 0.
 - If you'll use the NVIDIA GPU Operator next chapter on the **same** nodes, uninstall this chapter's
-  device plugin first (`UNINSTALL_PLUGIN=true` on EKS/AKS cleanup) — never run two device plugins.
+  device plugin first — never run two device plugins.
 
 ## 8. Checkpoint questions
 
@@ -325,7 +279,7 @@ resource is being admitted, and returns the actual device IDs/mounts for that po
 </details>
 
 <details>
-<summary>3. On EKS, why does <code>create-cluster.sh</code> (chapter 00) and <code>create-gpu-nodegroup.sh</code> (this chapter) pass <code>--install-nvidia-plugin=false</code>?</summary>
+<summary>3. Why does chapter 00's cluster create and this chapter's node-group create both pass <code>--install-nvidia-plugin=false</code>?</summary>
 
 `eksctl` auto-installs an **unpinned** device-plugin DaemonSet on GPU nodegroups by default. This
 repo pins every component's version (`versions.env`), so we disable that and install a specific
@@ -333,12 +287,11 @@ repo pins every component's version (`versions.env`), so we disable that and ins
 </details>
 
 <details>
-<summary>4. Why does AKS need an explicit <code>nvidia.com/gpu.present=true</code> label on the node pool, when GKE and EKS don't need us to set the equivalent by hand?</summary>
+<summary>4. Why doesn't this chapter need to set <code>nvidia.com/gpu.present</code> by hand, the way an AKS-style setup would?</summary>
 
 The device-plugin chart's default node affinity looks for an NFD label or `nvidia.com/gpu.present`.
-GKE sets its own accelerator label automatically and EKS's AL2023 NVIDIA AMI sets
-`nvidia.com/gpu.present=true` at boot via `nodeadm`. AKS has neither an automatic label nor NFD by
-default, so `create-gpu-nodepool.sh` sets the label explicitly with `--labels`.
+EKS's AL2023 NVIDIA AMI sets `nvidia.com/gpu.present=true` at boot via `nodeadm`, automatically — no
+cloud with an NFD-less driver install (like AKS) can rely on that and has to set the label explicitly.
 </details>
 
 <details>
@@ -361,12 +314,11 @@ all, covered properly in chapter 06 (Kueue).
 </details>
 
 <details>
-<summary>7. What's the practical difference between GKE's driver install and AKS's/EKS's, that becomes relevant again in chapter 02?</summary>
+<summary>7. EKS's driver comes baked into the AMI, not installed by a controllable mechanism. What does that mean for chapter 02's GPU Operator?</summary>
 
-GKE and AKS install the driver via a cloud-managed mechanism you can disable at node-pool create time
-(`gpu-driver-version=disabled` / `--gpu-driver none`) so the GPU Operator can take over. EKS's driver
-is baked into the AMI at boot — you don't "disable" it, you just also don't let the Operator try to
-manage it (`driver.enabled=false` in chapter 02's EKS values).
+You can't "disable" a driver that's already on the AMI at boot the way you'd flip a create-time flag
+on a cloud with a managed driver installer. Instead you just don't let the Operator try to manage the
+driver on top of it (`driver.enabled=false` in chapter 02's EKS values).
 </details>
 
 <details>
@@ -381,11 +333,9 @@ MPS, MIG) is a device-plugin/driver-level feature layered on top, covered in cha
 
 - Kubernetes: [Device Plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/), [Extended Resources](https://kubernetes.io/docs/tasks/administer-cluster/extended-resource-node/), [Schedule GPUs](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/)
 - NVIDIA: [k8s-device-plugin](https://github.com/NVIDIA/k8s-device-plugin), [Container Toolkit / CDI](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html)
-- GKE: [Run GPUs in GKE Standard node pools](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus), [GPU driver install options](https://cloud.google.com/kubernetes-engine/docs/how-to/gpu-driver-installation)
 - EKS: [EKS-optimized accelerated AMIs](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-ami.html), [eksctl GPU support](https://docs.aws.amazon.com/eks/latest/eksctl/gpu-support.html)
-- AKS: [Use GPUs on AKS](https://learn.microsoft.com/azure/aks/use-nvidia-gpu), [AKS-managed GPU node pools](https://learn.microsoft.com/azure/aks/aks-managed-gpu-nodes)
-- Next: [`02-nvidia-gpu-operator`](../02-nvidia-gpu-operator) (the alternative, cross-cloud way to manage this whole stack), [`03-gpu-sharing-and-dra`](../03-gpu-sharing-and-dra) (fractional/shared GPU access)
+- Next: [`02-nvidia-gpu-operator`](../02-nvidia-gpu-operator) (the alternative way to manage this whole stack), [`03-gpu-sharing-and-dra`](../03-gpu-sharing-and-dra) (fractional/shared GPU access)
 
 **Versions tested** (2026-09-16): Kubernetes 1.35, `DEVICE_PLUGIN_VERSION=v0.20.0` (NVIDIA/k8s-device-plugin,
 Helm chart `nvdp/nvidia-device-plugin`), images `nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0`,
-`nvidia/cuda:12.9.1-base-ubuntu24.04`, `busybox:1.37.0`, gcloud 579, eksctl v0.230.0 schema, azure-cli 2.88.
+`nvidia/cuda:12.9.1-base-ubuntu24.04`, `busybox:1.37.0`, eksctl v0.230.0 schema.
