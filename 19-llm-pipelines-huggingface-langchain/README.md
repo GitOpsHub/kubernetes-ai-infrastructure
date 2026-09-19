@@ -3,8 +3,7 @@
 > Wire the whole loop on Kubernetes: pull a **pinned** Hugging Face model and dataset into a bucket
 > once, LoRA-fine-tune it on **one spot GPU** in a pipeline that survives preemption, gate it on an
 > evaluation, serve it with vLLM, and put a **LangChain** RAG API and a batch-inference pipeline in
-> front of it. Everything below runs on **EKS**; a `cpu-lab/` runs the pipeline mechanics on kind or
-> minikube for anyone without GPU quota yet.
+> front of it. Everything below runs on **EKS**.
 
 ---
 
@@ -24,14 +23,13 @@ This chapter reuses earlier chapters instead of rebuilding them:
   It doesn't reuse chapter 05's.
 - **[09-llm-inference-with-vllm](../09-llm-inference-with-vllm)** for the vLLM deployment shape (probes,
   `Recreate`, grace period) and its `kubectl create secret generic hf-token` step, which this chapter
-  reuses (own namespace). The CPU lab also needs chapter 09's `cpu-lab/` Ollama.
+  reuses (own namespace).
 - **Argo Workflows** from [15-mlops-gitops-and-pipelines](../15-mlops-gitops-and-pipelines) is
   *optional*. Step 1 below installs it if it's missing, or adds `ch19-pipelines` to an existing
   Helm release's `controller.workflowNamespaces`. If chapter 15's Argo CD app-of-apps manages it,
-  `common/install-argo-workflows.sh` prints the GitOps path and doesn't touch it.
+  `install-argo-workflows.sh` prints the GitOps path and doesn't touch it.
 - Tools beyond chapter 00's list: the **`argo` CLI** (`brew install argo`), **Docker with buildx**
-  (the trainer image is built locally), **`envsubst`** (`brew install gettext`) and `jq`. The CPU
-  lab also needs `kind` or `minikube`.
+  (the trainer image is built locally), **`envsubst`** (`brew install gettext`) and `jq`.
 - A **Hugging Face token is optional**: every repo used here is ungated. You need a **write** token only
   for the optional publish-to-Hub step.
 
@@ -88,8 +86,6 @@ By the end you can:
 | Optional           | 10 min | Step 14: publish to the Hub with a write token                                      |
 | Review             | 15 min | Troubleshooting, checkpoint questions, cleanup                                      |
 
-No GPU quota yet? Do the [CPU lab](#cpu-lab-no-gpu-no-cloud) instead of Steps 1–14. It runs the same
-two WorkflowTemplates and the same RAG API.
 
 ## 3. Concepts
 
@@ -284,7 +280,7 @@ from `S3`) after Step 10, once a fine-tune has actually produced a model. `BATCH
 second, shorter Argo `WorkflowTemplate` (`langchain-batch-inference`) — it's independent of `TRAIN` and
 can run at any time once `SERVE` is up.
 
-Everything runs in the namespace `ch19-pipelines` with three ServiceAccounts (`common/base/serviceaccounts.yaml`):
+Everything runs in the namespace `ch19-pipelines` with three ServiceAccounts (`eks/serviceaccounts.yaml`):
 
 | ServiceAccount    | Used by                                                        | Cloud permissions (EKS: Step 2's IAM/Pod Identity block)                                                                                            |
 | ----------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -298,15 +294,14 @@ chapter 05's writer/reader split.
 
 ### 3.2 Pinned revisions, and pull-once versus pull-every-start
 
-Every Hub coordinate in this chapter is a commit SHA, never `main` (`common/base/params.env`,
-`common/serving/tei-deployment.yaml`):
+Every Hub coordinate in this chapter is a commit SHA, never `main` (`eks/configmap-pipeline-params.yaml`,
+`eks/tei-deployment.yaml`):
 
-| What                                           | Repo                                  | Revision                                   |
-| ---------------------------------------------- | ------------------------------------- | ------------------------------------------ |
-| Base model (GPU)                               | `Qwen/Qwen3-0.6B`                     | `c1899de289a04d12100db370d81485cdf75e47ca` |
-| Base model (cpu-lab)                           | `HuggingFaceTB/SmolLM2-135M-Instruct` | `12fd25f77366fa6b3b4b768ec3050bf629380bac` |
-| SFT dataset (conversational `messages` column) | `trl-lib/Capybara` (dataset)          | `e235e846458bff3398a88aed812347f7f0756520` |
-| Embeddings (TEI)                               | `BAAI/bge-small-en-v1.5`              | `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` |
+| What                                           | Repo                          | Revision                                   |
+| ---------------------------------------------- | ----------------------------- | ------------------------------------------ |
+| Base model                                     | `Qwen/Qwen3-0.6B`             | `c1899de289a04d12100db370d81485cdf75e47ca` |
+| SFT dataset (conversational `messages` column) | `trl-lib/Capybara` (dataset)  | `e235e846458bff3398a88aed812347f7f0756520` |
+| Embeddings (TEI)                               | `BAAI/bge-small-en-v1.5`      | `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a` |
 
 A SHA makes every retry, every resumed checkpoint and every node load the same bytes. It also gives
 the bucket an immutable path. `hf_pull.py` writes to `$STORE_ROOT/hf/<REPO_TYPE>s/<REPO_ID>/<REVISION>/`,
@@ -314,18 +309,17 @@ so two revisions can never mix in one directory. Once `_COMPLETE` is there, the 
 immediately. A second pipeline run, or a retry, costs nothing.
 
 vLLM supports both delivery patterns from chapter 05. `MODEL_PATH` in the `serving-params` ConfigMap
-(built from `serving.env`) chooses between them:
+(`eks/configmap-serving-params.yaml`, generated from `eks/serving.env`) chooses between them:
 
-| `MODEL_PATH`                                                                          | Where weights come from                  | Cost per pod start                                                                                                   | When                                                             |
-| ------------------------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `Qwen/Qwen3-0.6B` (the default in `common/serving/serving.env` and `eks/serving.env`) | The Hub, into an `emptyDir` HF cache     | A full download on every start, reclaim and reschedule. Subject to Hub rate limits                                   | Day 1, before the pipeline has produced anything                 |
-| `/mnt/store/runs/<run-id>/model`                                                      | The bucket, read-only, as `model-reader` | Same-region object reads, no internet. The `wait-for-model` init container refuses to start until `_COMPLETE` exists | After a pipeline run. This is how the fine-tuned model is served |
+| `MODEL_PATH`                                          | Where weights come from                  | Cost per pod start                                                                                                   | When                                                             |
+| ------------------------------------------------------ | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `Qwen/Qwen3-0.6B` (the default in `eks/serving.env`)    | The Hub, into an `emptyDir` HF cache     | A full download on every start, reclaim and reschedule. Subject to Hub rate limits                                   | Day 1, before the pipeline has produced anything                 |
+| `/mnt/store/runs/<run-id>/model`                        | The bucket, read-only, as `model-reader` | Same-region object reads, no internet. The `wait-for-model` init container refuses to start until `_COMPLETE` exists | After a pipeline run. This is how the fine-tuned model is served |
 
-The `serving-params` ConfigMap keeps its kustomize **hash suffix**. Edit `serving.env`, run
-`kubectl apply -k` again, and the ConfigMap gets a new name. That rewrites the Deployment's
-`configMapKeyRef` and rolls vLLM automatically. Every *other* ConfigMap in the chapter uses
-`disableNameSuffixHash: true`, because Argo WorkflowTemplates refer to ConfigMaps by name and
-kustomize can't rewrite names inside CRDs.
+There's no more kustomize hash suffix to force a rollout when `MODEL_PATH` changes: edit
+`serving.env`, regenerate `configmap-serving-params.yaml` (`kubectl create configmap serving-params
+--from-env-file=serving.env --dry-run=client -o yaml`), `kubectl apply -f` it, then explicitly
+`kubectl -n ch19-pipelines rollout restart deploy/vllm` — Step 10 below does exactly this.
 
 ### 3.3 Write-once storage: scratch, copy, `_COMPLETE` last
 
@@ -333,7 +327,7 @@ Bucket FUSE mounts aren't POSIX file systems. By default, Mountpoint for S3 crea
 written sequentially. It won't overwrite, rename or delete, and it can't change file modes. GCS FUSE
 renames by copying and deleting. `snapshot_download` writes `*.incomplete` files and renames them. The
 HF `Trainer` also needs a real file system for its checkpoints. So every step in this chapter follows
-the same three rules (`common/src/trainer/store.py`):
+the same three rules (`eks/src/trainer/store.py`):
 
 1. Build the artifact on **local scratch** (an `emptyDir` at `/scratch`).
 2. Copy it into a **fresh** bucket directory, file by file, as new files (`shutil.copyfile`, not
@@ -469,7 +463,7 @@ retriever) is a similarity search over vectors already sitting in memory (§3.0.
 HTTP call to vLLM's OpenAI-compatible API — from LangChain's point of view, vLLM is indistinguishable
 from calling OpenAI itself, which is the whole point of vLLM exposing that API shape.
 
-- **vLLM** (`common/serving/vllm-deployment.yaml`) has the same shape as chapter 09: `Recreate`, a
+- **vLLM** (`eks/vllm-deployment.yaml`) has the same shape as chapter 09: `Recreate`, a
   10-minute `startupProbe`, a `preStop` sleep, a 25 s grace period and `--shutdown-timeout=10`. It
   also adds `--served-model-name=ch19-model`. Clients always ask for `ch19-model`, so swapping base
   weights for fine-tuned weights is a server-side change only. `--enable-prefix-caching` helps
@@ -492,12 +486,10 @@ from calling OpenAI itself, which is the whole point of vLLM exposing that API s
 - **Qwen3 thinking.** By default Qwen3 emits `<think>…</think>` before answering, which costs tokens
   and latency. With `DISABLE_THINKING=true`, `build_llm` sends
   `extra_body={"chat_template_kwargs": {"enable_thinking": False}}`. vLLM forwards it to the chat
-  template. Ollama (cpu-lab) drops `chat_template_kwargs` and thinks by default, returning the
-  reasoning in a separate `reasoning` field. Its only off-switch on `/v1` is
-  `reasoning_effort: "none"`, so `cpu-lab/params.env` sets `REASONING_EFFORT=none` and `build_llm`
-  adds it to `extra_body`. Leave it unset for vLLM, which validates that field (a `# VERIFY:` item).
-  `strip_think` still removes any `<think>` text that gets through, for example from an answer cut
-  off mid-thought by `max_tokens`.
+  template. `REASONING_EFFORT` is left unset for vLLM, which is believed to validate that field (a
+  `# VERIFY:` item in `rag_chain.py`) -- leave it unset rather than guessing a value. `strip_think`
+  still removes any `<think>` text that gets through, for example from an answer cut off mid-thought
+  by `max_tokens`.
 - **No image build for the app.** `rag-api` runs the stock uv image with
   `uv run /opt/app/rag_api.py`. The script is PEP 723, so its dependency pins are inline, and uv
   installs them on first start. That's why the `startupProbe` allows 15 minutes. For production,
@@ -534,22 +526,28 @@ Layout:
 
 ```
 19-llm-pipelines-huggingface-langchain/
-├── common/
-│   ├── kustomization.yaml            ConfigMaps from src/ (ch19-scripts, ch19-langchain-app, ch19-rag-docs, ch19-prompts)
-│   │                                 + replacements params.env -> WorkflowTemplate defaults
-│   ├── install-argo-workflows.sh     install/extend Argo Workflows to watch ch19-pipelines (called from the eks/cpu-lab lab steps)
-│   ├── base/                         namespace, 3 ServiceAccounts, Argo executor RBAC, params.env -> ConfigMap pipeline-params
-│   ├── training/                     WorkflowTemplate hf-finetune-pipeline
-│   ├── batch/                        WorkflowTemplate langchain-batch-inference
-│   ├── serving/                      vllm, tei, rag-api Deployments + Services, serving.env -> ConfigMap serving-params
-│   └── src/
-│       ├── hf_pull.py                PEP 723 script (huggingface_hub==1.32.0), run with uv in the uv image
-│       ├── trainer/                  Dockerfile, requirements.txt, store.py, finetune.py, evaluate.py, publish_hf.py
-│       └── langchain_app/            rag_chain.py, rag_api.py, batch_infer.py, docs/*.md, prompts.jsonl
-├── eks/                               nodegroup-ch19.yaml, pv-pvc-mountpoint.yaml, bucket.env, images.env, serving.env,
-│                                     patch-*.yaml, cleanup.sh (install.sh / setup-s3-iam.sh / build-push-ecr.sh are inlined
-│                                     into the lab steps below, not scripts in this directory)
-└── cpu-lab/                          install.sh, build-load-kind.sh, params.env (SmolLM2), pvc.yaml, patch-*.yaml, cleanup.sh
+└── eks/                                      every file below is a standalone `kubectl apply -f`-able manifest
+    ├── namespace.yaml                        ch19-pipelines
+    ├── serviceaccounts.yaml                  pipeline-runner, model-reader, rag-api
+    ├── rbac-argo-executor.yaml               Role + RoleBinding for the Argo emissary executor
+    ├── configmap-pipeline-params.yaml        model/dataset coordinates, trainer knobs, chat endpoint (from params.env)
+    ├── configmap-serving-params.yaml         MODEL_PATH for vLLM (from serving.env)
+    ├── configmap-ch19-scripts.yaml           hf_pull.py (kubectl create configmap --from-file, checked in)
+    ├── configmap-ch19-langchain-app.yaml     rag_chain.py, rag_api.py, batch_infer.py (same pattern)
+    ├── configmap-ch19-rag-docs.yaml          the RAG corpus (docs/*.md)
+    ├── configmap-ch19-prompts.yaml           seed input for the batch pipeline (prompts.jsonl)
+    ├── workflowtemplate-hf-finetune.yaml     WorkflowTemplate hf-finetune-pipeline (GPU spot nodeSelector inlined)
+    ├── workflowtemplate-langchain-batch.yaml WorkflowTemplate langchain-batch-inference (CPU spot nodeSelector inlined)
+    ├── vllm-deployment.yaml                  vLLM Deployment + Service (GPU spot nodeSelector inlined)
+    ├── tei-deployment.yaml                   TEI embeddings Deployment + Service (CPU spot nodeSelector inlined)
+    ├── rag-api-deployment.yaml               LangChain RAG API Deployment + Service (CPU spot nodeSelector inlined)
+    ├── pv-pvc-mountpoint.yaml                S3 Mountpoint PV/PVC (bucket name via envsubst, like chapter 05)
+    ├── nodegroup-ch19.yaml                   CPU spot managed node group (cluster/region via envsubst, like chapter 00)
+    ├── bucket.env, images.env, serving.env   written/edited by the lab steps below (envsubst / ConfigMap inputs)
+    └── src/
+        ├── hf_pull.py                        PEP 723 script (huggingface_hub==1.32.0), run with uv in the uv image
+        ├── trainer/                          Dockerfile, requirements.txt, store.py, finetune.py, evaluate.py, publish_hf.py
+        └── langchain_app/                    rag_chain.py, rag_api.py, batch_infer.py, docs/*.md, prompts.jsonl
 ```
 
 All commands run from the repo root:
@@ -559,10 +557,10 @@ cp env.sh.example env.sh   # if not already done
 source env.sh && source versions.env
 ```
 
-Read the whole chapter as one rendered file before applying anything (local only, touches nothing):
+Read through the manifests before applying anything (every file is plain YAML, no rendering needed):
 
 ```bash
-kubectl kustomize 19-llm-pipelines-huggingface-langchain/eks | less
+${PAGER:-less} 19-llm-pipelines-huggingface-langchain/eks/*.yaml
 ```
 
 <details open>
@@ -573,15 +571,17 @@ kubectl kustomize 19-llm-pipelines-huggingface-langchain/eks | less
 What you're about to do: the block below creates the managed node group `ch19-cpu-spot`
 (`nodegroup-ch19.yaml`: spot `m7i.xlarge`/`m6i.xlarge`/`m6a.xlarge`/`m5.xlarge`, `minSize 0`,
 `desiredCapacity 2`, `maxSize 3`, 100 GB disks for scratch and uv caches). The pull, publish and
-batch steps, TEI and rag-api run on it. It then calls `common/install-argo-workflows.sh`,
-which installs Argo Workflows (chart `${ARGO_WORKFLOWS_VERSION}` = 2.0.6, app v4.1.3). If Argo
-Workflows is already installed, the script adds `ch19-pipelines` to the controller's existing
-`workflowNamespaces` list instead of replacing it. In chart 2.0.6 that list does **not** limit what
-the controller watches: the controller watches all namespaces through its ClusterRole. The list only
-decides where the chart creates its default `argo-workflow` ServiceAccount and executor Role. This
-chapter's steps run as `pipeline-runner`, which has its own executor RBAC in `common/base`, so listing
-`ch19-pipelines` is harmless and keeps the Helm path consistent with chapter 15's GitOps values file. `INCLUDE=ch19-cpu-ondemand` creates the on-demand
-fallback group instead of the spot one.
+batch steps, TEI and rag-api run on it. It then installs Argo Workflows (chart
+`${ARGO_WORKFLOWS_VERSION}` = 2.0.6, app v4.1.3), or, if it's already installed, adds
+`ch19-pipelines` to the controller's existing `workflowNamespaces` list instead of replacing it. In
+chart 2.0.6 that list does **not** limit what the controller watches: the controller watches all
+namespaces through its ClusterRole. The list only decides where the chart creates its default
+`argo-workflow` ServiceAccount and executor Role. This chapter's steps run as `pipeline-runner`,
+which has its own executor RBAC in `rbac-argo-executor.yaml`, so listing `ch19-pipelines` is
+harmless and keeps the Helm path consistent with chapter 15's GitOps values file. If chapter 15's
+**Argo CD** already manages Argo Workflows (Application `argocd/ch15-argo-workflows`), the block
+below prints GitOps instructions instead of running Helm (set `FORCE_HELM=true` to helm-upgrade
+anyway). `INCLUDE=ch19-cpu-ondemand` creates the on-demand fallback group instead of the spot one.
 
 > **New to EKS node groups or `eksctl`?** A **managed node group** is a set of EC2 instances that EKS
 > keeps registered as Kubernetes nodes for you (auto-replacing unhealthy ones), as opposed to you
@@ -612,7 +612,46 @@ else
   rm -rf "${TMP}"
 fi
 
-"${HERE}/../common/install-argo-workflows.sh"
+ARGO_NS="${ARGO_NS:-argo}"
+ARGO_RELEASE="${ARGO_RELEASE:-argo-workflows}"
+WF_NS=ch19-pipelines
+
+if [[ "${FORCE_HELM:-false}" != "true" ]] && \
+   kubectl -n argocd get applications.argoproj.io ch15-argo-workflows >/dev/null 2>&1; then
+  cat <<MSG
+Argo Workflows is managed by Argo CD (Application argocd/ch15-argo-workflows) -- not touching it.
+GitOps path: make sure controller.workflowNamespaces in
+  15-mlops-gitops-and-pipelines/common/workflows/values-argo-workflows.yaml
+lists "- ${WF_NS}" (it does in this repo), commit + push to the repo Argo CD tracks, then:
+  argocd app sync ch15-argo-workflows   (or wait for auto-sync)
+Re-run with FORCE_HELM=true to helm-upgrade anyway (Argo CD will then show the app OutOfSync).
+MSG
+else
+  # The chart creates RBAC objects in every watched namespace, so it must exist first.
+  kubectl create namespace "${WF_NS}" --dry-run=client -o yaml | kubectl apply -f -
+
+  # Union of what the release already watches + ch19-pipelines.
+  EXISTING="$(helm get values "${ARGO_RELEASE}" -n "${ARGO_NS}" -o json 2>/dev/null \
+    | jq -r '(.controller.workflowNamespaces // [])[]' || true)"
+  NAMESPACES="$(printf '%s\n%s\n' "${EXISTING}" "${WF_NS}" | sed '/^$/d' | sort -u | paste -sd, -)"
+  echo "Argo Workflows ${ARGO_WORKFLOWS_VERSION}: controller.workflowNamespaces={${NAMESPACES}}"
+
+  helm repo add argo https://argoproj.github.io/argo-helm --force-update >/dev/null
+  helm repo update argo >/dev/null
+
+  # --reuse-values keeps whatever else an earlier install set (e.g. ch15's server flags);
+  # authModes=server = UI/CLI use the server's own identity: lab only, never expose it.
+  helm upgrade --install "${ARGO_RELEASE}" argo/argo-workflows \
+    --version "${ARGO_WORKFLOWS_VERSION}" \
+    --namespace "${ARGO_NS}" --create-namespace \
+    --reuse-values \
+    --set "controller.workflowNamespaces={${NAMESPACES}}" \
+    --set 'server.authModes={server}'
+
+  kubectl -n "${ARGO_NS}" rollout status "deployment/${ARGO_RELEASE}-workflow-controller" --timeout=180s
+  kubectl get crd workflowtemplates.argoproj.io >/dev/null
+  echo "Argo Workflows ready. UI: kubectl -n ${ARGO_NS} port-forward svc/${ARGO_RELEASE}-server 2746:2746"
+fi
 ```
 
 Expected output (abridged, the eksctl lines vary):
@@ -624,7 +663,7 @@ deployment "argo-workflows-workflow-controller" successfully rolled out
 Argo Workflows ready. UI: kubectl -n argo port-forward svc/argo-workflows-server 2746:2746
 
 Next: Step 2 (bucket + Pod Identity + Mountpoint CSI add-on -> bucket.env), Step 3 (trainer image
--> ECR -> images.env), then `kubectl apply -k .../eks`.
+-> ECR -> images.env), then `kubectl apply -f .../eks`.
 ```
 
 If chapter 15 already installed Argo Workflows with Helm, the namespace list also shows
@@ -648,8 +687,8 @@ What you're about to do: the block below creates the bucket `${AWS_ACCOUNT_ID}-c
 `pods.eks.amazonaws.com`, `ch19-pipeline-runner-${EKS_CLUSTER}` (read/write) and
 `ch19-model-reader-${EKS_CLUSTER}` (read-only), each with the inline policy `s3-ch19`, and associates
 them with the `pipeline-runner` and `model-reader` ServiceAccounts in `ch19-pipelines`. Last, it
-writes `eks/bucket.env`, which kustomize injects into the PV's `bucketName`. It's idempotent — safe
-to re-run.
+writes `eks/bucket.env`, which `envsubst` renders into the PV's `bucketName` in Step 5. It's
+idempotent — safe to re-run.
 
 > **New to IAM roles, trust policies, or Pod Identity?** A pod can't use your personal AWS credentials —
 > it needs its own identity in AWS. **Pod Identity** is EKS's mechanism for handing a pod temporary AWS
@@ -763,13 +802,13 @@ holds your account ID, not the committed `123456789012` placeholder.
 
 #### Step 3: Build and push the trainer image
 
-What you're about to do: build `common/src/trainer/` for `linux/amd64` with `TORCH_VARIANT=cu129`.
+What you're about to do: build `eks/src/trainer/` for `linux/amd64` with `TORCH_VARIANT=cu129`.
 The Dockerfile starts from `python:3.12-slim-trixie` and copies in the uv 0.12.15 binary. It installs
 `torch==2.13.0` from the PyTorch cu129 wheel index, then installs `requirements.txt` with a
 `torch==2.13.0` constraint so nothing swaps in another torch build. The script pushes the image to the
 ECR repo `ch19-trainer`, creating it with scan-on-push if needed and setting a lifecycle policy
-that keeps the newest 5 images. It writes `eks/images.env`, which
-kustomize injects into the `finetune`, `evaluate` and `publish` templates. The tag defaults to the
+that keeps the newest 5 images. It writes `eks/images.env`, which `envsubst` renders into the
+`finetune`, `evaluate` and `publish` templates' `${TRAINER_IMAGE}` placeholder in Step 5. The tag defaults to the
 current git commit, and `TAG=v2` overrides it. `--platform linux/amd64` matters on Apple silicon: an
 arm64 image fails on the GPU node with `exec format error`. The image is large (~6–8 GB of torch +
 CUDA libraries), so the first build and push take a while.
@@ -790,7 +829,7 @@ REPO=ch19-trainer
 REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || date -u +%Y%m%d%H%M)}"
 IMAGE="${REGISTRY}/${REPO}:${TAG}"
-CONTEXT="${HERE}/../common/src/trainer"
+CONTEXT="${HERE}/src/trainer"
 
 if ! aws ecr describe-repositories --repository-names "${REPO}" --region "${AWS_REGION}" >/dev/null 2>&1; then
   aws ecr create-repository --repository-name "${REPO}" --region "${AWS_REGION}" \
@@ -854,24 +893,55 @@ step, everything still runs because the Secret is optional everywhere.
 
 #### Step 5: Deploy the chapter and start a GPU node
 
-What you're about to do: apply the EKS overlay. It creates the namespace, ServiceAccounts, executor
-RBAC and the ConfigMaps (`pipeline-params`, `serving-params-<hash>`, `ch19-scripts`,
-`ch19-langchain-app`, `ch19-rag-docs`, `ch19-prompts`, `ch19-images`, `storage-params`). It also
-creates the S3-backed PV `ch19-model-store-s3` + PVC `model-store`, both WorkflowTemplates, and the
-`vllm`, `tei` and `rag-api` Deployments. On day 1, vLLM serves `Qwen/Qwen3-0.6B` straight from the Hub.
-Chapter 01's `spot-gpu` group sits at 0 nodes with no autoscaler, so start one GPU node.
+What you're about to do: apply every plain manifest under `eks/`. It creates the namespace,
+ServiceAccounts, executor RBAC and the ConfigMaps (`pipeline-params`, `serving-params`,
+`ch19-scripts`, `ch19-langchain-app`, `ch19-rag-docs`, `ch19-prompts`). Two files carry an
+`envsubst` placeholder that needs the values written by Steps 2–3: `pv-pvc-mountpoint.yaml`
+(`${S3_BUCKET}`) and `workflowtemplate-hf-finetune.yaml` (`${TRAINER_IMAGE}`, used by the
+`finetune`, `evaluate` and `publish` templates) — same pattern as chapter 05's PV and chapter 00's
+`cluster.yaml`. Applying then creates the S3-backed PV `ch19-model-store-s3` + PVC `model-store`,
+both WorkflowTemplates, and the `vllm`, `tei` and `rag-api` Deployments. On day 1, vLLM serves
+`Qwen/Qwen3-0.6B` straight from the Hub. Chapter 01's `spot-gpu` group sits at 0 nodes with no
+autoscaler, so start one GPU node.
 
-> **New to `kubectl apply -k`?** The `-k` flag applies a **kustomize overlay**: a directory
-> (`19-llm-pipelines-huggingface-langchain/eks`) that layers cloud-specific tweaks (node selectors, the
-> real bucket name, the image tag you just pushed) on top of the shared, cloud-agnostic manifests in
-> `common/`. It's how this repo avoids maintaining a separate copy of every YAML file per cloud (§3.2
-> also explains why some of the generated ConfigMaps get a random hash suffix in their name and others
-> don't — it controls whether editing a `.env` file automatically triggers a pod restart). Re-running
-> `kubectl apply -k` is always safe: kustomize renders the same YAML, and `kubectl apply` only changes
-> what's actually different from what's already in the cluster.
+> **New to `envsubst` placeholders?** A checked-in manifest can't contain a real bucket name or a
+> freshly-built image tag — those only exist after you run Steps 2 and 3. `${S3_BUCKET}` and
+> `${TRAINER_IMAGE}` are plain shell-style placeholders in the YAML; `envsubst` substitutes them
+> from the exported environment variable of the same name, and the result is piped straight into
+> `kubectl apply -f -`. Nothing here is a kustomize overlay: every file in `eks/` is a complete,
+> standalone manifest — `git diff` on it shows exactly what changed, and there's no separate
+> "rendered" version to reconcile except these two small, gitignored `.rendered.yaml` files.
 
 ```bash
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/eks
+HERE=19-llm-pipelines-huggingface-langchain/eks
+
+kubectl apply -f "${HERE}/namespace.yaml"
+kubectl apply -f "${HERE}/serviceaccounts.yaml"
+kubectl apply -f "${HERE}/rbac-argo-executor.yaml"
+kubectl apply -f "${HERE}/configmap-pipeline-params.yaml"
+kubectl apply -f "${HERE}/configmap-serving-params.yaml"
+kubectl apply -f "${HERE}/configmap-ch19-scripts.yaml"
+kubectl apply -f "${HERE}/configmap-ch19-langchain-app.yaml"
+kubectl apply -f "${HERE}/configmap-ch19-rag-docs.yaml"
+kubectl apply -f "${HERE}/configmap-ch19-prompts.yaml"
+
+# shellcheck disable=SC1091
+source "${HERE}/bucket.env"; export S3_BUCKET
+# shellcheck disable=SC1091
+source "${HERE}/images.env"; export TRAINER_IMAGE
+envsubst '${S3_BUCKET}' < "${HERE}/pv-pvc-mountpoint.yaml" \
+  > "${HERE}/.pv-pvc-mountpoint.rendered.yaml"
+envsubst '${TRAINER_IMAGE}' < "${HERE}/workflowtemplate-hf-finetune.yaml" \
+  > "${HERE}/.workflowtemplate-hf-finetune.rendered.yaml"
+cat "${HERE}/.pv-pvc-mountpoint.rendered.yaml" "${HERE}/.workflowtemplate-hf-finetune.rendered.yaml" | less  # review first
+kubectl apply -f "${HERE}/.pv-pvc-mountpoint.rendered.yaml"
+kubectl apply -f "${HERE}/.workflowtemplate-hf-finetune.rendered.yaml"
+
+kubectl apply -f "${HERE}/workflowtemplate-langchain-batch.yaml"
+kubectl apply -f "${HERE}/vllm-deployment.yaml"
+kubectl apply -f "${HERE}/tei-deployment.yaml"
+kubectl apply -f "${HERE}/rag-api-deployment.yaml"
+
 eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name spot-gpu \
   --nodes 1 --nodes-min 0 --nodes-max 1
 kubectl -n ch19-pipelines get workflowtemplates,pvc
@@ -942,7 +1012,7 @@ shows `nvidia.com/gpu` at `0`.
 What you're about to do: start `hf-finetune-pipeline` with an explicit `run-id`. Checkpoints and the
 final model go under `/mnt/store/runs/<run-id>/`, and re-submitting the **same** `run-id` resumes or
 no-ops (§3.4). Always pass `-p run-id=`. The template's default (`{{workflow.name}}`) is a `# VERIFY:`
-item (see Troubleshooting). The other defaults come from `common/base/params.env` (model and dataset
+item (see Troubleshooting). The other defaults come from `configmap-pipeline-params.yaml` (model and dataset
 SHAs, `max-steps=200`, `max-eval-loss=2.5`), and you can override any of them with `-p`
 (`-p max-steps=50` gives a quick run).
 
@@ -1102,19 +1172,24 @@ step finishes in seconds: `already in the store`, `already complete; nothing to 
 #### Step 10: Serve the fine-tuned model from the bucket
 
 What you're about to do: read the workflow's `model-path` output, write it into `eks/serving.env`,
-re-apply, and scale vLLM back to 1. The `serving-params` ConfigMap gets a new hash suffix, and that
-triggers a `Recreate` rollout. The new pod's `wait-for-model` init container checks for
+regenerate `configmap-serving-params.yaml` from it, re-apply, and explicitly restart + scale vLLM
+back to 1. There's no more kustomize hash suffix to trigger the rollout automatically, so the
+restart is a manual step now. The new pod's `wait-for-model` init container checks for
 `/mnt/store/runs/qwen3-sft-001/model/_COMPLETE` before vLLM starts, and vLLM then loads the weights
 through the read-only Mountpoint mount as `model-reader`. The explicit `scale` is needed because
 `kubectl apply` doesn't reset a replica count you changed by hand when the manifest's own value
 didn't change.
 
 ```bash
+HERE=19-llm-pipelines-huggingface-langchain/eks
 WF=$(argo list -n ch19-pipelines --prefix hf-finetune-pipeline -o name | head -1)
 argo get -n ch19-pipelines "$WF" -o json | jq -r '.status.outputs.parameters[] | select(.name=="model-path").value'
 sed -i.bak 's#^MODEL_PATH=.*#MODEL_PATH=/mnt/store/runs/qwen3-sft-001/model#' \
-  19-llm-pipelines-huggingface-langchain/eks/serving.env && rm 19-llm-pipelines-huggingface-langchain/eks/serving.env.bak
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/eks
+  "${HERE}/serving.env" && rm "${HERE}/serving.env.bak"
+kubectl create configmap serving-params -n ch19-pipelines \
+  --from-env-file="${HERE}/serving.env" --dry-run=client -o yaml \
+  | kubectl apply -f -
+kubectl -n ch19-pipelines rollout restart deploy/vllm
 kubectl -n ch19-pipelines scale deploy/vllm --replicas=1
 kubectl -n ch19-pipelines rollout status deploy/vllm --timeout=15m
 kubectl -n ch19-pipelines logs deploy/vllm -c wait-for-model
@@ -1124,8 +1199,8 @@ Expected output (abridged):
 
 ```
 /mnt/store/runs/qwen3-sft-001/model
-configmap/serving-params-<new-hash> created
-deployment.apps/vllm configured
+configmap/serving-params configured
+deployment.apps/vllm restarted
 deployment.apps/vllm scaled
 deployment "vllm" successfully rolled out
 ```
@@ -1302,98 +1377,10 @@ huggingface.co contains `model.safetensors`, `config.json` and the tokenizer fil
 
 </details>
 
-### CPU lab (no GPU, no cloud)
-
-What changes (`cpu-lab/kustomization.yaml`): `model-store` is a plain `ReadWriteOnce` PVC (`pvc.yaml`,
-20 Gi from the default StorageClass). `pipeline-params` is **replaced** by `cpu-lab/params.env`:
-`HuggingFaceTB/SmolLM2-135M-Instruct`, `MAX_STEPS=20`, `SAVE_STEPS=10`, `MAX_EVAL_LOSS=3.5`,
-`TRAIN_SAMPLES=200`, `EVAL_SAMPLES=50`, `MAX_LENGTH=512`, and `REASONING_EFFORT=none` to turn off Ollama's Qwen3 thinking. The trainer image uses CPU torch.
-`patch-cpu-steps.yaml` strips the GPU requests, tolerations and `/dev/shm` from `finetune` and
-`evaluate`. **There's no vLLM** (`patch-delete-vllm.yaml`): rag-api and the batch pipeline call chapter
-09's Ollama at `http://ollama.ch09-vllm-cpu.svc.cluster.local:11434/v1` with model `qwen3:0.6b`. TEI
-and rag-api run as usual. You practise the whole pipeline and the LangChain app, but the fine-tuned
-SmolLM2 isn't served, because there's no vLLM to load it.
-
-**Step C1: Prerequisites.** Deploy chapter 09's Ollama, then run `cpu-lab/install.sh`. It installs or
-extends Argo Workflows and checks that `ch09-vllm-cpu/ollama` exists.
-
-```bash
-kubectl apply -k 09-llm-inference-with-vllm/cpu-lab
-kubectl -n ch09-vllm-cpu wait --for=condition=ready pod -l app.kubernetes.io/name=ollama --timeout=600s
-./19-llm-pipelines-huggingface-langchain/cpu-lab/install.sh
-```
-
-Expected output ends with `found ch09-vllm-cpu/ollama -- rag-api and langchain-batch-inference will
-use it`. **How to tell this worked**: no `WARNING: ch09 cpu-lab Ollama not found` line.
-
-**Step C2: Build the CPU trainer image and load it into the nodes.** `build-load-kind.sh` builds with
-`--build-arg TORCH_VARIANT=cpu` for your host's own architecture, since kind and minikube nodes run
-locally. It loads the image with `kind load docker-image` (cluster `${KIND_CLUSTER:-kind}`), or with
-`minikube image load` when the kubectl context is `minikube`, and writes `cpu-lab/images.env`
-(`TRAINER_IMAGE=ch19-trainer:cpu`). No registry is involved.
-
-```bash
-./19-llm-pipelines-huggingface-langchain/cpu-lab/build-load-kind.sh
-```
-
-Expected output ends with `loaded ch19-trainer:cpu into kind-kind; .../cpu-lab/images.env updated`.
-**How to tell this worked**: `docker exec kind-control-plane crictl images | grep ch19-trainer`
-lists the image (kind only).
-
-**Step C3: Deploy, then run the pipeline.**
-
-```bash
-NAMESPACE=ch19-pipelines
-: "${HF_TOKEN:?export HF_TOKEN=hf_xxx, or skip — optional}"
-kubectl create secret generic hf-token \
-  --namespace "$NAMESPACE" \
-  --from-literal=HF_TOKEN="$HF_TOKEN" \
-  --dry-run=client -o yaml | kubectl apply -f -   # optional
-kubectl apply -k 19-llm-pipelines-huggingface-langchain/cpu-lab
-kubectl -n ch19-pipelines get pods -w                                   # tei + rag-api -> 1/1 (no vllm)
-argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline -p run-id=smol-sft-001 --watch
-```
-
-Expected: the same DAG as on EKS, ending `Status: Succeeded`, with `model-path:
-/mnt/store/runs/smol-sft-001/model`. The finetune logs show `precision=fp32` and checkpoints at
-`checkpoint-10` and `checkpoint-20`. The spot drill from Step 8 works here too: delete the finetune pod
-after `checkpoint-10` and watch it resume. **How to tell this worked**: `Status: Succeeded`, and the
-evaluate log ends in `gate passed: eval_loss ... <= MAX_EVAL_LOSS 3.5`.
-
-**Step C4: RAG API and batch against Ollama.**
-
-```bash
-kubectl -n ch19-pipelines port-forward svc/rag-api 8080:8080 >/dev/null &
-sleep 3
-curl -s localhost:8080/ask -H 'Content-Type: application/json' \
-  -d '{"question":"Why do GPU node pools use a minimum size of zero?"}' | jq
-argo submit -n ch19-pipelines --from workflowtemplate/langchain-batch-inference --watch
-```
-
-Expected: an `answer` plus `sources` (for this question, usually `spot-gpu-nodes.md` first). The batch
-workflow's `wait-for-llm` logs `LLM endpoint ready: http://ollama.ch09-vllm-cpu.svc.cluster.local:11434/v1/models`.
-CPU inference is slow, so expect minutes rather than seconds for 12 questions.
-
-**Step C5: Look inside the PVC.** Step pods are garbage-collected on success, so start a throwaway pod
-that mounts `model-store`:
-
-```bash
-kubectl -n ch19-pipelines run store-peek --rm -i --restart=Never --image=busybox:1.37 --overrides='{
-  "spec": {"containers": [{"name": "store-peek", "image": "busybox:1.37",
-    "command": ["sh", "-c", "find /mnt/store -name _COMPLETE; cat /mnt/store/runs/smol-sft-001/eval/metrics.json; cat /mnt/store/batch/*/_COMPLETE"],
-    "volumeMounts": [{"name": "store", "mountPath": "/mnt/store"}]}],
-  "volumes": [{"name": "store", "persistentVolumeClaim": {"claimName": "model-store"}}]}}'
-```
-
-Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Instruct/<sha>`,
-`hf/datasets/trl-lib/Capybara/<sha>`, `runs/smol-sft-001/checkpoints/checkpoint-10`, `checkpoint-20`,
-`runs/smol-sft-001/model` and `batch/langchain-batch-inference-<id>`, followed by the metrics JSON
-(`"eval_samples": 50`, `"max_length": 512`) and the batch summary with `"model": "qwen3:0.6b"`.
-
 ## 5. Spot considerations
 
-- **Training is designed around losing the node.** Checkpoints go to the bucket every `SAVE_STEPS`,
-  which caps lost work at 50 steps (10 in cpu-lab). The SIGTERM path saves the current step when a
+- **Training is designed around losing the node.** Checkpoints go to the bucket every `SAVE_STEPS`
+  (50), which caps lost work at 50 steps. The SIGTERM path saves the current step when a
   drain gives notice. The retry expression `lastRetry.exitCode != "1"` retries interruptions up to 10
   times with 30 s → 10 min backoff, and never retries a Python exception. `activeDeadlineSeconds`
   caps each attempt (4 h) and the whole workflow (6 h), so a pool with no spot capacity can't retry
@@ -1412,9 +1399,10 @@ Expected (abridged): `_COMPLETE` under `hf/models/HuggingFaceTB/SmolLM2-135M-Ins
   `eks.amazonaws.com/capacityType: SPOT` also matches the GPU nodes. The `nvidia.com/gpu` taint keeps
   the CPU steps off them. The GPU steps add `nvidia.com/gpu.present: "true"` at template level, which
   *replaces* the workflow-level selector in Argo.
-- **On-demand fallback.** `INCLUDE=ch19-cpu-ondemand` in Step 1's node-group commands. The patches
-  still select spot capacity, so drop the spot selector from the relevant `patch-*.yaml` to actually
-  use the fallback. For GPUs, use chapter 01's on-demand pool.
+- **On-demand fallback.** `INCLUDE=ch19-cpu-ondemand` in Step 1's node-group commands. The
+  manifests still select spot capacity (`eks.amazonaws.com/capacityType: SPOT`), so edit the
+  `nodeSelector` in the relevant `eks/*.yaml` file to actually use the fallback. For GPUs, use
+  chapter 01's on-demand pool.
 
 ## 6. Troubleshooting
 
@@ -1433,30 +1421,29 @@ the process itself printed before it exited.
 | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `finetune`/`evaluate` pod `Pending`: `Insufficient nvidia.com/gpu`                                                               | vLLM holds the only GPU (`spot-gpu` `maxSize: 1`), or the EKS GPU group is at 0 nodes (no autoscaler)                                                                                                                                        | `kubectl -n ch19-pipelines scale deploy/vllm --replicas=0`; `eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name spot-gpu --nodes 1 --nodes-min 0 --nodes-max 1`; or raise `maxSize` to 2 |
 | A pull step or TEI `Pending`: `Insufficient cpu` on EKS                                                                          | `ch19-cpu-spot` is below 2 nodes (spot reclaim, or `CPU_NODES=1`) and EKS has no cluster autoscaler. The two parallel pulls (1 CPU each), TEI (1 CPU) and rag-api don't fit on one 4-vCPU node                                               | `eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name ch19-cpu-spot --nodes 2 --nodes-max 3`                                                                                               |
-| `argo submit` works but no pods ever start; the workflow has no status                                                           | The workflow controller isn't running, or was installed with `singleNamespace=true` for a different namespace. With chart defaults it watches every namespace, so `workflowNamespaces` isn't the cause                                       | `kubectl -n argo get deploy argo-workflows-workflow-controller`; `kubectl -n argo logs deploy/argo-workflows-workflow-controller \| tail`; re-run `common/install-argo-workflows.sh`                                |
-| Steps "succeed" but the DAG hangs or fails with `failed to create WorkflowTaskResult ... forbidden`                              | Executor RBAC missing (`common/base/rbac-argo-executor.yaml`: `workflowtaskresults` create/patch for `pipeline-runner`)                                                                                                                      | `kubectl apply -k <overlay>`; check `kubectl -n ch19-pipelines get rolebinding pipeline-runner-argo-executor`                                                                                                       |
+| `argo submit` works but no pods ever start; the workflow has no status                                                           | The workflow controller isn't running, or was installed with `singleNamespace=true` for a different namespace. With chart defaults it watches every namespace, so `workflowNamespaces` isn't the cause                                       | `kubectl -n argo get deploy argo-workflows-workflow-controller`; `kubectl -n argo logs deploy/argo-workflows-workflow-controller \| tail`; re-run Step 1's Argo Workflows block                                |
+| Steps "succeed" but the DAG hangs or fails with `failed to create WorkflowTaskResult ... forbidden`                              | Executor RBAC missing (`eks/rbac-argo-executor.yaml`: `workflowtaskresults` create/patch for `pipeline-runner`)                                                                                                                      | `kubectl apply -f eks/rbac-argo-executor.yaml`; check `kubectl -n ch19-pipelines get rolebinding pipeline-runner-argo-executor`                                                                                                       |
 | A directory literally named `{{workflow.name}}` appears under `runs/`                                                            | **`# VERIFY:`** in `workflowtemplate-hf-finetune.yaml`: the `run-id` default is itself a tag, which relies on Argo substituting a second time. Not verified against Argo v4.1.3                                                              | Always pass `-p run-id=<name>` (the lab does)                                                                                                                                                                       |
 | Step pod stuck `ContainerCreating`, `MountVolume.SetUp failed ... AccessDenied` (EKS)                                            | No Pod Identity association for the pod's ServiceAccount, or the pod started before it existed                                                                                                                                               | Re-run Step 2's IAM/Pod Identity block (it's idempotent); delete the pod; `kubectl -n mount-s3 get pods -o wide` shows the Mountpoint pod for that node                                                             |
 | `FileExistsError: ... already exists with different content` / `exists with a different size and the bucket cannot overwrite it` | An earlier attempt left partial files with different bytes (e.g. after you changed `LORA_R`, or a different image tag, for the same `run-id`). `pipeline-runner` has no `s3:DeleteObject` on purpose                                         | Use a new `run-id`, or delete the prefix yourself: `aws s3 rm "s3://${S3_BUCKET}/runs/<run-id>/model/" --recursive`                                                                                                 |
 | `evaluate` fails, log `GATE FAILED: eval_loss X > MAX_EVAL_LOSS 2.5`, no retry                                                   | Working as designed: exit 1 is final                                                                                                                                                                                                         | Train more (new `run-id`, higher `-p max-steps`), or re-judge the recorded numbers: same `run-id` with `-p max-eval-loss=<higher>` (no retraining)                                                                  |
-| `finetune` Failed after one attempt, message `OOMKilled (exit code 137)`                                                         | Host memory above the 13 Gi limit. The retry expression deliberately doesn't retry OOMKilled (it would OOM again)                                                                                                                            | Lower `PER_DEVICE_BATCH`/`MAX_LENGTH` in `params.env`, `kubectl apply -k`, then resubmit with the same `run-id` to resume from the last checkpoint                                                                  |
+| `finetune` Failed after one attempt, message `OOMKilled (exit code 137)`                                                         | Host memory above the 13 Gi limit. The retry expression deliberately doesn't retry OOMKilled (it would OOM again)                                                                                                                            | Lower `PER_DEVICE_BATCH`/`MAX_LENGTH` in `configmap-pipeline-params.yaml`, `kubectl apply -f` it, then resubmit with the same `run-id` to resume from the last checkpoint                                                                  |
 | `finetune` fails once with `CUDA out of memory`, no retry                                                                        | Exit 1, deterministic by design                                                                                                                                                                                                              | Lower `PER_DEVICE_BATCH` or `MAX_LENGTH` (T4s have 16 GB and run fp32 master weights)                                                                                                                               |
 | Trainer pod `exec format error`                                                                                                  | Image built for arm64 on Apple silicon                                                                                                                                                                                                       | Use Step 3's `docker buildx build --platform linux/amd64` command; don't `docker build` by hand for the GPU clouds                                                                                                  |
 | vLLM stuck `Init:0/1`, log `waiting for /mnt/store/runs/.../model/_COMPLETE`                                                     | Typo or wrong `run-id` in `serving.env`, or training hasn't finished                                                                                                                                                                         | Compare with the workflow's `model-path` output (Step 10); `aws s3 ls "s3://${S3_BUCKET}/runs/"`                                                                                                                    |
 | rag-api `0/1` for minutes, log `TEI at ... not ready (attempt N)`                                                                | First start: uv installs dependencies from PyPI, then waits for TEI to download bge-small                                                                                                                                                    | Normal for up to ~15 min (`startupProbe` 90 × 10 s). After `EMBEDDINGS_WAIT_SECONDS` (600) `/healthz` returns 503 and the pod restarts; check `kubectl -n ch19-pipelines logs deploy/tei`                           |
 | `/ask` or `/chat` returns **502** while `/readyz` is 200                                                                         | vLLM (or Ollama) unreachable: scaled to 0, rolling out, or wrong `OPENAI_BASE_URL`                                                                                                                                                           | Readiness deliberately ignores the LLM; `kubectl -n ch19-pipelines get deploy vllm`; scale it back to 1                                                                                                             |
-| Empty answers in cpu-lab                                                                                                         | Ollama ignores `chat_template_kwargs`, so `qwen3:0.6b` spends all of `MAX_TOKENS` reasoning. `REASONING_EFFORT=none` (in `cpu-lab/params.env`) is the off-switch; the batch step gets it via `envFrom` and rag-api via an `optional` key ref | `kubectl -n ch19-pipelines exec deploy/rag-api -- env \| grep REASONING` must print `REASONING_EFFORT=none`; if not, re-apply `cpu-lab` so rag-api picks up the ConfigMap                                           |
-| HTTP 400 mentioning `reasoning_effort` from vLLM                                                                                 | **`# VERIFY:`** in `rag_chain.py`: vLLM v0.29 is believed to accept only `low\|medium\|high`, not `none`                                                                                                                                     | Leave `REASONING_EFFORT` unset for the GPU overlays (`common/base/params.env` doesn't set it)                                                                                                                       |
+| HTTP 400 mentioning `reasoning_effort` from vLLM                                                                                 | **`# VERIFY:`** in `rag_chain.py`: vLLM v0.29 is believed to accept only `low\|medium\|high`, not `none`                                                                                                                                     | Leave `REASONING_EFFORT` unset (`configmap-pipeline-params.yaml` doesn't set it)                                                                                                                       |
 | `batch-infer` exits 1: `N/12 (>50%) failed -- writing nothing`                                                                   | The LLM went away mid-batch (`wait-for-llm` only checks `/models` once)                                                                                                                                                                      | Fix vLLM, then `argo retry -n ch19-pipelines <wf>` (same workflow name, so the same `batch/<wf>/` output dir) or submit again (new dir); nothing partial was written                                                |
-| cpu-lab TEI pod `exec format error` / `CrashLoopBackOff` on an arm64 laptop                                                      | The pinned TEI CPU image may not ship an arm64 variant                                                                                                                                                                                       | `docker manifest inspect ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4`; run kind on an amd64 host or enable amd64 emulation in Docker Desktop                                                            |
 
 ## 7. Cleanup and cost notes
 
-By default: delete all Workflows in `ch19-pipelines`, then everything `kubectl delete -k eks`
-covers. That includes the namespace (and with it the `hf-token` Secret), the Deployments, the
-WorkflowTemplates and the PV/PVC objects. The PV is `Retain`, so the **data stays in the bucket**.
-Then scale `ch19-cpu-spot` and `ch19-cpu-ondemand` to 0. This **keeps** the S3 bucket, the IAM
-roles `ch19-pipeline-runner-${EKS_CLUSTER}`/`ch19-model-reader-${EKS_CLUSTER}`, the Pod Identity
+By default: delete all Workflows in `ch19-pipelines`, then every manifest under `eks/` (in reverse
+of the apply order, plus the two `.rendered.yaml` files from Step 5 if they're still around). That
+includes the namespace (and with it the `hf-token` Secret), the Deployments, the WorkflowTemplates
+and the PV/PVC objects. The PV is `Retain`, so the **data stays in the bucket**. Then scale
+`ch19-cpu-spot` and `ch19-cpu-ondemand` to 0. This **keeps** the S3 bucket, the IAM roles
+`ch19-pipeline-runner-${EKS_CLUSTER}`/`ch19-model-reader-${EKS_CLUSTER}`, the Pod Identity
 associations, the ECR repo `ch19-trainer` and the node groups, because the bucket holds your models
 and checkpoints:
 
@@ -1467,7 +1454,23 @@ source "${HERE}/bucket.env"
 NS=ch19-pipelines
 
 kubectl -n "${NS}" delete workflows.argoproj.io --all --ignore-not-found
-kubectl delete -k "${HERE}" --ignore-not-found
+kubectl delete -f "${HERE}/rag-api-deployment.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/tei-deployment.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/vllm-deployment.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/workflowtemplate-langchain-batch.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/.workflowtemplate-hf-finetune.rendered.yaml" --ignore-not-found 2>/dev/null || \
+  kubectl delete -f "${HERE}/workflowtemplate-hf-finetune.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/.pv-pvc-mountpoint.rendered.yaml" --ignore-not-found 2>/dev/null || \
+  kubectl delete -f "${HERE}/pv-pvc-mountpoint.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-ch19-prompts.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-ch19-rag-docs.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-ch19-langchain-app.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-ch19-scripts.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-serving-params.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/configmap-pipeline-params.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/rbac-argo-executor.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/serviceaccounts.yaml" --ignore-not-found
+kubectl delete -f "${HERE}/namespace.yaml" --ignore-not-found
 for ng in ch19-cpu-spot ch19-cpu-ondemand; do
   eksctl scale nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" \
     --nodes 0 --nodes-min 0 2>/dev/null || true
@@ -1502,14 +1505,10 @@ Argo Workflows is left installed, since it's shared with chapter 15
 node group:
 
 ```bash
-kubectl delete -k 01-gpu-nodes-and-scheduling/eks --ignore-not-found
 for ng in spot-gpu ondemand-gpu; do
   eksctl scale nodegroup --cluster "${EKS_CLUSTER}" --region "${AWS_REGION}" --name "${ng}" --nodes 0 --nodes-min 0 2>/dev/null || true
 done
 ```
-
-Or, in the CPU lab: `19-llm-pipelines-huggingface-langchain/cpu-lab/cleanup.sh`
-(`DELETE_IMAGE=true` also removes the local image).
 
 Coming back after a default cleanup: re-run the Step 1 commands above. When `ch19-cpu-spot` already
 exists they scale it back to 2 nodes (`CPU_NODES=1` for one) instead of creating it.
@@ -1531,8 +1530,6 @@ Cost notes (EKS, us-east-1 ballpark; check current pricing):
 - **ECR:** the trainer image is ~6–8 GB, billed per GB-month. Every rebuild with a new tag adds its
   changed layers, so Step 3's build block sets a lifecycle policy on `ch19-trainer` that keeps only
   the newest 5 images. `DELETE_CLOUD_RESOURCES=true` removes the whole repository.
-- **cpu-lab:** free apart from your laptop, but the 20 Gi PVC holds real data until `cpu-lab/cleanup.sh`
-  deletes the namespace.
 
 ## 8. Checkpoint questions
 
@@ -1584,18 +1581,19 @@ the evidence stays the same.
 <details>
 <summary>5. How does changing one line in <code>eks/serving.env</code> make vLLM serve the fine-tuned model, and why can't that pod ever load a half-copied model?</summary>
 
-`serving.env` feeds the `serving-params` ConfigMap, which keeps its hash suffix. A new `MODEL_PATH`
-gives a new ConfigMap name, kustomize rewrites the Deployment's `configMapKeyRef`, and the pod template
-changes, so `kubectl apply -k` triggers a `Recreate` rollout. The pod's `wait-for-model` init container
-sees a path starting with `/` and loops until `${MODEL_PATH}/_COMPLETE` exists. `finetune.py` writes
-that marker only after every merged-model file has been copied.
+`serving.env` regenerates the `serving-params` ConfigMap (Step 10). Re-applying it changes the
+Deployment's `configMapKeyRef` value but not the pod template's hash, so nothing rolls automatically
+any more — Step 10's explicit `kubectl rollout restart deploy/vllm` is what actually triggers the
+`Recreate` rollout. The pod's `wait-for-model` init container sees a path starting with `/` and
+loops until `${MODEL_PATH}/_COMPLETE` exists. `finetune.py` writes that marker only after every
+merged-model file has been copied.
 </details>
 
 <details>
 <summary>6. rag-api and the batch pipeline never changed when vLLM switched from the Hub model to the fine-tuned model. Why not?</summary>
 
 vLLM runs with `--served-model-name=ch19-model`, and clients always request model `ch19-model`
-(`CHAT_MODEL` in `params.env`) at `OPENAI_BASE_URL`. Which weights sit behind that name is a
+(`CHAT_MODEL` in `configmap-pipeline-params.yaml`) at `OPENAI_BASE_URL`. Which weights sit behind that name is a
 server-side setting (`MODEL_PATH`). `/v1/models` shows the real source in `root`.
 </details>
 
@@ -1614,10 +1612,8 @@ per request because that's TEI's default `--max-client-batch-size`. Bigger reque
 
 `build_llm` adds `extra_body={"chat_template_kwargs": {"enable_thinking": False}, "max_tokens": ...}`
 to every chat completion. vLLM passes `chat_template_kwargs` to Qwen3's chat template, which then skips
-the `<think>` block. Ollama (cpu-lab) ignores the field, which is why `cpu-lab/params.env` also sets
-`REASONING_EFFORT=none` (sent as `reasoning_effort`). `strip_think` is a safety net for anything that
-still leaks: a dangling `</think>` whose opening tag was in the prompt, or an
-answer cut off mid-thought by `max_tokens`.
+the `<think>` block. `strip_think` is a safety net for anything that still leaks: a dangling
+`</think>` whose opening tag was in the prompt, or an answer cut off mid-thought by `max_tokens`.
 </details>
 
 <details>
@@ -1641,7 +1637,7 @@ in `results_file`. If an interrupted attempt left a `results.jsonl` behind, the 
 </details>
 
 <details>
-<summary>11. After <code>kubectl apply -k eks</code>, your first training run sat with <code>finetune</code> Pending. Name the cause and two fixes.</summary>
+<summary>11. After applying <code>eks/</code>, your first training run sat with <code>finetune</code> Pending. Name the cause and two fixes.</summary>
 
 Chapter 01's EKS `spot-gpu` group has `maxSize: 1` (and no autoscaler), and the day-1 vLLM pod
 already held its only GPU. `finetune` requests `nvidia.com/gpu: 1` as well. Fix it by scaling vLLM to 0
@@ -1658,11 +1654,11 @@ second GPU node during training.
 - Storage semantics: [Mountpoint for S3 semantics](https://github.com/awslabs/mountpoint-s3/blob/main/doc/SEMANTICS.md), [Mountpoint S3 CSI driver](https://github.com/awslabs/mountpoint-s3-csi-driver), [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
 - Spot: [EC2 Spot interruption notices](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html), [EKS managed node groups and Spot](https://docs.aws.amazon.com/eks/latest/userguide/managed-node-groups.html#managed-node-group-capacity-types)
 - uv: [Running scripts with inline metadata (PEP 723)](https://docs.astral.sh/uv/guides/scripts/)
-- Cross-links: `01-gpu-nodes-and-scheduling` (the GPU pool), `05-model-storage-and-data` (bucket CSI + workload identity), `07-distributed-training-kubeflow-trainer` (multi-GPU training), `09-llm-inference-with-vllm` (vLLM shape, `hf-token` Secret pattern, cpu-lab Ollama), `10-autoscaling-inference` (scaling vLLM, incl. to zero), `15-mlops-gitops-and-pipelines` (Argo Workflows, MLflow, GitOps)
+- Cross-links: `01-gpu-nodes-and-scheduling` (the GPU pool), `05-model-storage-and-data` (bucket CSI + workload identity), `07-distributed-training-kubeflow-trainer` (multi-GPU training), `09-llm-inference-with-vllm` (vLLM shape, `hf-token` Secret pattern), `10-autoscaling-inference` (scaling vLLM, incl. to zero), `15-mlops-gitops-and-pipelines` (Argo Workflows, MLflow, GitOps)
 
 ### Versions tested
 
-Tested 2026-09-18 on Kubernetes 1.35. Keep in sync with `versions.env`, `common/src/trainer/requirements.txt`, the
+Tested 2026-09-18 on Kubernetes 1.35. Keep in sync with `versions.env`, `eks/src/trainer/requirements.txt`, the
 `Dockerfile`, and the PEP 723 headers in `hf_pull.py`, `rag_api.py` and `batch_infer.py`.
 
 | Component                                                    | Version                                                                                                                                    | Where it's pinned                                                                   |
@@ -1670,16 +1666,15 @@ Tested 2026-09-18 on Kubernetes 1.35. Keep in sync with `versions.env`, `common/
 | Argo Workflows (Helm chart `argo/argo-workflows`)            | `2.0.6`, app `v4.1.3`                                                                                                                      | `ARGO_WORKFLOWS_VERSION`                                                            |
 | vLLM                                                         | `vllm/vllm-openai:v0.29.0-cu129`                                                                                                           | `VLLM_VERSION` (+ `-cu129` suffix in `vllm-deployment.yaml`)                        |
 | Text Embeddings Inference                                    | `ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4`                                                                                  | `TEI_VERSION`                                                                       |
-| Ollama (cpu-lab LLM, from chapter 09)                        | `0.34.1`, model tag `qwen3:0.6b`                                                                                                           | `OLLAMA_VERSION`                                                                    |
 | uv image (pull steps, rag-api, batch)                        | `ghcr.io/astral-sh/uv:0.12.15-python3.12-trixie-slim`                                                                                      | manifests *(not in versions.env)*                                                   |
 | Trainer base image / uv binary                               | `python:3.12-slim-trixie` / `ghcr.io/astral-sh/uv:0.12.15`                                                                                 | `Dockerfile`                                                                        |
-| torch                                                        | `2.13.0` (`cu129` wheels for GPU, `cpu` for cpu-lab)                                                                                       | `Dockerfile` `TORCH_VERSION` / `TORCH_VARIANT`                                      |
+| torch                                                        | `2.13.0` (`cu129` wheels for GPU)                                                                                                          | `Dockerfile` `TORCH_VERSION` / `TORCH_VARIANT`                                      |
 | transformers / peft / trl / datasets / accelerate            | `5.17.0` / `0.21.0` / `1.13.0` / `5.0.1` / `1.15.0`                                                                                        | `requirements.txt` (`TRL_VERSION`)                                                  |
 | huggingface_hub                                              | `1.32.0`                                                                                                                                   | `requirements.txt`, `hf_pull.py`, `rag_api.py`, `batch_infer.py` (`HF_HUB_VERSION`) |
 | langchain-core / langchain-openai / langchain-text-splitters | `1.6.3` / `1.6.2` / `1.1.2`                                                                                                                | `rag_api.py`, `batch_infer.py` (`LANGCHAIN_CORE_VERSION`)                           |
 | numpy / fastapi / uvicorn                                    | `2.5.3` / `0.141.1` / `0.53.0`                                                                                                             | `rag_api.py` (fastapi/uvicorn), both scripts (numpy)                                |
 | busybox (`wait-for-model`)                                   | `1.37`                                                                                                                                     | `vllm-deployment.yaml`                                                              |
-| Models / dataset                                             | `Qwen/Qwen3-0.6B@c1899de…`, `HuggingFaceTB/SmolLM2-135M-Instruct@12fd25f…`, `trl-lib/Capybara@e235e84…`, `BAAI/bge-small-en-v1.5@5c38ec7…` | `params.env`, `cpu-lab/params.env`, `tei-deployment.yaml`                           |
+| Models / dataset                                             | `Qwen/Qwen3-0.6B@c1899de…`, `trl-lib/Capybara@e235e84…`, `BAAI/bge-small-en-v1.5@5c38ec7…`                                                 | `configmap-pipeline-params.yaml`, `tei-deployment.yaml`                            |
 | Mountpoint S3 CSI / GCS FUSE CSI / Blob CSI                  | managed add-on versions (depend on cluster version)                                                                                        | installed by Step 2's `eksctl create addon` block                                   |
 
 ---

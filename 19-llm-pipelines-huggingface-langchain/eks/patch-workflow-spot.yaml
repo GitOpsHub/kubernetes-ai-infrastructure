@@ -1,6 +1,0 @@
-# Managed node group spot label. (Karpenter: karpenter.sh/capacity-type: spot instead.)
-# GPU nodes also carry capacityType=SPOT but are tainted nvidia.com/gpu, so CPU steps never land there.
-- op: add
-  path: /spec/nodeSelector
-  value:
-    eks.amazonaws.com/capacityType: SPOT

@@ -1,0 +1,727 @@
+# Generated from eks/src/langchain_app/{rag_chain,rag_api,batch_infer}.py via:
+#   kubectl create configmap ch19-langchain-app --from-file=rag_chain.py --from-file=rag_api.py \
+#     --from-file=batch_infer.py --dry-run=client -o yaml
+# Mounted at /opt/app by rag-api-deployment.yaml and the batch-infer step of
+# workflowtemplate-langchain-batch.yaml. Regenerate after editing the source files, then
+#   kubectl -n ch19-pipelines rollout restart deploy/rag-api
+apiVersion: v1
+data:
+  batch_infer.py: |
+    # /// script
+    # requires-python = ">=3.12,<3.13"
+    # dependencies = [
+    #     "langchain-core==1.6.3",
+    #     "langchain-openai==1.6.2",
+    #     "langchain-text-splitters==1.1.2",
+    #     "huggingface-hub==1.32.0",
+    #     "numpy==2.5.3",
+    # ]
+    # ///
+    """Offline batch inference: questions from a JSONL file -> answers in a JSONL file on the bucket.
+
+    Run by the `langchain-batch-inference` WorkflowTemplate as `uv run /opt/app/batch_infer.py`.
+
+    Input  ($INPUT_PATH, one JSON object per line):   {"id": "q01", "question": "..."}
+    Output ($OUTPUT_DIR/results.jsonl, one per input): {"id", "question", "answer", "sources", "error",
+                                                        "model", "use_rag"}
+    then   ($OUTPUT_DIR/_COMPLETE, written LAST):      JSON summary incl. "results_file"
+
+    Storage rules (bucket mounts via Mountpoint for S3 / GCS FUSE, see chapter 05): write only NEW
+    files, sequentially, and never overwrite or rename. So:
+      - `_COMPLETE` exists: an earlier attempt already finished, so exit 0 and do nothing (an Argo
+        retry or a re-submitted step is idempotent).
+      - `results.jsonl` exists but `_COMPLETE` doesn't: an earlier attempt died mid-write (possible
+        on a plain PVC; bucket mounts usually drop an unclosed upload). We can't overwrite it, so
+        write `results-<UTC timestamp>.jsonl` instead. `_COMPLETE` names the file that counts.
+      - More than 50% of questions failed: write NOTHING and exit 1. Writing `_COMPLETE` would
+        make the retry skip itself and hide the failure. Writing a partial results file would just
+        leave junk behind. Per-item errors go to the log instead.
+      - At most 50% failed: write the results with per-row "error" fields, then `_COMPLETE`, exit 0.
+
+    LLM calls run concurrently through `chain.batch(..., max_concurrency=CONCURRENCY)`. vLLM's
+    continuous batching turns concurrent requests into GPU batches, so CONCURRENCY is the throughput
+    knob. Setting it higher than vLLM's --max-num-seqs only adds queueing.
+    """
+
+    from __future__ import annotations
+
+    import json
+    import logging
+    import os
+    import sys
+    import time
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    import rag_chain  # sibling module in the same dir (uv run puts the script dir on sys.path)
+
+    log = logging.getLogger("batch_infer")
+
+    MAX_FAILURE_RATIO = 0.5
+
+
+    def read_inputs(path: Path) -> list[dict]:
+        rows = []
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row.get("question"), str) or not row["question"].strip():
+                raise ValueError(f"{path}:{lineno}: missing or empty 'question'")
+            rows.append({"id": str(row.get("id", lineno)), "question": row["question"]})
+        if not rows:
+            raise ValueError(f"{path} contains no questions")
+        return rows
+
+
+    def pick_results_path(output_dir: Path) -> Path:
+        default = output_dir / "results.jsonl"
+        if not default.exists():
+            return default
+        alt = output_dir / f"results-{datetime.now(UTC):%Y%m%dT%H%M%SZ}.jsonl"
+        log.warning(
+            "%s exists without _COMPLETE (an earlier attempt died mid-write); it can't be "
+            "overwritten on a bucket mount, so writing %s instead",
+            default,
+            alt.name,
+        )
+        return alt
+
+
+    def write_new_file(path: Path, text: str) -> None:
+        # "x" = create-only: fails instead of silently overwriting, the same contract the bucket
+        # mount enforces, so a plain-PVC run (cpu-lab) behaves the same way.
+        with path.open("x", encoding="utf-8") as f:
+            f.write(text)
+
+
+    def main() -> int:
+        rag_chain.configure_logging()
+        settings = rag_chain.Settings.from_env()
+        use_rag = rag_chain.env_bool("USE_RAG", "true")
+        concurrency = int(os.environ.get("CONCURRENCY", "8"))
+        input_path = Path(
+            os.environ.get("INPUT_PATH", "/mnt/store/batch/inputs/prompts.jsonl")
+        )
+        if not os.environ.get("OUTPUT_DIR"):
+            log.error(
+                "OUTPUT_DIR is required (the workflow sets /mnt/store/batch/<workflow name>)"
+            )
+            return 2
+        output_dir = Path(os.environ["OUTPUT_DIR"])
+
+        complete = output_dir / "_COMPLETE"
+        if complete.exists():
+            log.info("%s exists: this batch already finished, nothing to do", complete)
+            return 0
+
+        inputs = read_inputs(input_path)
+        log.info(
+            "batch: %d questions from %s, use_rag=%s, concurrency=%d, llm=%s model=%s",
+            len(inputs),
+            input_path,
+            use_rag,
+            concurrency,
+            settings.openai_base_url,
+            settings.chat_model,
+        )
+
+        llm = rag_chain.build_llm(settings)
+        if use_rag:
+            store = rag_chain.build_vector_store(settings)
+            chain = rag_chain.build_rag_chain(
+                store.as_retriever(search_kwargs={"k": settings.top_k}), llm
+            )
+        else:
+            chain = rag_chain.build_chat_chain(llm)
+
+        started = time.monotonic()
+        # return_exceptions=True: one bad item (timeout, 400 for an over-long prompt) becomes an
+        # Exception in its slot instead of aborting the other N-1 answers.
+        outputs = chain.batch(
+            [{"question": r["question"]} for r in inputs],
+            config={"max_concurrency": concurrency},
+            return_exceptions=True,
+        )
+        elapsed = time.monotonic() - started
+
+        results, failed = [], 0
+        for row, out in zip(inputs, outputs, strict=True):
+            result = {**row, "answer": None, "sources": [], "error": None}
+            if isinstance(out, Exception):
+                failed += 1
+                result["error"] = f"{type(out).__name__}: {out}"
+                log.warning("id=%s failed: %s", row["id"], result["error"][:300])
+            elif use_rag:
+                result["answer"] = out["answer"]
+                result["sources"] = rag_chain.sources_of(out["docs"])
+            else:
+                result["answer"] = out
+            result["model"] = settings.chat_model
+            result["use_rag"] = use_rag
+            results.append(result)
+
+        total = len(inputs)
+        log.info(
+            "batch done in %.1fs: %d ok, %d failed (%.1f q/s)",
+            elapsed,
+            total - failed,
+            failed,
+            total / elapsed if elapsed else 0.0,
+        )
+        if failed / total > MAX_FAILURE_RATIO:
+            log.error(
+                "%d/%d (>%.0f%%) failed -- writing nothing to %s so a retry starts clean",
+                failed,
+                total,
+                MAX_FAILURE_RATIO * 100,
+                output_dir,
+            )
+            return 1
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        results_path = pick_results_path(output_dir)
+        write_new_file(
+            results_path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in results)
+        )
+        summary = {
+            "results_file": results_path.name,
+            "total": total,
+            "failed": failed,
+            "use_rag": use_rag,
+            "model": settings.chat_model,
+            "elapsed_seconds": round(elapsed, 2),
+            "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+        # LAST: its presence is what marks the results as valid.
+        write_new_file(complete, json.dumps(summary) + "\n")
+        log.info("wrote %s and %s", results_path, complete)
+        print(json.dumps(summary))
+        return 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+  rag_api.py: |
+    # /// script
+    # requires-python = ">=3.12,<3.13"
+    # dependencies = [
+    #     "langchain-core==1.6.3",
+    #     "langchain-openai==1.6.2",
+    #     "langchain-text-splitters==1.1.2",
+    #     "huggingface-hub==1.32.0",
+    #     "numpy==2.5.3",
+    #     "fastapi==0.141.1",
+    #     "uvicorn==0.53.0",
+    # ]
+    # ///
+    """RAG question-answering API over this course's docs.
+
+    Run with `uv run /opt/app/rag_api.py`: uv reads the inline metadata above, builds a cached venv
+    (in UV_CACHE_DIR) and starts the app. There's no image build step, so the ConfigMap is the
+    deployment artifact.
+
+    Endpoints (port 8080, or $PORT):
+      GET  /healthz  200 while the process is alive (liveness). 503 only if the index build
+                     failed for good, so the kubelet restarts the container.
+      GET  /readyz   200 once the vector index is built, 503 before (readiness: no traffic until then)
+      POST /ask      {"question": str} -> {"answer": str, "sources": [str]}   (RAG)
+      POST /chat     {"message": str}  -> {"answer": str}                     (plain LLM, no RAG)
+
+    The index is built in a background thread, so uvicorn serves /healthz right away while TEI is
+    still loading. Building it inside the lifespan would keep the port closed and make the startup
+    probe fail for the wrong reason. /readyz does NOT check the LLM: vLLM restarting shouldn't pull
+    this pod out of the Service. /ask returns 502 instead, and the client sees why.
+    """
+
+    from __future__ import annotations
+
+    import logging
+    import os
+    import threading
+    from contextlib import asynccontextmanager
+
+    import uvicorn
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import JSONResponse
+    from pydantic import BaseModel, Field
+
+    import rag_chain  # sibling module in the same dir (uv run puts the script dir on sys.path)
+
+    log = logging.getLogger("rag_api")
+    settings = rag_chain.Settings.from_env()
+
+
+    class AskRequest(BaseModel):
+        question: str = Field(min_length=1, max_length=4000)
+
+
+    class AskResponse(BaseModel):
+        answer: str
+        sources: list[str]
+
+
+    class ChatRequest(BaseModel):
+        message: str = Field(min_length=1, max_length=4000)
+
+
+    class ChatResponse(BaseModel):
+        answer: str
+
+
+    class State:
+        rag = None  # Runnable, set once the index is built
+        chat = None  # Runnable, available immediately (needs no index)
+        failed: str | None = None  # permanent startup failure -> /healthz 503
+
+
+    state = State()
+
+
+    def _build_index() -> None:
+        """Runs in a worker thread: blocking HTTP to TEI must not stall the event loop."""
+        try:
+            store = rag_chain.build_vector_store(settings)
+            retriever = store.as_retriever(search_kwargs={"k": settings.top_k})
+            state.rag = rag_chain.build_rag_chain(retriever, rag_chain.build_llm(settings))
+            log.info("RAG index ready -- /readyz now returns 200")
+        except Exception as exc:
+            state.failed = f"{type(exc).__name__}: {exc}"
+            log.exception("index build failed permanently, /healthz now returns 503")
+
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        log.info(
+            "starting: llm=%s model=%s embeddings=%s docs=%s top_k=%d disable_thinking=%s",
+            settings.openai_base_url,
+            settings.chat_model,
+            settings.embeddings_url,
+            settings.docs_dir,
+            settings.top_k,
+            settings.disable_thinking,
+        )
+        state.chat = rag_chain.build_chat_chain(rag_chain.build_llm(settings))
+        # A daemon thread, not asyncio.to_thread: executor threads are joined at interpreter exit,
+        # so a SIGTERM during the TEI retry loop would hang shutdown until the loop gave up.
+        threading.Thread(target=_build_index, name="build-index", daemon=True).start()
+        yield
+
+
+    app = FastAPI(title="ch19 RAG API", lifespan=lifespan)
+
+
+    @app.get("/healthz")
+    async def healthz():
+        if state.failed:
+            return JSONResponse(
+                {"status": "failed", "error": state.failed}, status_code=503
+            )
+        return {"status": "ok"}
+
+
+    @app.get("/readyz")
+    async def readyz():
+        if state.rag is None:
+            return JSONResponse({"status": "building index"}, status_code=503)
+        return {"status": "ready"}
+
+
+    @app.post("/ask", response_model=AskResponse)
+    async def ask(req: AskRequest) -> AskResponse:
+        if state.rag is None:
+            raise HTTPException(status_code=503, detail="index not built yet")
+        try:
+            out = await state.rag.ainvoke({"question": req.question})
+        # LLM or TEI unreachable/erroring: a bad gateway, not a bug in this service.
+        except Exception as exc:
+            log.warning("/ask failed: %s: %s", type(exc).__name__, exc)
+            raise HTTPException(
+                status_code=502, detail=f"{type(exc).__name__}: {exc}"
+            ) from exc
+        sources = rag_chain.sources_of(out["docs"])
+        log.info(
+            "/ask q=%r sources=%s answer_chars=%d",
+            req.question[:80],
+            sources,
+            len(out["answer"]),
+        )
+        return AskResponse(answer=out["answer"], sources=sources)
+
+
+    @app.post("/chat", response_model=ChatResponse)
+    async def chat(req: ChatRequest) -> ChatResponse:
+        try:
+            answer = await state.chat.ainvoke({"question": req.message})
+        except Exception as exc:
+            log.warning("/chat failed: %s: %s", type(exc).__name__, exc)
+            raise HTTPException(
+                status_code=502, detail=f"{type(exc).__name__}: {exc}"
+            ) from exc
+        return ChatResponse(answer=answer)
+
+
+    if __name__ == "__main__":
+        rag_chain.configure_logging()
+        uvicorn.run(
+            app,
+            host="0.0.0.0",
+            port=int(os.environ.get("PORT", "8080")),
+            log_config=None,  # keep our logging format instead of uvicorn's own
+            # Probes hit every few seconds; don't log each one. Our own handlers log what matters.
+            access_log=False,
+        )
+  rag_chain.py: |
+    """Shared LangChain building blocks for rag_api.py and batch_infer.py.
+
+    Both scripts `import rag_chain`. `uv run /opt/app/<script>.py` puts the script's own directory
+    first on sys.path, and the ConfigMap `ch19-langchain-app` mounts all three files flat in /opt/app,
+    so the import works in the pod and on a laptop. This module has no PEP 723 header of its own: it
+    runs inside the environment of whichever script imported it, so its imports must stay a subset of
+    the dependencies BOTH scripts declare.
+
+    The pieces:
+      - Settings            every env var, read once, with in-cluster defaults
+      - TEIEmbeddings       LangChain Embeddings backed by a Text Embeddings Inference (TEI) server
+      - build_vector_store  DOCS_DIR/*.md -> chunks -> embeddings -> InMemoryVectorStore
+      - build_rag_chain     LCEL: {"question"} -> retrieve -> prompt -> LLM -> {"answer", "docs"}
+      - build_chat_chain    LCEL: {"question"} -> prompt -> LLM -> str (no retrieval)
+    """
+
+    from __future__ import annotations
+
+    import logging
+    import os
+    import re
+    import time
+    from dataclasses import dataclass
+    from operator import itemgetter
+    from pathlib import Path
+
+    from huggingface_hub import InferenceClient
+    from langchain_core.documents import Document
+    from langchain_core.embeddings import Embeddings
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_core.retrievers import BaseRetriever
+    from langchain_core.runnables import (
+        Runnable,
+        RunnableLambda,
+        RunnableParallel,
+        RunnablePassthrough,
+    )
+    from langchain_core.vectorstores import InMemoryVectorStore
+    from langchain_openai import ChatOpenAI
+    from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
+
+    log = logging.getLogger("rag_chain")
+
+
+    def env_bool(name: str, default: str) -> bool:
+        return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+    @dataclass(frozen=True)
+    class Settings:
+        openai_base_url: str
+        openai_api_key: str
+        chat_model: str
+        embeddings_url: str
+        docs_dir: Path
+        disable_thinking: bool
+        top_k: int
+        max_tokens: int
+        # Not in the chapter's params: tuning knobs with sane defaults, overridable if you need them.
+        request_timeout: float
+        embeddings_wait_seconds: float
+        reasoning_effort: str
+
+        @classmethod
+        def from_env(cls) -> Settings:
+            return cls(
+                openai_base_url=os.environ.get(
+                    "OPENAI_BASE_URL",
+                    "http://vllm.ch19-pipelines.svc.cluster.local:8000/v1",
+                ),
+                # vLLM/Ollama ignore the key, but the OpenAI client refuses to start without one.
+                openai_api_key=os.environ.get("OPENAI_API_KEY", "not-needed"),
+                chat_model=os.environ.get("CHAT_MODEL", "ch19-model"),
+                embeddings_url=os.environ.get(
+                    "EMBEDDINGS_URL", "http://tei.ch19-pipelines.svc.cluster.local:8080"
+                ),
+                docs_dir=Path(os.environ.get("DOCS_DIR", "/opt/app/docs")),
+                disable_thinking=env_bool("DISABLE_THINKING", "true"),
+                top_k=int(os.environ.get("TOP_K", "4")),
+                max_tokens=int(os.environ.get("MAX_TOKENS", "512")),
+                request_timeout=float(os.environ.get("REQUEST_TIMEOUT", "120")),
+                embeddings_wait_seconds=float(
+                    os.environ.get("EMBEDDINGS_WAIT_SECONDS", "600")
+                ),
+                reasoning_effort=os.environ.get("REASONING_EFFORT", "").strip(),
+            )
+
+
+    # ---------------------------------------------------------------------------------------------
+    # Embeddings: TEI over HTTP
+    # ---------------------------------------------------------------------------------------------
+    # Why not langchain_huggingface.HuggingFaceEndpointEmbeddings(model=EMBEDDINGS_URL)?
+    # In langchain-huggingface 1.2.2 its `validate_environment` validator raises
+    # "`model` must be a HuggingFace repo ID, not a URL." for any http(s):// value, so it can no
+    # longer point at a self-hosted TEI Service. Under the hood it only wrapped
+    # huggingface_hub.InferenceClient.feature_extraction anyway, which we call directly here.
+    # Re-evaluate if a later langchain-huggingface release accepts endpoint URLs again.
+    #
+    # What goes over the wire (huggingface_hub 1.32.0, TEI 1.9.4 -- both verified from source):
+    # InferenceClient(model=<URL>) routes to the "hf-inference" provider, which POSTs to the URL
+    # itself, i.e. `POST http://tei...:8080/` with body {"inputs": [...], "truncate": true}.
+    # For an embedding model TEI's router maps `POST /` to the same handler as `POST /embed` and
+    # answers with [[float, ...], ...] (L2-normalized by default).
+    # TEI's --max-client-batch-size default; larger requests get HTTP 413.
+    TEI_MAX_CLIENT_BATCH = 32
+
+
+    class TEIEmbeddings(Embeddings):
+        """LangChain Embeddings that call a TEI server through huggingface_hub's InferenceClient."""
+
+        def __init__(
+            self, url: str, batch_size: int = TEI_MAX_CLIENT_BATCH, timeout: float = 60
+        ):
+            self.url = url.rstrip("/")
+            self.batch_size = batch_size
+            self.client = InferenceClient(model=self.url, timeout=timeout)
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            vectors: list[list[float]] = []
+            for start in range(0, len(texts), self.batch_size):
+                batch = texts[start : start + self.batch_size]
+                # truncate=True: bge-small has a 512-token window. TEI 1.9 already auto-truncates by
+                # default, but being explicit keeps a server started with --auto-truncate=false
+                # from rejecting a long chunk with HTTP 413.
+                arr = self.client.feature_extraction(batch, truncate=True)
+                # feature_extraction returns a float32 ndarray of shape (len(batch), dim) for a list
+                # input. Check the shape so a server misconfiguration (e.g. a token-level model that
+                # returns (batch, tokens, dim)) fails loudly here instead of breaking retrieval quietly.
+                if arr.ndim != 2 or arr.shape[0] != len(batch):
+                    raise ValueError(
+                        f"TEI at {self.url} returned shape {arr.shape}, expected ({len(batch)}, dim)"
+                    )
+                vectors.extend(arr.tolist())
+            return vectors
+
+        def embed_query(self, text: str) -> list[float]:
+            return self.embed_documents([text])[0]
+
+
+    def wait_for_embeddings(embeddings: TEIEmbeddings, max_wait_seconds: float) -> None:
+        """Block until TEI answers a real embedding request, with capped exponential backoff.
+
+        The TEI pod downloads bge-small and warms up on start, so right after `kubectl apply` (or a
+        spot reclaim that moved both pods) the Service exists but connections are refused or answered
+        with 503 for a while. Retrying here instead of crashing avoids a CrashLoopBackOff whose own
+        back-off (up to 5 min) would delay readiness far longer than TEI actually needs.
+        """
+        deadline = time.monotonic() + max_wait_seconds
+        delay, attempt = 2.0, 0
+        while True:
+            attempt += 1
+            try:
+                dim = len(embeddings.embed_query("readiness probe"))
+                log.info(
+                    "TEI at %s is up (attempt %d, embedding dim %d)",
+                    embeddings.url,
+                    attempt,
+                    dim,
+                )
+                return
+            # Connection refused, 503 while loading, DNS not ready yet, ...
+            except Exception as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"TEI at {embeddings.url} not reachable after {max_wait_seconds:.0f}s: {exc}"
+                    ) from exc
+                log.warning(
+                    "TEI at %s not ready (attempt %d): %s: %s -- retrying in %.0fs",
+                    embeddings.url,
+                    attempt,
+                    type(exc).__name__,
+                    str(exc)[:200],
+                    min(delay, remaining),
+                )
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 30.0)
+
+
+    # ---------------------------------------------------------------------------------------------
+    # Corpus -> vector store
+    # ---------------------------------------------------------------------------------------------
+    def load_documents(docs_dir: Path) -> list[Document]:
+        # A ConfigMap volume holds the real files under a hidden `..<timestamp>/` dir with top-level
+        # symlinks to them. The top-level glob only sees the symlinks, so each doc is read once.
+        paths = sorted(p for p in docs_dir.glob("*.md") if p.is_file())
+        if not paths:
+            raise FileNotFoundError(f"no *.md files in DOCS_DIR={docs_dir}")
+        return [
+            Document(
+                page_content=p.read_text(encoding="utf-8"), metadata={"source": p.name}
+            )
+            for p in paths
+        ]
+
+
+    def build_vector_store(settings: Settings) -> InMemoryVectorStore:
+        """Load, chunk and embed DOCS_DIR into an in-process vector store (rebuilt on every start).
+
+        In-memory is deliberate for a lab-sized corpus: no extra database to run, and the index is
+        rebuilt in a second or two from the ConfigMap. The trade-off: every replica embeds the corpus
+        on startup, and nothing persists. A real corpus belongs in pgvector/Qdrant/OpenSearch.
+        """
+        docs = load_documents(settings.docs_dir)
+        # Markdown-aware separators split on headings first, then paragraphs. ~800 characters
+        # (~200 tokens) per chunk sits well inside bge-small's 512-token window.
+        splitter = RecursiveCharacterTextSplitter.from_language(
+            Language.MARKDOWN, chunk_size=800, chunk_overlap=100
+        )
+        chunks = splitter.split_documents(docs)
+        log.info(
+            "loaded %d docs from %s -> %d chunks", len(docs), settings.docs_dir, len(chunks)
+        )
+
+        embeddings = TEIEmbeddings(
+            settings.embeddings_url, timeout=settings.request_timeout
+        )
+        wait_for_embeddings(embeddings, settings.embeddings_wait_seconds)
+
+        store = InMemoryVectorStore(embedding=embeddings)
+        store.add_documents(chunks)
+        log.info("indexed %d chunks into InMemoryVectorStore", len(chunks))
+        return store
+
+
+    # ---------------------------------------------------------------------------------------------
+    # LLM + chains
+    # ---------------------------------------------------------------------------------------------
+    def build_llm(settings: Settings) -> ChatOpenAI:
+        """An OpenAI-compatible chat client aimed at vLLM (GPU) or Ollama (cpu-lab)."""
+        extra_body: dict = {
+            # langchain-openai 1.6 sends the limit as `max_completion_tokens`. vLLM honours that, but
+            # Ollama's OpenAI endpoint reads only `max_tokens`, so repeat it for portability.
+            "max_tokens": settings.max_tokens,
+        }
+        if settings.disable_thinking:
+            # Qwen3 "thinks" (<think>...</think>) before answering by default, which burns the token
+            # budget and latency. vLLM forwards chat_template_kwargs to the chat template, where
+            # enable_thinking=False switches it off. Servers that don't know the field ignore it.
+            extra_body["chat_template_kwargs"] = {"enable_thinking": False}
+        if settings.reasoning_effort:
+            # Opt-in, for Ollama (cpu-lab sets REASONING_EFFORT=none). Ollama's OpenAI endpoint
+            # drops chat_template_kwargs and turns thinking ON by default for qwen3. Its only
+            # off-switch on /v1 is `reasoning_effort: "none"` (mapped to Think=false). Without
+            # it, qwen3:0.6b can spend all of MAX_TOKENS reasoning and return an empty answer.
+            # Leave it unset for vLLM: its ChatCompletionRequest validates reasoning_effort.
+            # VERIFY: whether vLLM v0.29 accepts "none" (believed to allow only low|medium|high).
+            extra_body["reasoning_effort"] = settings.reasoning_effort
+        return ChatOpenAI(
+            model=settings.chat_model,
+            base_url=settings.openai_base_url,
+            api_key=settings.openai_api_key,
+            max_tokens=settings.max_tokens,
+            temperature=0.2,  # grounded Q&A: little creativity wanted
+            timeout=settings.request_timeout,
+            max_retries=2,  # the OpenAI SDK's own backoff on connection errors / 429 / 5xx
+            extra_body=extra_body,
+        )
+
+
+    _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+    def strip_think(text: str) -> str:
+        """Remove Qwen3 reasoning from an answer, even if enable_thinking was not honoured.
+
+        Cases handled: a complete <think>...</think> block (server ignored chat_template_kwargs, e.g.
+        Ollama); a dangling </think> whose opening tag the chat template already emitted in the
+        prompt; and an unterminated <think> (the model ran out of max_tokens mid-thought).
+        """
+        text = _THINK_BLOCK.sub("", text)
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[1]
+        if "<think>" in text:
+            text = text.split("<think>", 1)[0]
+        return text.strip()
+
+
+    RAG_PROMPT = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                (
+                    "You are a support assistant for a Kubernetes AI platform course. Answer the "
+                    "question using ONLY the context below. If the context does not contain the "
+                    "answer, say you don't know. Be concise and mention the relevant Kubernetes "
+                    "objects or flags.\n\nContext:\n{context}"
+                ),
+            ),
+            ("human", "{question}"),
+        ]
+    )
+
+    CHAT_PROMPT = ChatPromptTemplate.from_messages(
+        [
+            ("system", "You are a concise, helpful assistant for platform engineers."),
+            ("human", "{question}"),
+        ]
+    )
+
+
+    def format_docs(docs: list[Document]) -> str:
+        return "\n\n".join(
+            f"[{d.metadata.get('source', '?')}]\n{d.page_content}" for d in docs
+        )
+
+
+    def build_rag_chain(retriever: BaseRetriever, llm: BaseChatModel) -> Runnable:
+        """{"question": str} -> {"question": str, "docs": [Document], "answer": str}.
+
+        The retrieved docs are kept in the output (instead of being hidden inside the prompt) so
+        callers can return them as sources, which is how you debug a bad RAG answer.
+        """
+        answer = (
+            RunnablePassthrough.assign(context=lambda x: format_docs(x["docs"]))
+            | RAG_PROMPT
+            | llm
+            | StrOutputParser()
+            | RunnableLambda(strip_think)
+        )
+        return RunnableParallel(
+            docs=itemgetter("question") | retriever,
+            question=itemgetter("question"),
+        ).assign(answer=answer)
+
+
+    def build_chat_chain(llm: BaseChatModel) -> Runnable:
+        """{"question": str} -> str. Same LLM, no retrieval: the baseline to compare RAG against."""
+        return CHAT_PROMPT | llm | StrOutputParser() | RunnableLambda(strip_think)
+
+
+    def sources_of(docs: list[Document]) -> list[str]:
+        """Unique source file names, in retrieval-rank order."""
+        return list(dict.fromkeys(d.metadata.get("source", "?") for d in docs))
+
+
+    def configure_logging() -> None:
+        logging.basicConfig(
+            level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+        # httpx (huggingface_hub) and httpx2 (openai SDK 3.x) log every request at INFO: one line per
+        # embedding batch / LLM call would drown the useful lines.
+        for noisy in ("httpx", "httpx2"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+kind: ConfigMap
+metadata:
+  name: ch19-langchain-app
+  namespace: ch19-pipelines

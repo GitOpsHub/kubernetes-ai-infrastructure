@@ -1,0 +1,31 @@
+# Pipeline parameters. Feeds the WorkflowTemplates' default arguments (workflowtemplate-hf-finetune.yaml,
+# workflowtemplate-langchain-batch.yaml -- copied in literally below, since there is no more kustomize
+# `replacements` transformer to do it at apply time) and, via envFrom, the trainer/rag-api containers.
+# Anything here can still be overridden per run: argo submit ... -p max-steps=50
+# Revisions are commit SHAs, never "main": every retry / every node loads identical bytes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-params
+  namespace: ch19-pipelines
+data:
+  MODEL_ID: Qwen/Qwen3-0.6B
+  MODEL_REVISION: c1899de289a04d12100db370d81485cdf75e47ca
+  DATASET_ID: trl-lib/Capybara
+  DATASET_REVISION: e235e846458bff3398a88aed812347f7f0756520
+  MAX_STEPS: "200"
+  MAX_EVAL_LOSS: "2.5"
+  # Trainer knobs read at runtime (envFrom) by finetune.py / evaluate.py -- not workflow parameters.
+  SAVE_STEPS: "50"
+  LEARNING_RATE: "2e-4"
+  MAX_LENGTH: "1024"
+  PER_DEVICE_BATCH: "4"
+  GRAD_ACCUM: "4"
+  LORA_R: "16"
+  TRAIN_SAMPLES: "2000"
+  EVAL_SAMPLES: "200"
+  # Where the LangChain app / batch pipeline send chat requests (OpenAI-compatible API).
+  OPENAI_BASE_URL: http://vllm.ch19-pipelines.svc.cluster.local:8000/v1
+  CHAT_MODEL: ch19-model
+  EMBEDDINGS_URL: http://tei.ch19-pipelines.svc.cluster.local:8080
+  DISABLE_THINKING: "true"

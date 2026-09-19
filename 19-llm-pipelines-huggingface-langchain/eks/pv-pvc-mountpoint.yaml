@@ -1,6 +1,7 @@
 # Static PV for the chapter bucket (Mountpoint for Amazon S3 CSI driver v2). One PV/PVC for every
 # pod: WHO may write is decided by the pod's ServiceAccount (authenticationSource: pod), not by the
 # volume -- pipeline-runner's role can PutObject, model-reader's role can only GetObject.
+# ${S3_BUCKET} is filled in by envsubst from bucket.env (README Step 2), same pattern as chapter 05.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -23,13 +24,14 @@ spec:
     driver: s3.csi.aws.com
     volumeHandle: ch19-model-store       # must be unique per PV in the cluster
     volumeAttributes:
-      bucketName: REPLACED_BY_KUSTOMIZE  # bucket.env -> storage-params -> here
+      bucketName: ${S3_BUCKET}
       authenticationSource: pod
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: model-store
+  namespace: ch19-pipelines
 spec:
   accessModes: ["ReadWriteMany"]
   storageClassName: ""

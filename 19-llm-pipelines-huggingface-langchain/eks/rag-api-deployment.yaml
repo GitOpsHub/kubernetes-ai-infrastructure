@@ -5,12 +5,15 @@
 # (cold starts, PyPI availability and supply-chain pinning all argue for it).
 #   POST /ask  {"question": "..."}  -> {"answer": ..., "sources": [...]}   (RAG)
 #   POST /chat {"message": "..."}   -> plain LLM, no retrieval
-# Code changes: ConfigMaps are generated without a hash suffix (Argo references them by name too),
-# so after editing src/ run: kubectl -n ch19-pipelines rollout restart deploy/rag-api
+# Code changes: these plain ConfigMaps have no hash suffix (Argo references them by name too), so
+# after editing eks/src/ and regenerating configmap-ch19-langchain-app.yaml (see its header) run:
+#   kubectl apply -f 19-llm-pipelines-huggingface-langchain/eks/configmap-ch19-langchain-app.yaml
+#   kubectl -n ch19-pipelines rollout restart deploy/rag-api
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rag-api
+  namespace: ch19-pipelines
   labels:
     app.kubernetes.io/name: rag-api
 spec:
@@ -24,6 +27,8 @@ spec:
         app.kubernetes.io/name: rag-api
     spec:
       serviceAccountName: rag-api
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
       terminationGracePeriodSeconds: 20
       containers:
       - name: rag-api
@@ -42,7 +47,10 @@ spec:
         - name: DISABLE_THINKING
           valueFrom:
             configMapKeyRef: {name: pipeline-params, key: DISABLE_THINKING}
-        # Only cpu-lab sets it (=none: the one switch that turns off qwen3 thinking on Ollama's /v1).
+        # Unset by default (not in configmap-pipeline-params.yaml): vLLM is believed to reject
+        # "none" for this field (see the README's Troubleshooting `# VERIFY:` entry). Left as an
+        # optional key ref for a non-vLLM OpenAI-compatible backend whose only thinking off-switch
+        # is `reasoning_effort: "none"`.
         - name: REASONING_EFFORT
           valueFrom:
             configMapKeyRef: {name: pipeline-params, key: REASONING_EFFORT, optional: true}
@@ -98,6 +106,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: rag-api
+  namespace: ch19-pipelines
   labels:
     app.kubernetes.io/name: rag-api
 spec:

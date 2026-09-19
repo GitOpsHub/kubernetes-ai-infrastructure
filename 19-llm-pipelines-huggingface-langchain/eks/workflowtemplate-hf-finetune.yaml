@@ -5,15 +5,17 @@
 #                ├─> finetune (GPU, spot, retried) ─> evaluate (GPU, gate) ─> publish (CPU, optional)
 #   pull-dataset ┘
 #
-# !! TEMPLATE ORDER IS A CONTRACT !! Cloud overlays patch GPU scheduling with index-based JSON6902
-# patches (kustomize cannot select list items by name in a JSON patch). Each patch starts with a
-# `test` op on the template name, so reordering fails the build loudly instead of silently
-# patching a neighbour. Indices:  0 pipeline | 1 hf-pull | 2 finetune | 3 evaluate | 4 publish
-#
 # Every step writes to the bucket-backed PVC "model-store" (/mnt/store). Bucket FUSE mounts
 # (Mountpoint for S3, Cloud Storage FUSE) can't rename or overwrite files, so every step works in a
 # local /scratch emptyDir, copies NEW files into the bucket and writes a _COMPLETE marker LAST.
 # That is what makes each step safely re-runnable after a spot preemption.
+#
+# Node scheduling (EKS spot CPU/GPU pools, folded in directly -- see nodegroup-ch19.yaml and
+# 01-gpu-nodes-and-scheduling's "spot-gpu" group): the workflow-level nodeSelector below puts every
+# CPU step (hf-pull, publish) on ch19-cpu-spot; finetune/evaluate set their own template-level
+# nodeSelector because Argo's template nodeSelector REPLACES the workflow one, not merges it.
+#
+# TRAINER_IMAGE is an envsubst placeholder filled in from images.env (README Step 3, ECR image).
 #
 # Submit (Argo CLI):  argo submit -n ch19-pipelines --from workflowtemplate/hf-finetune-pipeline \
 #                       -p run-id=qwen3-sft-001 --watch
@@ -24,19 +26,20 @@ metadata:
   namespace: ch19-pipelines
 spec:
   entrypoint: pipeline
-  serviceAccountName: pipeline-runner     # bucket read/write + Argo executor RBAC (common/base)
+  serviceAccountName: pipeline-runner     # bucket read/write + Argo executor RBAC (rbac-argo-executor.yaml)
+  nodeSelector:
+    eks.amazonaws.com/capacityType: SPOT
   arguments:
     parameters:
-    # Defaults below are overwritten at build time from params.env (replacements in common/kustomization.yaml);
-    # the literal values here only document the shape.
+    # Defaults below match configmap-pipeline-params.yaml -- keep them in sync if you edit one.
     - name: model-id
-      value: REPLACED_FROM_PARAMS
+      value: Qwen/Qwen3-0.6B
     - name: model-revision
-      value: REPLACED_FROM_PARAMS
+      value: c1899de289a04d12100db370d81485cdf75e47ca
     - name: dataset-id
-      value: REPLACED_FROM_PARAMS
+      value: trl-lib/Capybara
     - name: dataset-revision
-      value: REPLACED_FROM_PARAMS
+      value: e235e846458bff3398a88aed812347f7f0756520
     # Checkpoints + final model live under /mnt/store/runs/<run-id>/. Re-submitting with the SAME
     # run-id resumes from its last complete checkpoint (or is a no-op if the model is complete).
     # Default "{{workflow.name}}" resolves because run-id only reaches a pod through a template
@@ -49,9 +52,9 @@ spec:
     - name: run-id
       value: "{{workflow.name}}"
     - name: max-steps
-      value: REPLACED_FROM_PARAMS
+      value: "200"
     - name: max-eval-loss
-      value: REPLACED_FROM_PARAMS
+      value: "2.5"
     # "" = skip the publish step. Set to e.g. your-user/ch19-qwen3-0.6b-sft (needs a WRITE token
     # in Secret hf-token).
     - name: hf-push-repo
@@ -211,12 +214,15 @@ spec:
     # in-flight step and push a checkpoint where the notice allows it; the periodic SAVE_STEPS
     # checkpoints are the real safety net everywhere.
     podSpecPatch: '{"terminationGracePeriodSeconds": 110}'
+    nodeSelector:
+      eks.amazonaws.com/capacityType: SPOT
+      nvidia.com/gpu.present: "true"     # set at boot by nodeadm on the EKS AL2023 NVIDIA AMI (ch01)
     tolerations:
     - key: nvidia.com/gpu
       operator: Exists
       effect: NoSchedule
     container:
-      image: ch19-trainer:REPLACED_BY_OVERLAY
+      image: ${TRAINER_IMAGE}
       # Write the output parameter first, then exec so python replaces the shell. Argo's emissary
       # (PID 1 in the container) forwards SIGTERM to the child's whole process group, so python
       # gets the signal either way; exec just removes the shell so finetune.py's exit code
@@ -280,12 +286,15 @@ spec:
         cap: "5m"
     activeDeadlineSeconds: 3600
     podSpecPatch: '{"terminationGracePeriodSeconds": 30}'
+    nodeSelector:
+      eks.amazonaws.com/capacityType: SPOT
+      nvidia.com/gpu.present: "true"
     tolerations:
     - key: nvidia.com/gpu
       operator: Exists
       effect: NoSchedule
     container:
-      image: ch19-trainer:REPLACED_BY_OVERLAY
+      image: ${TRAINER_IMAGE}
       command: ["python", "/app/evaluate.py"]
       envFrom:
       - configMapRef: {name: pipeline-params}   # EVAL_SAMPLES, MAX_LENGTH
@@ -331,7 +340,7 @@ spec:
         cap: "5m"
     activeDeadlineSeconds: 3600
     container:
-      image: ch19-trainer:REPLACED_BY_OVERLAY
+      image: ${TRAINER_IMAGE}
       command: ["python", "/app/publish_hf.py"]
       env:
       - {name: MODEL_PATH, value: "{{inputs.parameters.model-path}}"}

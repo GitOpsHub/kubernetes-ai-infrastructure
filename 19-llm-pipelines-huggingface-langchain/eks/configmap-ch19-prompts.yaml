@@ -1,0 +1,22 @@
+# Generated from eks/src/langchain_app/prompts.jsonl via:
+#   kubectl create configmap ch19-prompts --from-file=prompts.jsonl --dry-run=client -o yaml
+# Seed input for the batch pipeline (workflowtemplate-langchain-batch.yaml, seed-prompts step).
+apiVersion: v1
+data:
+  prompts.jsonl: |
+    {"id": "q01", "question": "Which taint must a pod tolerate to run on a GPU node, and what extra toleration does AKS need for spot pools?"}
+    {"id": "q02", "question": "Why do GPU node pools use a minimum size of zero?"}
+    {"id": "q03", "question": "What does Kueue do with a Job that has the kueue.x-k8s.io/queue-name label before it is admitted?"}
+    {"id": "q04", "question": "How can one team borrow another team's unused GPU quota in Kueue?"}
+    {"id": "q05", "question": "Why does vLLM's startupProbe allow about 10 minutes?"}
+    {"id": "q06", "question": "What does --gpu-memory-utilization=0.90 reserve memory for?"}
+    {"id": "q07", "question": "Why is a _COMPLETE marker written last when copying a model to a bucket?"}
+    {"id": "q08", "question": "Why must files be written to local scratch before copying them onto a Mountpoint for S3 volume?"}
+    {"id": "q09", "question": "Why can't an HPA scale vLLM to zero replicas, and how does KEDA handle it?"}
+    {"id": "q10", "question": "Roughly how long can a cold start from zero GPU replicas take in the worst case?"}
+    {"id": "q11", "question": "How do you turn off Qwen3's thinking mode when calling vLLM?"}
+    {"id": "q12", "question": "Why is strategy Recreate used for a single-GPU vLLM Deployment?"}
+kind: ConfigMap
+metadata:
+  name: ch19-prompts
+  namespace: ch19-pipelines

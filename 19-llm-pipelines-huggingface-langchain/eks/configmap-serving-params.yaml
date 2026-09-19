@@ -1,0 +1,12 @@
+# What vLLM serves. Day 1: straight from the Hub. After a pipeline run, set MODEL_PATH to the
+# workflow's output:
+#   argo get -n ch19-pipelines <workflow> -o json | jq -r '.status.outputs.parameters[] | select(.name=="model-path").value'
+# There is no more kustomize hash suffix to force a rollout when this changes: after editing and
+# re-applying this file, run `kubectl -n ch19-pipelines rollout restart deploy/vllm` yourself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: serving-params
+  namespace: ch19-pipelines
+data:
+  MODEL_PATH: Qwen/Qwen3-0.6B

@@ -1,7 +1,0 @@
-# The fine-tuning WorkflowTemplate. Needs Argo Workflows' CRDs (see <cloud>/install.sh) and the
-# pieces from ../base + the ch19-scripts ConfigMap generated in ../kustomization.yaml.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: ch19-pipelines
-resources:
-  - workflowtemplate-hf-finetune.yaml

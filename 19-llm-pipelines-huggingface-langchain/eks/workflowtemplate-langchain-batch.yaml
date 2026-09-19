@@ -1,11 +1,14 @@
 # Offline / batch LLM inference with LangChain: run every prompt in a JSONL file through the same
-# RAG chain the online rag-api uses, against the in-cluster OpenAI-compatible endpoint (vLLM, or
-# Ollama in cpu-lab), and write the answers back to the bucket.
+# RAG chain the online rag-api uses, against the in-cluster OpenAI-compatible endpoint (vLLM), and
+# write the answers back to the bucket.
 #
 #   seed-prompts ─> wait-for-llm ─> batch-infer
 #
 # Template indices (overlays reference them): 0 main | 1 seed-prompts | 2 wait-for-llm | 3 batch-infer
 # All steps are CPU-only: the GPU work happens inside the vLLM Deployment this workflow calls.
+#
+# All steps run on the EKS CPU spot node group (ch19-cpu-spot, nodegroup-ch19.yaml) via the
+# workflow-level nodeSelector below.
 #
 # Submit:  argo submit -n ch19-pipelines --from workflowtemplate/langchain-batch-inference --watch
 # Output:  /mnt/store/batch/<workflow name>/results.jsonl + _COMPLETE. _COMPLETE is JSON and its
@@ -20,16 +23,18 @@ metadata:
 spec:
   entrypoint: main
   serviceAccountName: pipeline-runner
+  nodeSelector:
+    eks.amazonaws.com/capacityType: SPOT
   arguments:
     parameters:
     - name: use-rag                       # "false" = plain LLM, no retrieval (compare the answers!)
       value: "true"
     - name: concurrency                   # max in-flight requests (LangChain max_concurrency)
       value: "8"
-    - name: openai-base-url               # overwritten from params.env (common/kustomization.yaml)
-      value: REPLACED_FROM_PARAMS
-    - name: chat-model                    # vLLM --served-model-name / Ollama model tag
-      value: REPLACED_FROM_PARAMS
+    - name: openai-base-url               # matches configmap-pipeline-params.yaml's OPENAI_BASE_URL
+      value: http://vllm.ch19-pipelines.svc.cluster.local:8000/v1
+    - name: chat-model                    # matches configmap-pipeline-params.yaml's CHAT_MODEL
+      value: ch19-model
   activeDeadlineSeconds: 7200
   ttlStrategy:
     secondsAfterSuccess: 86400

@@ -1,6 +1,0 @@
-# LangChain batch-inference WorkflowTemplate (CPU steps calling the in-cluster LLM endpoint).
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: ch19-pipelines
-resources:
-  - workflowtemplate-langchain-batch.yaml

@@ -1,7 +1,8 @@
 # vLLM serving either the base model straight from the Hub or the model the pipeline fine-tuned,
 # read from the bucket. Which one is decided by MODEL_PATH in ConfigMap serving-params
-# (serving.env): change it, `kubectl apply -k` again, and the ConfigMap's hash suffix changes, which
-# rolls this Deployment automatically.
+# (configmap-serving-params.yaml): edit it, `kubectl apply -f` it again, then
+#   kubectl -n ch19-pipelines rollout restart deploy/vllm
+# (no more kustomize hash suffix to trigger the rollout automatically).
 #   MODEL_PATH=Qwen/Qwen3-0.6B                          -> download from the Hub (day 1)
 #   MODEL_PATH=/mnt/store/runs/<run-id>/model           -> fine-tuned, from the bucket (read-only)
 # Same shape as chapter 09 (Recreate, probes, preStop, 25s grace) -- see its README for the why.
@@ -9,6 +10,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: vllm
+  namespace: ch19-pipelines
   labels:
     app.kubernetes.io/name: vllm
 spec:
@@ -24,6 +26,9 @@ spec:
         app.kubernetes.io/name: vllm
     spec:
       serviceAccountName: model-reader    # bucket READ-ONLY
+      nodeSelector:
+        eks.amazonaws.com/capacityType: SPOT
+        nvidia.com/gpu.present: "true"
       terminationGracePeriodSeconds: 25
       tolerations:
       - key: nvidia.com/gpu
@@ -125,6 +130,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: vllm
+  namespace: ch19-pipelines
   labels:
     app.kubernetes.io/name: vllm
 spec:
