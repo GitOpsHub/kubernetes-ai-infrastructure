@@ -189,11 +189,11 @@ By the end you can:
 ```mermaid
 flowchart LR
     Human -->|"kubectl apply -f root-app.yaml<br/>(reviewed, once)"| Root["Application:<br/>ch15-app-of-apps"]
-    Root -->|"source.path points at<br/>common/argocd-apps/apps-eks/"| Dir["8 Application manifests<br/>in git"]
+    Root -->|"source.path points at<br/>eks/apps/"| Dir["8 Application manifests<br/>in git"]
     Dir -->|"Argo CD syncs each"| Children["kueue, kserve, vllm, ...<br/>(the actual workloads)"]
 ```
 
-`common/argocd-apps/apps-<cloud>/*.yaml` are themselves just `Application` objects committed to
+`eks/apps/*.yaml` are themselves just `Application` objects committed to
 git — nothing special about them syntactically. The "app-of-apps" trick is entirely that the
 **root** `Application` (`<cloud>/root-app.yaml`) points its `source.path` at the *directory
 containing them*, so Argo CD treats "the list of child Applications" as content it reconciles
@@ -259,7 +259,7 @@ flowchart LR
     S1["Source 1: oci://registry.k8s.io/kueue/charts/kueue<br/>chart: kueue, targetRevision: 0.19.4"]
     S2["Source 2: this git repo<br/>ref: values"]
     S1 --> App[Application: ch15-kueue]
-    S2 -->|"helm.valueFiles:<br/>$values/06-batch-jobs-and-kueue/common/values-kueue.yaml"| App
+    S2 -->|"helm.valueFiles:<br/>$values/06-batch-jobs-and-kueue/eks/values-kueue.yaml"| App
     App --> Cluster[(kueue-system)]
 ```
 
@@ -423,7 +423,7 @@ bucket naming, which nothing in this repo can guess — replace those by hand af
 file `grep` found.
 
 ```bash
-kubectl apply -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/project.yaml
 kubectl apply -f 15-mlops-gitops-and-pipelines/eks/root-app.yaml
 ```
 
@@ -646,7 +646,7 @@ project that no longer exists.
 <summary>Answers</summary>
 
 1. `spec.source.path` on the root `Application` points at a *directory* in git
-   (`common/argocd-apps/apps-<cloud>/`) containing other `Application` manifests. Argo CD
+   (`eks/apps/`) containing other `Application` manifests. Argo CD
    applies whatever plain Kubernetes objects live at that path — since those objects happen to
    be `Application` CRs themselves, Argo CD ends up creating and then reconciling each one, the
    same as any other manifest it manages.
@@ -658,9 +658,9 @@ project that no longer exists.
 3. Source 1 (`repoURL: oci://registry.k8s.io/kueue/charts/kueue`) is the upstream Helm chart
    itself, pinned to `KUEUE_VERSION`. Source 2 (this git repo, `ref: values`) supplies just the
    values file chapter `06` already wrote, referenced as `$values/06-batch-jobs-and-kueue/
-   common/values-kueue.yaml`. Together they replace chapter `06`'s own
+   eks/values-kueue.yaml`. Together they replace chapter `06`'s own
    `helm install kueue oci://registry.k8s.io/kueue/charts/kueue --version "${KUEUE_VERSION}"
-   -f common/values-kueue.yaml --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/
+   -f eks/values-kueue.yaml --set 'controllerManager.nodeSelector.eks\.amazonaws\.com/
    capacityType=ON_DEMAND'` command from chapter 06's lab.
 4. The `ai-platform` AppProject's `clusterResourceWhitelist` doesn't include
    `rbac.authorization.k8s.io`/`ClusterRoleBinding` with unrestricted names — Argo CD refuses to

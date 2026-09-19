@@ -21,7 +21,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 fail=0
-K8S_VERSION="${K8S_VERSION:-1.35.0}"   # matches the GKE control-plane version this course was written against
+K8S_VERSION="${K8S_VERSION:-1.36.0}"   # matches the GKE control-plane version this course was written against
 
 # Only check files git actually tracks -- skips .gitignore'd files like env.sh (real
 # credentials/project IDs, meant to be sourced, not linted as a standalone script).

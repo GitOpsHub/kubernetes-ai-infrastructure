@@ -529,7 +529,7 @@ them by hand in the AWS console or CLI.
 - Kubernetes: [Advertise Extended Resources for a Node](https://kubernetes.io/docs/tasks/administer-cluster/extended-resource-node/)
 - New to Kubernetes entirely? The official [Kubernetes Basics tutorial](https://kubernetes.io/docs/tutorials/kubernetes-basics/) and [Concepts overview](https://kubernetes.io/docs/concepts/overview/) are good, vendor-neutral background before or alongside this course.
 
-**Versions tested** (2026-09-19): Kubernetes 1.35 (EKS `version: "1.35"`), eksctl v0.230.0 schema, kubectl 1.36 client, image `registry.k8s.io/pause:3.10.1`.
+**Versions tested** (2026-09-19): Kubernetes 1.36 (EKS `version: "1.36"`), eksctl v0.230.0 schema, kubectl 1.36 client, image `registry.k8s.io/pause:3.10.1`.
 
 ---
 

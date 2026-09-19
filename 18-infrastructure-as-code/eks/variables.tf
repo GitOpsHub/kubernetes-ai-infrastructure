@@ -12,7 +12,7 @@ variable "cluster_name" {
 
 variable "kubernetes_version" {
   type    = string
-  default = "1.35" # matches eks/cluster.yaml's eksctl version pin
+  default = "1.36" # matches eks/cluster.yaml's eksctl version pin
 }
 
 variable "vpc_cidr" {

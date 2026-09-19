@@ -5,7 +5,7 @@ kind: ClusterConfig
 metadata:
   name: ${EKS_CLUSTER}
   region: ${AWS_REGION}
-  version: "1.35"
+  version: "1.36"
   tags:
     project: k8s-ai-lab
 
