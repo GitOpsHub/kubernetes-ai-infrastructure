@@ -1,9 +1,0 @@
-# Both objects are namespaced to "velero" (Velero's own conventional install namespace) already,
-# not this chapter's ch17-day2ops -- no `namespace:` transformer here.
-# Install Velero itself first (gke|eks|aks install-velero.sh, or cpu-lab install-velero-minio.sh)
-# before applying this -- the "velero" namespace and its BackupStorageLocation "default" must exist.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- schedule-platform-backup.yaml
-- backup-manual-example.yaml

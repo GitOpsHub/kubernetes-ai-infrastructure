@@ -1,7 +1,0 @@
-# Cloud-agnostic base: ServiceMonitor only. HPA and KEDA ScaledObject live in hpa/ and keda/ —
-# apply ONE of them at a time (they'd otherwise fight over the same Deployment's replica count).
-# Do not apply directly: use ../gke, ../eks or ../aks (installs prometheus-adapter/KEDA first).
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- servicemonitor-vllm.yaml

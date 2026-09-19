@@ -1,7 +1,0 @@
-# Both objects target the "opencost" namespace explicitly (created by install-opencost.sh via
-# `helm install --create-namespace`) -- no `namespace:` transformer.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-- servicemonitor.yaml
-- prometheusrule.yaml
