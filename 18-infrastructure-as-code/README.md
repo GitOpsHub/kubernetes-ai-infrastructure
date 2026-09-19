@@ -11,9 +11,9 @@ of what chapter 00 already did with `eksctl`.
 ## 0. What "Infrastructure as Code" means, and why this one chapter needs it
 
 Every chapter before this one created cloud resources — a cluster, a node group, an IAM role — by
-running a **CLI command** (`eksctl`, `aws`) or applying a Kubernetes manifest (`kubectl apply -k`).
+running a **CLI command** (`eksctl`, `aws`) or applying a Kubernetes manifest (`kubectl apply -f`).
 That's "infrastructure as code" too, in a loose sense: the *inputs* live in a file (`cluster.yaml`, a
-kustomize overlay) even if the *action* is "run this command right now." What people usually mean by
+plain YAML manifest) even if the *action* is "run this command right now." What people usually mean by
 **Infrastructure as Code (IaC)**, and what this chapter is actually about, is narrower and stricter:
 
 - **The tool itself tracks what it created**, in a file called **state** (§3.3 below), separate from
@@ -31,19 +31,19 @@ kustomize overlay) even if the *action* is "run this command right now." What pe
 
 None of this is exotic — it's the same "diff before you merge" discipline you already use for
 application code via `git diff` and pull requests, just applied to cloud resources instead of source
-files. **Why does *only this chapter* get this treatment, when the other 17 use plain CLI commands and
-kustomize?** Because cluster and node-pool provisioning has a different risk profile than everything
+files. **Why does *only this chapter* get this treatment, when the other chapters use plain CLI
+commands and plain YAML?** Because cluster and node-pool provisioning has a different risk profile than everything
 else in the course:
 
-|                                       | Chapters 00, 01–17 (kustomize + shell/`eksctl`)                                       | Chapter 18 (Terraform)                                                                       |
+|                                       | Chapters 00, 01–17, 19 (plain YAML + shell/`eksctl`)                                   | Chapter 18 (Terraform)                                                                       |
 | ------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | How often does it change?             | Disposable — you build it, use it for a lab, tear it down same day                    | Stood up once, kept for months, changed rarely                                               |
-| Blast radius of a mistake             | A bad `ClusterQueue` or Helm value breaks one namespace; `kubectl delete -k` and redo | A bad node-pool change can take down every workload's compute, or (worse) delete the cluster |
+| Blast radius of a mistake             | A bad `ClusterQueue` or Helm value breaks one namespace; `kubectl delete -f` and redo | A bad node-pool change can take down every workload's compute, or (worse) delete the cluster |
 | Is the current state already visible? | Yes — `kubectl get`/`diff` shows the live object right now                            | Not by default — the AWS console doesn't show you a diff before you click "Update"           |
 | Recreate cost if you get it wrong     | Minutes                                                                               | Potentially the whole cluster + VPC                                                          |
 
 A shell script calling `eksctl create cluster` is the right tool for a lab environment you'll delete in
-an afternoon (chapters 00–17's whole premise). It stops being the right tool the moment a real platform
+an afternoon (every other chapter's whole premise). It stops being the right tool the moment a real platform
 team keeps that cluster running for months and changes it carefully, with a second engineer reviewing
 every change — which is exactly the profile this chapter models.
 
@@ -91,8 +91,8 @@ already understand from `eksctl`/AWS:
 Every other chapter in this course inlines its teardown commands directly into the README's Cleanup
 section — no separate script file to open (see [CONVENTIONS.md](../CONVENTIONS.md)). This chapter is
 the one exception, and it's deliberate: `terraform destroy` is **the single most destructive command in
-this entire course.** A `kubectl delete -k` in another chapter removes namespace-scoped objects you can
-recreate from the same overlay in seconds. `terraform destroy` here can delete an entire VPC, an EKS
+this entire course.** A `kubectl delete -f` in another chapter removes namespace-scoped objects you can
+recreate from the same plain-YAML files in seconds. `terraform destroy` here can delete an entire VPC, an EKS
 control plane, and every node group backing it — and once AWS has torn those down, they are gone; there
 is no "undo," only "provision it again from scratch." [`eks/cleanup.sh`](eks/cleanup.sh) exists
 specifically to put friction and visibility in front of that one command:
@@ -130,17 +130,16 @@ Keep this table in mind through the rest of the README — every `.tf` file here
 I say this same thing to Terraform instead of to `eksctl`?", not introducing new infrastructure chapter
 00 didn't already have.
 
-## A note on layout: this chapter breaks the kustomize convention on purpose
+## A note on layout: this chapter breaks the plain-YAML convention on purpose
 
-Every other chapter in this course follows [CONVENTIONS.md](../CONVENTIONS.md)'s layout: `common/`
-holds cloud-agnostic Kubernetes manifests, `eks/` holds a kustomize overlay + shell scripts that call
-`eksctl` / `aws` directly. **This chapter is the one exception.** `eks/` here holds a **Terraform
-module**, not a kustomize overlay, and there is no `common/` (there's no Kubernetes manifest to be
-cloud-agnostic about — this chapter provisions the cluster itself, before anything is applied to it)
-or `cpu-lab/` (nothing here needs a GPU to run; the whole point is that `terraform validate` never
-touches a cloud account). The module folder does still ship a `cleanup.sh`, as every chapter does —
-here it's a guarded wrapper around `terraform destroy` (see §0.2 and §7), only relevant if you went
-beyond the lab and ran a real `apply`.
+Every other chapter in this course follows [CONVENTIONS.md](../CONVENTIONS.md)'s layout: `eks/` holds
+plain, self-contained Kubernetes YAML applied directly with `kubectl apply -f`, no templating or
+overlay tool. **This chapter is the one exception.** `eks/` here holds a **Terraform module**, not
+Kubernetes manifests — there's no Kubernetes manifest to apply at all in this chapter (it provisions
+the cluster itself, before anything is applied to it). Unlike every other chapter, which inlines its
+teardown commands directly into the README's Cleanup section (see CONVENTIONS.md), this module folder
+does ship a `cleanup.sh` — here it's a guarded wrapper around `terraform destroy` (see §0.2 and §7),
+only relevant if you went beyond the lab and ran a real `apply`.
 
 **Why this is the one chapter that gets IaC instead of a script**, and the other 17 don't: a shell
 script calling `eksctl create cluster` is fine for a one-off lab cluster you'll delete in an
@@ -153,7 +152,7 @@ actually hurt. A `terraform plan` on a cluster resize is something a second engi
 approve before it runs; an `eksctl update nodegroup` command in a Slack message is not. Kueue queues,
 Helm values, and namespace-scoped Kubernetes objects don't have that problem to the same degree —
 they're already declarative, already diffable with `kubectl diff`, and already fast enough to recreate
-that a script suffices. So: kustomize + shell everywhere else, Terraform here.
+that a script suffices. So: plain YAML + shell everywhere else, Terraform here.
 
 ## 0. Before you start
 
@@ -193,9 +192,9 @@ production:
 
 This is deliberately narrow: it reproduces chapter 00's EKS cluster + spot CPU pool + spot GPU pool
 (scaled to 0), with remote state guidance, and a pointer to where a platform team goes next
-(Crossplane/ArgoCD-managed infra for self-service) — it does not re-implement every kustomize overlay
-from chapters 01–17 in Terraform. Everything after the cluster exists stays kubectl-applied, same as
-the rest of the course.
+(Crossplane/ArgoCD-managed infra for self-service) — it does not re-implement every chapter's plain
+YAML manifests in Terraform. Everything after the cluster exists stays kubectl-applied, same as the
+rest of the course.
 
 ## 2. Learning objectives and time plan (~2 h)
 
@@ -487,8 +486,8 @@ often literally translated from an existing Terraform module's shape.
 
 ## 8. Checkpoint questions
 
-1. Why does this chapter use Terraform while every other chapter in the course uses kustomize + shell
-   scripts? What's different about cluster/node-pool provisioning specifically?
+1. Why does this chapter use Terraform while every other chapter in the course uses plain YAML +
+   shell commands? What's different about cluster/node-pool provisioning specifically?
 2. Why does `eks/main.tf` use the `terraform-aws-modules/eks/aws` module instead of raw
    `aws_eks_cluster` / `aws_eks_node_group` resources?
 3. Why do the `vpc-cni` and `eks-pod-identity-agent` addons in `eks/main.tf` set
@@ -510,8 +509,8 @@ often literally translated from an existing Terraform module's shape.
 1. Cluster/node-pool provisioning is stood up once, kept for months, and changed rarely but with high
    blast radius if wrong — exactly the case where a reviewable `terraform plan` diff, a PR history, and
    drift detection matter most. The rest of the course's resources (Kueue queues, Helm values,
-   namespace-scoped manifests) are already declarative and cheap to recreate, so kustomize + a shell
-   script calling `kubectl apply -k` is sufficient there.
+   namespace-scoped manifests) are already declarative and cheap to recreate, so plain YAML applied
+   with `kubectl apply -f` is sufficient there.
 2. A working EKS cluster also needs correctly wired OIDC/IRSA, node IAM roles with the right managed
    policies, and (historically) `aws-auth`/access-entry configuration — easy to get subtly wrong by
    hand and a common source of "the cluster applies but pods can't pull images / assume roles" bugs.

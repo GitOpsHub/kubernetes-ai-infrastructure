@@ -129,7 +129,7 @@ spec:
             metadata:
               annotations:
                 ch16.kubernetes-ai-infrastructure/model-version: "{{inputs.parameters.model-version}}"
-      # Recreate strategy (09-llm-inference-with-vllm/common/vllm-deployment.yaml) means this
+      # Recreate strategy (09-llm-inference-with-vllm/eks/vllm-deployment.yaml) means this
       # patch triggers a full pod replacement, not a rolling update — expected for a 1-GPU pod.
 
   - name: smoke-test-gateway

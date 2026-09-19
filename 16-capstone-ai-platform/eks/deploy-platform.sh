@@ -16,34 +16,31 @@ echo "== Phase 1: observability + storage (ch04-05) =="
 # See 04-gpu-observability/README.md §4, 05-model-storage-and-data/README.md §4.
 
 echo "== Phase 2: quotas + scheduling (ch06) =="
-# kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab   # namespace+flavors+cohort+queues (cloud-agnostic bases)
 # See 06-batch-jobs-and-kueue/README.md §4 for the node group + Kueue install, then:
-# kubectl apply -k 06-batch-jobs-and-kueue/eks
+# kubectl apply -f 06-batch-jobs-and-kueue/eks/
 
 echo "== Phase 3: training + serving frameworks (ch07-09, ch11) =="
 # See 07-distributed-training-kubeflow-trainer/README.md §4, then:
-# kubectl apply -k 07-distributed-training-kubeflow-trainer/eks
-# kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks
-# HF_TOKEN="$HF_TOKEN" ./09-llm-inference-with-vllm/common/create-hf-secret.sh ch09-vllm
-# kubectl apply -k 09-llm-inference-with-vllm/eks
+# kubectl apply -f 07-distributed-training-kubeflow-trainer/eks/
+# HF_TOKEN="$HF_TOKEN" kubectl create secret generic hf-token -n ch09-vllm --from-literal=HF_TOKEN="$HF_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+# kubectl apply -f 09-llm-inference-with-vllm/eks/
 # See 11-kserve/README.md §4   # optional: KServe path instead of/alongside raw vLLM
 
 echo "== Phase 4: gateway, multi-node serving, autoscaling, node autoscaling (ch10, 12-13) =="
 # See 12-inference-gateway-and-multinode-serving/README.md §4, then:
-# kubectl apply -k 12-inference-gateway-and-multinode-serving/eks
+# kubectl apply -f 12-inference-gateway-and-multinode-serving/eks/
 # See 10-autoscaling-inference/README.md §4, then:
-# kubectl apply -k 10-autoscaling-inference/eks
+# kubectl apply -f 10-autoscaling-inference/eks/
 # See 13-node-autoscaling-and-cost/README.md §4, then:
-# kubectl apply -k 13-node-autoscaling-and-cost/eks
+# kubectl apply -f 13-node-autoscaling-and-cost/eks/
 
 echo "== Phase 5: multi-tenancy + secrets + supply chain (ch14) =="
 # See 14-multi-tenancy-and-security/README.md §4, then:
-# kubectl apply -k 14-multi-tenancy-and-security/eks
+# kubectl apply -f 14-multi-tenancy-and-security/eks/
 
 echo "== Phase 6: GitOps + pipelines + registry (ch15) =="
-# ./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh   # or via Argo CD, see ch15 README
-# ./15-mlops-gitops-and-pipelines/cpu-lab/install-mlflow.sh
-# kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab
+# helm install/upgrade argo-workflows and mlflow (or via Argo CD, see ch15 README), then:
+# kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/
 
 echo "== Phase 7: capstone glue (ch16 — this chapter) =="
 # kubectl apply -f 16-capstone-ai-platform/eks/clusterqueue-team-research.yaml

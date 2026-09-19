@@ -142,7 +142,7 @@ to whichever replica already has that prompt's prefix cached).
 | Since | Original KServe API, stable | KServe 0.17+, **alpha** in 0.20.0 |
 | Built for | Predictive ML (classification/regression/etc.) — also usable for LLMs via the HuggingFace runtime | Generative AI specifically |
 | Routing | Kubernetes Service, or Knative (Serverless mode) | Gateway API-native (`router.gateway`/`route`/`scheduler`) |
-| This chapter | `common/predictive` — sklearn, xgboost | `common/generative` — Qwen3-0.6B on vLLM |
+| This chapter | `eks/` — sklearn, xgboost | `eks/generative/` — Qwen3-0.6B on vLLM |
 
 This chapter deliberately uses **both** CRDs so you can see the split: predictive workloads stay on
 the mature, stable `InferenceService`; the new LLM-specific path is `LLMInferenceService`. Because
@@ -195,7 +195,7 @@ that only show up under real traffic.
 KServe's native `canaryTrafficPercent` field (set on `spec.predictor`, KServe tracks the "last good"
 revision automatically) only works in **Serverless** mode, because the traffic split is implemented
 by Knative Revisions — RawDeployment's plain Service has no revision concept to split between.
-`common/canary/` demonstrates the RawDeployment-compatible pattern instead: two independently-named
+`eks/canary/` demonstrates the RawDeployment-compatible pattern instead: two independently-named
 `InferenceService`s (`-stable`, `-canary`) plus a Gateway API `HTTPRoute` with weighted
 `backendRefs`. It's more manual (you own the naming/promotion process) but needs no Knative.
 
@@ -404,7 +404,7 @@ what RawDeployment gives up in exchange for not depending on Knative.
 - **The `LLMInferenceService` pod requests `nvidia.com/gpu: 1` like every other GPU workload in this
   course** — same taint/toleration/spot-nodeSelector story as chapter 09, applied in
   `eks/generative/patch-spot.yaml`.
-- **RawDeployment's plain Deployment has no built-in PDB.** Add one (see `09-llm-inference-with-vllm/common/pdb.yaml`
+- **RawDeployment's plain Deployment has no built-in PDB.** Add one (see `09-llm-inference-with-vllm/eks/pdb.yaml`
   for the pattern) if you run more than one replica and want voluntary-disruption protection.
 - **Cold start applies here too** — an `LLMInferenceService` pod pays the same weight-download +
   CUDA-graph-capture budget as chapter 09's vLLM Deployment (section 3.3 there). KServe doesn't
@@ -418,7 +418,7 @@ what RawDeployment gives up in exchange for not depending on Knative.
 | Predictor pod `ImagePullBackOff` | KServe version mismatch between CRD/controller and the runtime images it selects | `ClusterServingRuntime` objects hardcode an image tag per KServe release. If `kserve-crd` and `kserve` were installed at different versions (e.g. you bumped `${KSERVE_VERSION}` and only re-ran one `helm upgrade`), the runtime can reference an image tag that was renamed/removed in the registry, or doesn't exist for your exact version | Confirm Step 1 pinned `${KSERVE_VERSION}` on both `kserve-crd` and `kserve` charts |
 | `LLMInferenceService` pod `Pending`: `Insufficient nvidia.com/gpu` | No GPU node pool, or overlay's nodeSelector doesn't match your cloud | The pod's `resources.requests.nvidia.com/gpu: "1"` (from `llminferenceservice-qwen.yaml`) can only be scheduled on a node that actually advertises that extended resource — the Kubernetes scheduler will not "wait and see," it marks the pod `Pending` immediately if no current node qualifies. This is the same failure mode as chapter 01/09's plain GPU Deployments; KServe doesn't change GPU scheduling mechanics | Create/scale the pool (chapter 01), confirm you applied the right `<cloud>/generative` overlay |
 | `LLMInferenceService` has no obvious Service/URL | Gateway API not installed, so `router.gateway`/`route` can't provision | `router: {gateway: {}, route: {}, scheduler: {}}` tells KServe to manage Gateway API objects (`HTTPRoute`, and an `InferencePool`-aware scheduler) for you — but Gateway API is a separate set of CRDs plus a controller implementation (covered in chapter 12), not something this chapter installs. Without them, KServe's controller has nothing to create the route against, so no user-facing URL ever appears, even though the pod itself may be perfectly healthy | Install Gateway API CRDs + an implementation first (see chapter 12), or `kubectl -n ch11-kserve get pods,svc` to find the pod directly and port-forward it |
-| `canaryTrafficPercent` set but 100% traffic still goes to one revision | You're in RawDeployment mode — this field is Serverless-only (3.3) | RawDeployment's plain `Service` always points at whatever pods currently match its label selector — there's exactly one "current" set of pods, no concept of "10% of them are an old revision." The field is silently a no-op rather than an error, which is why this is easy to miss until you notice traffic isn't actually splitting | Use `common/canary`'s two-InferenceService + HTTPRoute pattern instead |
+| `canaryTrafficPercent` set but 100% traffic still goes to one revision | You're in RawDeployment mode — this field is Serverless-only (3.3) | RawDeployment's plain `Service` always points at whatever pods currently match its label selector — there's exactly one "current" set of pods, no concept of "10% of them are an old revision." The field is silently a no-op rather than an error, which is why this is easy to miss until you notice traffic isn't actually splitting | Use `eks/canary`'s two-InferenceService + HTTPRoute pattern instead |
 | V2 inference `curl` returns 404 | Wrong path — V2 protocol is `/v2/models/<name>/infer`, not `/v1/models/<name>:predict` (that's V1) | KServe runtimes can serve either the older V1 REST contract or the V2 / Open Inference Protocol contract depending on `protocolVersion` in the manifest — the two use different URL paths and payload shapes, and the server only listens on the path for the protocol it's actually configured for, so hitting the "wrong" one 404s rather than falling back | Confirm `protocolVersion: v2` is set and use the V2 path |
 
 ## 7. Cleanup and cost notes
@@ -498,7 +498,7 @@ kserve/kserve#5335 as of v0.20.0).
 </details>
 
 <details>
-<summary>5. In the RawDeployment canary workaround (<code>common/canary</code>), what actually does the traffic splitting, and what does it depend on?</summary>
+<summary>5. In the RawDeployment canary workaround (<code>eks/canary</code>), what actually does the traffic splitting, and what does it depend on?</summary>
 
 A Gateway API `HTTPRoute` with weighted `backendRefs` pointing at the two InferenceServices'
 generated predictor Services. It requires Gateway API CRDs and a Gateway controller/implementation
@@ -507,7 +507,7 @@ can only be compared manually (separate port-forwards), no automatic split.
 </details>
 
 <details>
-<summary>6. Why is every field in <code>common/generative/llminferenceservice-qwen.yaml</code> marked <code># VERIFY</code>?</summary>
+<summary>6. Why is every field in <code>eks/generative/llminferenceservice-qwen.yaml</code> marked <code># VERIFY</code>?</summary>
 
 `LLMInferenceService` is an alpha CRD in KServe 0.20.0 — the field set, defaults, and even whether
 `router.gateway: {}` resolves the same way across versions are explicitly not API-stable yet. Alpha

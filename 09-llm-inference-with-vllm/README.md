@@ -367,7 +367,7 @@ contacting the cluster, then applies it, so it never errors if the namespace alr
 plain `kubectl create namespace` which fails on a second run). The second line creates the Kubernetes
 **Secret** discussed in 3.0: `--from-literal=HF_TOKEN=...` stores your token as a base64-encoded value
 inside a Secret object named `hf-token`, and the Deployment's `env:` block (see
-`common/vllm-deployment.yaml`) reads it into the container as the `HF_TOKEN` environment variable via
+`eks/vllm-deployment.yaml`) reads it into the container as the `HF_TOKEN` environment variable via
 `secretKeyRef`, with `optional: true` so the pod still starts fine if you skipped exporting
 `HF_TOKEN` entirely. The `: "${HF_TOKEN:?...}"` line is a bash idiom that prints that reminder message
 and exits *only if you actually try to use `$HF_TOKEN` without having exported it* — it does not force

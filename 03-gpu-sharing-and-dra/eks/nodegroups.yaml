@@ -9,7 +9,7 @@ metadata:
   region: __AWS_REGION__
 managedNodeGroups:
   # 1) Time-slicing / MPS via the GPU Operator's device plugin. The per-node profile is chosen
-  #    with the nvidia.com/device-plugin.config label (keys from common/device-plugin-config).
+  #    with the nvidia.com/device-plugin.config label (keys from eks/device-plugin-config.yaml).
   - name: gpu-share-spot
     amiFamily: AmazonLinux2023
     instanceTypes: ["g4dn.xlarge"]   # cheapest single-GPU spot option (T4)

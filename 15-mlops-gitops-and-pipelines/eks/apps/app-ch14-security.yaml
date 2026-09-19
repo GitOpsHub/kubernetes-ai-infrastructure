@@ -1,5 +1,5 @@
 # Deploys chapter 14's namespaces/quotas/RBAC/NetworkPolicy/admission-policy stack via GitOps
-# instead of `kubectl apply -k`. This is the app that makes app-of-apps itself accountable to
+# instead of `kubectl apply -f`. This is the app that makes app-of-apps itself accountable to
 # the same review process as any other change: a PR touching 14-multi-tenancy-and-security
 # shows up as an Argo CD OutOfSync diff before anyone runs `kubectl`.
 apiVersion: argoproj.io/v1alpha1

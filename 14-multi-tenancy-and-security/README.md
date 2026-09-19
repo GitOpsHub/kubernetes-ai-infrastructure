@@ -90,25 +90,25 @@ there assume you already have these five terms straight.
 This chapter assumes:
 
 - **A working cluster** from [00-prerequisites-and-cluster-setup](../00-prerequisites-and-cluster-setup)
-  — the `cpu-lab` sections need no GPU quota at all, but Lab B (AWS) needs a real AWS account with
-  the cluster's OIDC provider associated for IRSA the way chapter 00 sets it up
-  (`eksctl utils associate-iam-oidc-provider`) — a cluster-creation-time setting you can't easily
-  bolt on after the fact.
+  — a real AWS account with the cluster's OIDC provider associated for IRSA the way chapter 00
+  sets it up (`eksctl utils associate-iam-oidc-provider`) — a cluster-creation-time setting you
+  can't easily bolt on after the fact.
 - **The `team-a`/`team-b` tenant concept from [06-batch-jobs-and-kueue](../06-batch-jobs-and-kueue)**
   — this chapter reuses those names for its namespaces (`ch14-team-a`/`ch14-team-b`) and explains
   in §3.1/checkpoint 6 how its `ResourceQuota` layers on top of (not instead of) chapter 06's
   ClusterQueue.
-- **`hf-token` Secret consumers from chapters 07/09** — Lab B's `ExternalSecret` produces a
+- **`hf-token` Secret consumers from chapters 07/09** — Step 5's `ExternalSecret` produces a
   `Secret` named `hf-token`, the same name those chapters' manifests already expect; you don't
   need those chapters deployed to run this one, but the naming match is intentional.
 - **The `monitoring` namespace from [04-gpu-observability](../04-gpu-observability)** if you want
-  `common/netpol/allow-monitoring-scrape.yaml` to actually allow live traffic (the NetworkPolicy
-  applies regardless, it just has nothing to allow if `monitoring` doesn't exist yet).
+  `eks/allow-monitoring-scrape.yaml` to actually allow live traffic (the NetworkPolicy applies
+  regardless, it just has nothing to allow if `monitoring` doesn't exist yet).
 
-If you're new to Kubernetes entirely, don't worry about memorizing IRSA or CEL right now — Lab A
-(the cluster you already have from chapter 00, no extra cloud setup needed) is enough to see
-namespaces, quotas, RBAC, and NetworkPolicy work end to end. Lab B (real AWS Secrets Manager +
-Kyverno) is where the cloud-specific pieces show up, and it explains each one before you run it.
+If you're new to Kubernetes entirely, don't worry about memorizing IRSA or CEL right now — Steps
+1–4 (the cluster you already have from chapter 00, no extra setup beyond it) are enough to see
+namespaces, quotas, RBAC, and NetworkPolicy work end to end. Steps 5–6 (real AWS Secrets Manager +
+Kyverno) are where the cloud-specific pieces show up, and each one explains itself before you run
+it.
 
 ## 1. Why this matters
 
@@ -195,9 +195,9 @@ By the end you can:
 | Block | Time | What |
 |---|---|---|
 | Theory | 35 min | §0/§3 concepts, the six-layer model above |
-| Lab A (any cluster) | 60 min | cpu-lab: namespaces, quotas, RBAC, NetworkPolicy, PSA, VAP |
-| Lab B (AWS) | 60 min | ESO + IRSA + Secrets Manager, Kyverno |
-| Lab C (optional) | 15 min | Break each control on purpose, read the resulting error |
+| Steps 1–4 | 60 min | namespaces, quotas, RBAC, NetworkPolicy, PSA, VAP |
+| Steps 5–6 | 60 min | ESO + IRSA + Secrets Manager, Kyverno |
+| Optional | 15 min | Break each control on purpose, read the resulting error |
 | Review | 15 min | troubleshooting, checkpoint questions |
 
 ## 3. Concepts
@@ -215,13 +215,13 @@ users can consume but does nothing to separate *who* those users are from team B
 
 ### 3.2 RBAC that can't escalate itself
 
-`common/rbac/role-team-a-edit.yaml` grants Jobs/Deployments/TrainJobs/RayClusters/
+`eks/role-team-a-edit.yaml` grants Jobs/Deployments/TrainJobs/RayClusters/
 InferenceServices — the objects a tenant actually creates — but deliberately **not**
 RoleBindings, ResourceQuota, or write access to Secrets. A tenant that could edit its own
 RoleBinding could grant itself cluster-admin from inside its own namespace; a tenant that could
 write Secrets could plant a credential another Pod trusts. It can `get/list/watch` Secrets
 because Deployments still need to mount them (the *values* come from ESO — see §3.5 — not from
-`kubectl create secret` by a human). `common/rbac/clusterrole-platform-admin.yaml` holds the
+`kubectl create secret` by a human). `eks/clusterrole-platform-admin.yaml` holds the
 cluster-scoped verbs (Namespaces, ClusterQueues, ValidatingAdmissionPolicies, Kyverno
 ClusterPolicies) that only the platform team gets.
 
@@ -241,7 +241,7 @@ Helm chart, no webhook to install, just three namespace labels
 containers, host namespaces/paths, added capabilities, and requires `runAsNonRoot` — and every
 GPU workload manifest in this course (vLLM, KServe, Kubeflow Trainer, Ray) already runs that
 way, because none of them need host access. The one namespace in this repo that can't run
-`restricted` is `gpu-operator` itself (`02-nvidia-gpu-operator/common/namespace.yaml` sets
+`restricted` is `gpu-operator` itself (`02-nvidia-gpu-operator/eks/namespace.yaml` sets
 `enforce: privileged`) — the NVIDIA driver/toolkit containers *do* need host access to install
 kernel modules and mount device nodes. That's the pattern: **privileged only for the
 infrastructure namespace that needs it, restricted everywhere tenants run pods.**
@@ -262,9 +262,9 @@ flowchart LR
 
 The moment *any* NetworkPolicy selects a Pod for a direction (Ingress or Egress), that
 direction becomes allow-list-only — for **every** policy that also selects it, unioned
-together. `common/netpol/default-deny-team-a.yaml` selects all Pods in `ch14-team-a`, both
+together. `eks/default-deny-team-a.yaml` selects all Pods in `ch14-team-a`, both
 directions, with zero rules — the starting "deny all" baseline. The other four policies in
-`common/netpol/` then punch the specific holes: DNS (UDP/TCP 53 to any namespace, since
+`eks/` then punch the specific holes: DNS (UDP/TCP 53 to any namespace, since
 CoreDNS's namespace label differs per cloud), same-namespace (gang-scheduled training ranks,
 Ray head↔worker, Gateway→backend), HTTPS egress (Hugging Face Hub, container registries, cloud
 secret managers), and inbound scrape from the `monitoring` namespace (chapter `04`'s
@@ -423,21 +423,29 @@ If the Python script attempts an illegal kernel operation, memory corruption exp
 
 ## 4. Lab
 
-Layout:
+Layout — every file under `eks/` is a complete, self-contained manifest you apply directly with
+`kubectl apply -f`; there's no base/overlay split or templating tool for the manifests themselves:
 
 ```
 14-multi-tenancy-and-security/
-├── common/
-│   ├── base/     ch14-team-a/ch14-team-b namespaces (PSA restricted), ResourceQuota, LimitRange
-│   ├── rbac/     ClusterRole (platform), Role+RoleBinding+ServiceAccount per tenant
-│   ├── netpol/   default-deny, allow-dns, allow-same-namespace, allow-egress-https, allow-monitoring-scrape
-│   └── policy/   3x ValidatingAdmissionPolicy(+Binding), 1x Kyverno ClusterPolicy (verifyImages)
-├── eks/             clustersecretstore-aws.yaml, externalsecret-example-team-a.yaml, kustomization.yaml
-└── cpu-lab/         same common/, ESO backed by a `kubernetes`-provider ClusterSecretStore
-                      (backing-secret.yaml stands in for the cloud secret manager) — no cloud IAM
-                      (also carries install-external-secrets.sh/install-kyverno.sh/cleanup.sh —
-                      the same Helm commands Step 5/6 show inline below, packaged as scripts for
-                      this one no-cloud-IAM path so you can try ESO/Kyverno without an AWS account)
+└── eks/
+    ├── namespace-team-a.yaml, namespace-team-b.yaml             ch14-team-a/ch14-team-b (PSA restricted)
+    ├── resourcequota-team-a.yaml, resourcequota-team-b.yaml     per-tenant compute/object ceilings
+    ├── limitrange-team-a.yaml, limitrange-team-b.yaml           per-container defaults
+    ├── clusterrole-platform-admin.yaml                          cluster-scoped verbs, platform team only
+    ├── role-team-a-edit.yaml, role-team-b-edit.yaml             namespace-scoped tenant Role
+    ├── rolebinding-team-a.yaml, rolebinding-team-b.yaml         binds the Role to a Group + CI ServiceAccount
+    ├── serviceaccount-ci.yaml                                   team-a-ci/team-b-ci ServiceAccounts
+    ├── default-deny-team-a.yaml, default-deny-team-b.yaml       NetworkPolicy baseline
+    ├── allow-dns-team-a.yaml, allow-dns-team-b.yaml              \
+    ├── allow-same-namespace-team-a.yaml, allow-same-namespace-team-b.yaml
+    ├── allow-egress-internet-https-team-a.yaml, allow-egress-internet-https-team-b.yaml
+    ├── allow-monitoring-scrape.yaml                              / the allow-list holes punched in the deny baseline
+    ├── vap-disallow-latest-tag.yaml, vap-require-resource-limits.yaml, vap-restrict-registries.yaml
+    │                                                             ValidatingAdmissionPolicy(+Binding), CEL
+    ├── kyverno-verify-images.yaml                                Kyverno ClusterPolicy (cosign verifyImages)
+    ├── clustersecretstore-aws.yaml                               ESO -> AWS Secrets Manager via IRSA
+    └── externalsecret-example-team-a.yaml                        example ExternalSecret producing `hf-token`
 ```
 
 ```bash
@@ -450,18 +458,33 @@ used across the whole course (so a command like `helm upgrade ... --version "${E
 below installs the exact version this README was tested against, not whatever happens to be
 latest today).
 
-### Step 1: Namespaces, quotas, RBAC (any cluster)
+### Step 1: Namespaces, quotas, RBAC
 
-What you're about to do: apply the tenant namespaces/quota/RBAC (this is `cpu-lab`'s pull of
-`common/`, so it works on any cluster with no cloud IAM), then prove RBAC does what §3.2 claims —
-a tenant can create the objects it needs but can't touch Secrets, RoleBindings, or the other
-tenant's namespace. Every command from here on is read-only against your cluster's control
-plane except the `kubectl apply`/`run`/`create` calls, which only ever create objects inside this
-chapter's own `ch14-*` namespaces (or, in Lab B, the `external-secrets`/`kyverno` namespaces) —
-nothing here touches an existing chapter's resources.
+What you're about to do: apply the tenant namespaces/quota/RBAC/NetworkPolicy/admission-policy
+manifests, namespace first, then prove RBAC does what §3.2 claims — a tenant can create the
+objects it needs but can't touch Secrets, RoleBindings, or the other tenant's namespace. Every
+command from here on is read-only against your cluster's control plane except the
+`kubectl apply`/`run`/`create` calls, which only ever create objects inside this chapter's own
+`ch14-*` namespaces (or, in Steps 5–6, the `external-secrets`/`kyverno` namespaces) — nothing
+here touches an existing chapter's resources.
 
 ```bash
-kubectl apply -k 14-multi-tenancy-and-security/cpu-lab
+cd 14-multi-tenancy-and-security/eks
+kubectl apply -f namespace-team-a.yaml -f namespace-team-b.yaml
+kubectl apply -f resourcequota-team-a.yaml -f resourcequota-team-b.yaml \
+  -f limitrange-team-a.yaml -f limitrange-team-b.yaml
+kubectl apply -f clusterrole-platform-admin.yaml \
+  -f role-team-a-edit.yaml -f role-team-b-edit.yaml \
+  -f serviceaccount-ci.yaml \
+  -f rolebinding-team-a.yaml -f rolebinding-team-b.yaml
+kubectl apply -f default-deny-team-a.yaml -f default-deny-team-b.yaml \
+  -f allow-dns-team-a.yaml -f allow-dns-team-b.yaml \
+  -f allow-same-namespace-team-a.yaml -f allow-same-namespace-team-b.yaml \
+  -f allow-egress-internet-https-team-a.yaml -f allow-egress-internet-https-team-b.yaml \
+  -f allow-monitoring-scrape.yaml
+kubectl apply -f vap-disallow-latest-tag.yaml -f vap-require-resource-limits.yaml \
+  -f vap-restrict-registries.yaml
+cd -
 kubectl get ns ch14-team-a ch14-team-b -o jsonpath='{.items[*].metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null
 kubectl describe resourcequota team-a-quota -n ch14-team-a
 kubectl auth can-i create jobs --as-group=team-a-engineers -n ch14-team-a
@@ -470,9 +493,12 @@ kubectl auth can-i create rolebindings --as-group=team-a-engineers -n ch14-team-
 kubectl auth can-i get pods --as-group=team-a-engineers -n ch14-team-b
 ```
 
-Why each line: `apply -k` renders and applies the whole `cpu-lab` kustomization in one shot (the
-namespaces, quota, RBAC, NetworkPolicy, and admission policy YAML all live under `common/`, which
-`cpu-lab/kustomization.yaml` pulls in). The `jsonpath` query reads back the `enforce` label
+Why each line: each `kubectl apply -f` group applies a set of standalone manifests together —
+namespaces first (everything else is namespaced and would fail to create otherwise), then
+quota/limits, then RBAC, then the NetworkPolicy allow-list (§3.4 explains why the deny baseline
+and its exceptions have to land together), then the ValidatingAdmissionPolicies. There's no
+overlay or templating step: every file already carries its final `metadata.namespace` and
+`nodeSelector`/label values inline. The `jsonpath` query reads back the `enforce` label
 Kubernetes' Pod Security Admission actually checks, so you can see with your own eyes that it's
 set to `restricted` rather than trusting the YAML. `describe resourcequota` shows you the same
 object the API server consults on every Pod/PVC/Service creation in that namespace. The four
@@ -482,7 +508,7 @@ you audit RBAC without accidentally leaving test objects behind.
 
 **Expected output**: the `pod-security` label query prints `restricted restricted` (one per
 namespace); `describe resourcequota` shows `Used` lines starting at `0` against the `Hard` limits
-from `common/base/resourcequota-team-a.yaml`; the four `auth can-i` calls print `yes`, `no`, `no`,
+from `eks/resourcequota-team-a.yaml`; the four `auth can-i` calls print `yes`, `no`, `no`,
 `no` in that order.
 
 **How to tell this worked**: exactly that `yes`/`no`/`no`/`no` sequence — if the second or third
@@ -547,15 +573,15 @@ What you're about to do: apply the three CEL policies and confirm the `:latest`-
 fires on a manifest that violates it.
 
 ```bash
-kubectl apply -f 14-multi-tenancy-and-security/common/policy   # standalone; also included via common/kustomization.yaml
+kubectl apply -f 14-multi-tenancy-and-security/eks/vap-disallow-latest-tag.yaml \
+  -f 14-multi-tenancy-and-security/eks/vap-require-resource-limits.yaml \
+  -f 14-multi-tenancy-and-security/eks/vap-restrict-registries.yaml
 kubectl create deployment bad --image=docker.io/library/nginx:latest -n ch14-team-a
 ```
 
-The comment matters: you already applied these policies indirectly in Step 1 via
-`common/kustomization.yaml` (which `cpu-lab/kustomization.yaml` includes) — this line re-applies
-them directly from the `policy/` directory alone, which is harmless (`kubectl apply` is
-idempotent) and useful if you're jumping straight to this step. The `create deployment` command
-deliberately uses `:latest`, an explicitly-forbidden pattern per §3.5's table, so you can see the
+You already applied these three policies in Step 1 — this line re-applies them directly, which is
+harmless (`kubectl apply` is idempotent) and useful if you're jumping straight to this step. The
+`create deployment` command deliberately uses `:latest`, an explicitly-forbidden pattern per §3.5's table, so you can see the
 CEL rule actually evaluate and reject it rather than taking the policy's existence on faith.
 
 **Expected output**:
@@ -573,11 +599,8 @@ and reports first is not guaranteed to be the same every time).
 What you're about to do: install ESO via its Helm chart, annotating its ServiceAccount with the
 IAM role ARN it will assume; then print (and run yourself) the `eksctl` command that creates that
 IRSA role, bound to Secrets Manager; then confirm a real secret synced into a Kubernetes `Secret`.
-If you don't have an AWS account handy and just want to see the ExternalSecret-to-Secret sync
-loop work, `14-multi-tenancy-and-security/cpu-lab/install-external-secrets.sh` and
-`cpu-lab/install-kyverno.sh` run the same two Helm installs against a fake, in-cluster
-`kubernetes`-provider secret store instead — no cloud IAM step required, at the cost of not
-proving the real AWS/IRSA path this section walks through.
+This course targets real AWS/EKS throughout, so this step exercises the real IRSA path end to
+end — there's no fake, no-cloud-IAM stand-in.
 
 Install External Secrets Operator, pointing its ServiceAccount at the IAM role IRSA will create
 below (`ch14-eso-secretsmanager`):
@@ -629,9 +652,16 @@ with the role-ARN annotation, rather than failing because the ServiceAccount alr
 Narrower than the managed policy above for anything beyond the lab: scope a custom policy to
 secrets named `ch14-team-*/*` only (resource ARN prefix), not every secret in the account.
 
-Apply the `ClusterSecretStore` and the example `ExternalSecret` for team A:
+Apply the `ClusterSecretStore` and the example `ExternalSecret` for team A. `clustersecretstore-aws.yaml`
+carries an `${AWS_REGION}` placeholder; `envsubst` fills it in the same way chapter 00's Step 4
+renders `${EKS_CLUSTER}`/`${AWS_REGION}` into `cluster.yaml`:
 ```bash
-kubectl apply -k 14-multi-tenancy-and-security/eks
+: "${AWS_REGION:?}"
+export AWS_REGION
+envsubst '${AWS_REGION}' < 14-multi-tenancy-and-security/eks/clustersecretstore-aws.yaml \
+  > 14-multi-tenancy-and-security/eks/.clustersecretstore-aws.rendered.yaml
+kubectl apply -f 14-multi-tenancy-and-security/eks/.clustersecretstore-aws.rendered.yaml
+kubectl apply -f 14-multi-tenancy-and-security/eks/externalsecret-example-team-a.yaml
 ```
 
 This is the last piece of the sequence diagram in §3.6: `ClusterSecretStore` tells ESO *how* and
@@ -677,9 +707,9 @@ helm upgrade --install kyverno kyverno/kyverno \
   --set backgroundController.enabled=true \
   --set reportsController.enabled=false
 kubectl -n kyverno rollout status deployment/kyverno-admission-controller --timeout=180s
-# Edit common/policy/kyverno-verify-images.yaml first: replace YOUR_ORG/YOUR_REPO with a real
+# Edit eks/kyverno-verify-images.yaml first: replace YOUR_ORG/YOUR_REPO with a real
 # GitHub org/repo and the cosign keyless certificate-identity-regexp for your CI pipeline.
-kubectl apply -f 14-multi-tenancy-and-security/common/policy/kyverno-verify-images.yaml
+kubectl apply -f 14-multi-tenancy-and-security/eks/kyverno-verify-images.yaml
 kubectl run test --image=ghcr.io/YOUR_ORG/unsigned:latest -n ch14-team-a
 ```
 
@@ -725,21 +755,31 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
 | `admission webhook "validate.kyverno.svc-fail" denied the request: failed to verify signature` | Image isn't cosign-signed with the configured keyless identity, or `imageReferences` glob doesn't match | Kyverno's `verifyImages` rule calls out to Sigstore (Fulcio/Rekor) to check the image's signature against the `certificate-identity-regexp`/issuer you configured; a mismatch on any of those (wrong org, wrong repo, image built by a different pipeline) fails the same way an outright-unsigned image would | Confirm with `cosign verify --certificate-identity-regexp ... --certificate-oidc-issuer ...` locally first |
 | `ExternalSecret` stuck `SecretSyncedError` | IRSA role binding missing/wrong, or `remoteRef.key` doesn't exist in Secrets Manager | ESO's controller can only fetch what its assumed IAM role can see — if the ServiceAccount annotation, the IAM trust policy, or the secret's ARN/name don't line up exactly, the AWS API call itself fails and ESO surfaces that as a sync error rather than a Kubernetes-side problem | `kubectl describe externalsecret -n ch14-team-a`; re-check the `eksctl create iamserviceaccount` command from Step 5 was actually run |
 | `ClusterSecretStore` `READY: False` | `serviceAccountRef` namespace/name mismatch, or controller pod's SA isn't annotated with the IRSA role ARN | The store object itself doesn't hold credentials — it just points at a ServiceAccount and expects IRSA to inject temporary AWS credentials into whatever Pod uses it; if the reference is wrong, or the annotation Step 5's Helm install set is missing, ESO's Pod authenticates as nobody | `kubectl -n external-secrets logs deploy/external-secrets`; verify the `eks.amazonaws.com/role-arn` annotation the Step 5 Helm install set |
-| `curler` in Step 3 can reach nothing, even DNS | Applied `common/` without `allow-dns` (e.g. via `kubectl apply -f` on one file only) | Once any NetworkPolicy selects a Pod for a direction, that direction becomes allow-list-only for every policy targeting it combined (§3.4) — apply `default-deny` without also applying `allow-dns`, and DNS lookups (UDP/TCP 53) have no matching allow rule, so they're silently dropped along with everything else | Always apply the whole `common/netpol` directory, or the cloud overlay that includes it |
+| `curler` in Step 3 can reach nothing, even DNS | Applied `default-deny-team-a.yaml` without also applying `allow-dns-team-a.yaml` | Once any NetworkPolicy selects a Pod for a direction, that direction becomes allow-list-only for every policy targeting it combined (§3.4) — apply `default-deny` without also applying `allow-dns`, and DNS lookups (UDP/TCP 53) have no matching allow rule, so they're silently dropped along with everything else | Always apply the full NetworkPolicy set for that namespace (all `eks/*-team-a.yaml` netpol files) together |
 | `kubectl auth can-i` says `yes` for something the Role shouldn't grant | Testing as the wrong identity (default kubeconfig user has cluster-admin) | `--as-group`/`--as` impersonates a *different* identity for that one check; without it, `can-i` answers for whichever identity your current kubeconfig actually authenticates as — usually the cluster-admin you created the cluster with, which will pass every check regardless of the Role you're trying to test | Use `--as-group=team-a-engineers` (or `--as=system:serviceaccount:ch14-team-a:team-a-ci`), not your own admin credentials |
 | Kyverno webhook times out under spot churn | `webhookConfiguration.timeoutSeconds` too low for a busy admission controller with 1 replica | Every Pod create/update on a matching resource blocks on a round-trip to the Kyverno webhook Pod; if spot preemption is creating many replacement Pods at once and there's only one webhook replica, requests queue up and start hitting the timeout, which then either fails the request (`failurePolicy: Fail`) or silently skips the check (`failurePolicy: Ignore`) | Raise `admissionController.replicas`, or raise the timeout (trades off fail-open risk if `failurePolicy: Ignore`) |
 
 ## 7. Cleanup & cost notes
 
 ```bash
-kubectl delete -k 14-multi-tenancy-and-security/eks --ignore-not-found
+cd 14-multi-tenancy-and-security/eks
+kubectl delete -f externalsecret-example-team-a.yaml --ignore-not-found
+kubectl delete -f .clustersecretstore-aws.rendered.yaml --ignore-not-found 2>/dev/null \
+  || kubectl delete -f clustersecretstore-aws.yaml --ignore-not-found
+kubectl delete -f kyverno-verify-images.yaml --ignore-not-found
+kubectl delete -f vap-disallow-latest-tag.yaml -f vap-require-resource-limits.yaml \
+  -f vap-restrict-registries.yaml --ignore-not-found
+kubectl delete -f clusterrole-platform-admin.yaml --ignore-not-found
+rm -f .clustersecretstore-aws.rendered.yaml
+cd -
+# Deleting the namespaces cascades everything still namespace-scoped: quotas, limits,
+# Roles/RoleBindings/ServiceAccounts, and NetworkPolicies.
+kubectl delete -f 14-multi-tenancy-and-security/eks/namespace-team-a.yaml \
+  -f 14-multi-tenancy-and-security/eks/namespace-team-b.yaml --ignore-not-found
 helm uninstall external-secrets -n external-secrets --ignore-not-found 2>/dev/null || true
 helm uninstall kyverno -n kyverno --ignore-not-found 2>/dev/null || true
 kubectl delete namespace external-secrets kyverno --ignore-not-found
 ```
-(or, for the `cpu-lab` variant, swap the `kubectl delete -k` target for `14-multi-tenancy-and-security/cpu-lab`
-— or run `14-multi-tenancy-and-security/cpu-lab/cleanup.sh`, which does the same delete/uninstall
-sequence for that variant in one command.)
 
 - Nothing in this chapter provisions new node pools — it reuses whatever cluster chapter `00`
   created. The only cost is the ESO and Kyverno controller pods (small, a few hundred MB RAM

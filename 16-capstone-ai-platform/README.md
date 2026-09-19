@@ -348,7 +348,7 @@ CSI (Container Storage Interface) driver so Pods can mount S3 as if it were a lo
 that's where model weights and training checkpoints will actually live.
 
 Run chapter 04 §4 (kube-prometheus-stack) and chapter 05 §4 (S3 CSI + IAM setup, then
-`kubectl apply -k 05-model-storage-and-data/eks`).
+`kubectl apply -f 05-model-storage-and-data/eks/` — chapter 05's plain-YAML manifests).
 
 **Acceptance criteria:** `kubectl -n monitoring get pods -l app.kubernetes.io/name=prometheus`
 Running; a `DCGM_FI_DEV_GPU_UTIL` series exists in Prometheus once phase 3 has a GPU pod running.
@@ -359,20 +359,13 @@ This is the phase that puts a gatekeeper in front of your (expensive, limited) G
 Kubernetes' default scheduler would happily start every submitted Pod immediately in first-come
 order, with no concept of "team A's fair share" or "don't let one team's Jobs starve everyone
 else's" — fine for a single learner's lab, a real liability the moment a second team shares the
-cluster. The first command below applies chapter 06's cloud-agnostic base (namespace, Resource
-Flavors describing "spot" vs "on-demand" capacity, a Cohort that lets queues share budget, and the
-CPU-only queues chapter 06 teaches with) — deliberately from its `cpu-lab/` overlay here, because
-that overlay is the cloud-agnostic base every cloud's Kueue install shares, not a CPU-only
-substitute for the real thing:
+cluster.
 
-```bash
-kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab   # namespace + flavors + cohort + queues (cloud-agnostic)
-```
-
-Run chapter 06 §4 (node group + Kueue install, then `kubectl apply -k 06-batch-jobs-and-kueue/eks`)
-— this installs the Kueue controller itself (a Helm chart) and then layers EKS-specific pieces
-(node selectors matching your actual node group labels) on top of the cloud-agnostic base you just
-applied.
+Run chapter 06 §4 (node group + Kueue install via Helm, then
+`kubectl apply -f 06-batch-jobs-and-kueue/eks/` — chapter 06's plain-YAML manifests: namespace,
+Resource Flavors for "spot" vs "on-demand" capacity, a Cohort that lets queues share budget, and the
+queues chapter 06 teaches with, already carrying the EKS-specific node-selector values chapter 06
+teaches you to fill in).
 
 Then apply this chapter's own bridge (explained in full in section 1.2) — this is the step that
 actually makes chapter 07's `TrainJob` admissible later in Phase 3, so skipping it is the single
@@ -398,8 +391,8 @@ CRD, which is admitted through the Kueue queue and bridge you just set up in Pha
 model for inference with vLLM.
 
 Run chapter 07 §4 (GPU node group, checkpoint storage, Trainer install, then
-`kubectl apply -k 07-distributed-training-kubeflow-trainer/eks` and
-`kubectl apply -k 07-distributed-training-kubeflow-trainer/kueue/eks`).
+`kubectl apply -f 07-distributed-training-kubeflow-trainer/eks/` — chapter 07's plain-YAML
+manifests, which include its optional Kueue `LocalQueue`).
 
 The block below sets up vLLM's namespace and, if you're serving a gated Hugging Face model, its
 access token. Why this is inlined as a raw `kubectl create secret` rather than a helper script:
@@ -420,7 +413,7 @@ kubectl create secret generic hf-token \
   --from-literal=HF_TOKEN="$HF_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -k 09-llm-inference-with-vllm/eks
+kubectl apply -f 09-llm-inference-with-vllm/eks/
 ```
 
 The `: "${HF_TOKEN:?...}"` line is a bash idiom for "fail with this message if the variable is
@@ -452,9 +445,9 @@ them — the layer below KEDA, since KEDA can create more Pods, but if there's n
 for them to land on, they'd sit `Pending` without Karpenter.
 
 Run chapter 12 §4 (Gateway API CRDs, LWS, gateway controller, then
-`kubectl apply -k 12-inference-gateway-and-multinode-serving/eks`), chapter 10 §4 (KEDA +
-Prometheus Adapter, then `kubectl apply -k 10-autoscaling-inference/eks`), and chapter 13 §4
-(Karpenter install, then `kubectl apply -k 13-node-autoscaling-and-cost/eks`).
+`kubectl apply -f 12-inference-gateway-and-multinode-serving/eks/`), chapter 10 §4 (KEDA +
+Prometheus Adapter, then `kubectl apply -f 10-autoscaling-inference/eks/`), and chapter 13 §4
+(Karpenter install, then `kubectl apply -f 13-node-autoscaling-and-cost/eks/`).
 
 **Acceptance criteria:** `kubectl -n ch12-gateway get gateway,httproute,inferencepool` all
 `Programmed`/`Accepted`; a request through the Gateway's external address reaches vLLM;
@@ -471,7 +464,7 @@ time — e.g. a Pod missing required labels never gets created at all, rather th
 then flagged later).
 
 Run chapter 14 §4 (External Secrets + Kyverno install, then
-`kubectl apply -k 14-multi-tenancy-and-security/eks`).
+`kubectl apply -f 14-multi-tenancy-and-security/eks/`).
 
 **Acceptance criteria:** `kubectl auth can-i create trainjobs -n ch07-training --as
 system:serviceaccount:ch16-capstone:capstone-pipeline` returns `no` (RBAC is scoped — the
@@ -493,9 +486,14 @@ immediately, which is what lets you see *which* step fails if one does, rather t
 pass/fail:
 
 ```bash
-./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh   # or via Argo CD app-of-apps, see ch15 README
-./15-mlops-gitops-and-pipelines/cpu-lab/install-mlflow.sh
-kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab
+# Argo Workflows + MLflow via Helm (or via Argo CD app-of-apps, see ch15 README):
+helm upgrade --install argo-workflows argo/argo-workflows --version "${ARGO_WORKFLOWS_VERSION}" \
+  --namespace argo --create-namespace --set controller.workflowNamespaces='{ch15-pipelines}'
+helm upgrade --install mlflow community-charts/mlflow --version "${MLFLOW_CHART_VERSION}" \
+  --namespace mlflow --create-namespace -f 15-mlops-gitops-and-pipelines/eks/values-mlflow-eks.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/namespace.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/serviceaccount-pipelines-runner.yaml
+kubectl apply -f 15-mlops-gitops-and-pipelines/eks/pipelines/pvc-pipeline-artifacts.yaml
 kubectl apply -f 16-capstone-ai-platform/eks/namespace-rbac.yaml
 kubectl apply -f 16-capstone-ai-platform/eks/workflowtemplate-platform-e2e.yaml
 argo submit --watch -n ch15-pipelines --from workflowtemplate/platform-e2e
@@ -605,7 +603,7 @@ force-deletes **do** cause real spot evictions/replacements which cost real (sma
 | **Spot preemption during training** | `kubectl delete pod -n ch07-training -l trainer.kubeflow.org/trainjob-ancestor-step=trainer --force --grace-period=25` (simulates the ~25–30 s reclaim notice chapter 07's `terminationGracePeriodSeconds` is sized for) | The JobSet's `failurePolicy` recreates the whole gang; both ranks re-rendezvous; training resumes from the last checkpoint, not from step 0 | `kubectl -n ch07-training get trainjob -w`; logs show `Resuming from checkpoint step <N>`, not `step 0` |
 | **Node drain under inference** | `kubectl drain <node-running-vllm> --ignore-daemonsets --delete-emptydir-data` | vLLM's `PodDisruptionBudget` (ch09) blocks the drain until a replacement is `Ready` elsewhere, or the node autoscaler (ch13) provisions a new spot node first | `kubectl get pdb -n ch09-vllm`; `kubectl get events -n ch09-vllm \| grep -i evict`; Gateway (ch12) request success rate during the drain |
 | **Model server crash** | `kubectl exec -n ch09-vllm deploy/vllm -- kill 1` | Pod restarts; `startupProbe` (multi-minute budget, ch09) gates readiness so the Gateway/InferencePool (ch12) and KEDA (ch10) don't route to or scale based on a still-booting pod | `kubectl get pods -n ch09-vllm -w`; confirm 5xxs stop once `Ready` flips, not before |
-| **ClusterQueue quota exhaustion** | Submit the capstone TrainJob twice concurrently, or run `06-batch-jobs-and-kueue/common/jobs/job-high-priority.yaml` against `team-research`'s quota at the same time | Second workload sits `Pending` with a clear `couldn't assign flavors` condition, or preempts a lower-`WorkloadPriorityClass` workload per `eks/clusterqueue-team-research.yaml`'s `preemption` policy | `kubectl get workload -n ch07-training -o yaml \| grep -A5 conditions`; `kubectl describe clusterqueue team-research` |
+| **ClusterQueue quota exhaustion** | Submit the capstone TrainJob twice concurrently, or run `06-batch-jobs-and-kueue/eks/job-high-priority.yaml` against `team-research`'s quota at the same time | Second workload sits `Pending` with a clear `couldn't assign flavors` condition, or preempts a lower-`WorkloadPriorityClass` workload per `eks/clusterqueue-team-research.yaml`'s `preemption` policy | `kubectl get workload -n ch07-training -o yaml \| grep -A5 conditions`; `kubectl describe clusterqueue team-research` |
 | **Gateway backend loses all pods** | Scale `vllm` Deployment to 0 in `ch09-vllm` | InferencePool (ch12) has no healthy endpoints; Gateway returns 503, not a hang; KEDA (ch10) should scale back up on the next request if `minReplicaCount: 0` is set, otherwise stays at 0 until you scale manually | `curl -w '%{http_code}'` through the Gateway; `kubectl -n ch09-vllm get scaledobject -o yaml` |
 
 Record, for each scenario you run: time-to-detect (when did a Prometheus alert or probe failure
@@ -684,92 +682,12 @@ things worth knowing before you rely on cross-chapter paths:
 - **Chapter list matches the original plan exactly** (00-prerequisites through 16-capstone, no
   chapters added, renamed, split or dropped) — no mismatch there.
 - **The course is EKS-only.** Every chapter's `gke/`/`aks/` overlays and per-cloud shell scripts
-  were removed; every operational step is inlined in that chapter's own README §4/§7 instead. This
-  chapter's own `common/base/kustomization.yaml` comment in chapter 07 about being "shared by the
-  GPU lab and the CPU lab" is stale — chapter 07's `TrainingRuntime` is GPU-only end to end
-  (hard-codes `nvidia.com/gpu` in `resourcesPerNode`). This chapter's own `cpu-lab/` (section 11)
-  does **not** patch or complete chapter 07's CPU path (out of this chapter's ownership) — instead
-  it reuses chapter 15's already-CPU-friendly `train-and-register` `WorkflowTemplate` as the
-  training stand-in. If you need a real CPU TrainingRuntime for chapter 07 itself, that's a gap to
-  raise against that chapter, not this one.
+  were removed; every operational step is inlined in that chapter's own README §4/§7 instead, and
+  this chapter's own manifests are flat, self-contained YAML under `eks/` applied with
+  `kubectl apply -f` (no kustomize base/overlay split, no CPU-lab fallback — this course targets
+  real GPU hardware throughout).
 
-## 11. CPU lab: the same platform, no GPU quota required
-
-If you don't yet have GPU quota approved on your AWS account (a real, common blocker — GPU quota
-increases can take days and aren't guaranteed), don't let that stop you from learning the *shape* of
-this platform. Everything above needs GPU quota on at least one cloud. This section reaches the same milestone —
-train something, register it, promote it, serve it, prove it end to end — with **zero** GPU and
-**zero** cloud account, reusing each earlier chapter's existing `cpu-lab/` where one exists and this
-chapter's own new `cpu-lab/` for the two pieces no chapter's CPU lab covers (queue-gated training,
-and gluing training → registry → serving together).
-
-### 11.1 What doesn't carry over
-
-| GPU path | CPU lab equivalent | What's lost |
-|---|---|---|
-| Chapter 07 `TrainJob` (real PyTorch DDP, NCCL, 2 GPU nodes) | Chapter 15's `train-and-register` stand-in step (a Python container that writes a toy metric + checkpoint file) | No real distributed training, no NCCL, no gang scheduling — this proves the *pipeline*, not the *training* |
-| Chapter 09 vLLM (PagedAttention, continuous batching, tensor parallel) | Chapter 09's `cpu-lab/` Ollama deployment (`ch09-vllm-cpu` namespace, Qwen3-0.6B GGUF via llama.cpp) | Much lower throughput, no tensor parallel, different KV-cache implementation — same OpenAI-ish request shape, not the same performance characteristics |
-| Chapter 12 Gateway + InferencePool, multi-node LWS | Not reproduced — a plain in-cluster `curl` to the Ollama Service | No real Gateway routing/load-balancing behavior to observe |
-| Chapter 13 Karpenter scaling nodes for GPU pods | Chapter 13's `cpu-lab/` `scale-demo-cpu` (optional, run separately) — and per that chapter's own README, you still need a **real** EKS CPU node group with Karpenter running to see an actual node get added; `kind`/`minikube` can't demonstrate this at all | Real node autoscaling needs a real cloud cluster even in the "CPU lab" — this is the one piece that isn't laptop-only |
-| This chapter's GPU `team-research` ClusterQueue (bridges 06↔07 for `nvidia.com/gpu`) | Chapter 06's existing `team-a-queue`/`team-a-cq` (CPU-only, already covers `cpu`/`memory`) — no new bridge needed since nothing here requests a GPU | None — the CPU path never needed the bridge in the first place |
-
-### 11.2 Build order
-
-```bash
-# 1. Any cluster works: kind/minikube, or a real EKS spot CPU node group from ch00.
-./06-batch-jobs-and-kueue/cpu-lab/install-kueue.sh
-kubectl apply -k 06-batch-jobs-and-kueue/cpu-lab
-
-# 2. (Optional but recommended) queue-gated CPU "training" job, to see admission happen —
-#    this chapter's own manifest, since ch06's own jobs are generic demos, not this pipeline's input.
-kubectl apply -k 16-capstone-ai-platform/cpu-lab
-kubectl get workload -n ch06-kueue -w   # watch ch16-cpu-preprocess get admitted, then Complete
-
-# 3. Serving stand-in for vLLM.
-kubectl apply -k 09-llm-inference-with-vllm/cpu-lab
-
-# 4. GitOps/pipeline/registry — Argo Workflows + MLflow, no Argo CD required for the lab.
-./15-mlops-gitops-and-pipelines/cpu-lab/install-argo-workflows.sh
-./15-mlops-gitops-and-pipelines/cpu-lab/install-mlflow.sh
-kubectl apply -k 15-mlops-gitops-and-pipelines/cpu-lab
-
-# 5. This chapter's CPU pipeline: train-and-register (via ch15, templateRef) -> promote Ollama -> smoke test.
-argo submit --watch -n ch15-pipelines --from workflowtemplate/platform-e2e-cpu
-```
-
-**Acceptance criteria:**
-
-- `kubectl get workload -n ch06-kueue` shows `ch16-cpu-preprocess` reach `Complete` and was
-  `Admitted` (not stuck `Pending` — this cluster's `team-a-cq` has no GPU to run out of, but CPU/mem
-  quota is still finite; run it twice concurrently to see the second copy queue behind the first).
-- `kubectl -n ch09-vllm-cpu get pods` shows `ollama` `1/1 Running`; `kubectl -n ch09-vllm-cpu
-  port-forward svc/ollama 11434:11434` then `curl localhost:11434/api/tags` lists `qwen3:0.6b`.
-- `argo get -n ch15-pipelines @latest` for the `platform-e2e-cpu` run shows all steps
-  `Succeeded`, including the nested `train-and-register` steps (Argo renders `templateRef`
-  steps inline in the run's step graph).
-- `kubectl -n ch09-vllm-cpu get deploy ollama -o jsonpath='{.spec.template.metadata.annotations}'`
-  shows the `ch16.kubernetes-ai-infrastructure/pipeline-run` annotation the pipeline just set.
-
-### 11.3 Files this chapter adds for the CPU lab
-
-| File | Why it's new (vs. reusing another chapter's file) |
-|---|---|
-| `cpu-lab/queued-cpu-job.yaml` | A queue-gated CPU Job to exercise chapter 06's `team-a-queue` as part of *this* platform's story — chapter 06's own `job-simple.yaml`/`job-indexed-spot.yaml` are generic teaching demos, not part of a train→serve pipeline |
-| `cpu-lab/pipeline-rbac.yaml` | A dedicated `capstone-pipeline-cpu` ServiceAccount: reuses chapter 15's existing `pipelines-runner` `Role` via a new `RoleBinding` (not duplicated), plus a narrowly-scoped new `Role` in `ch09-vllm-cpu` to patch the Ollama Deployment — same "SA needs its own cross-namespace grant" reasoning as the GPU path's `common/pipeline/namespace-rbac.yaml` |
-| `cpu-lab/workflowtemplate-platform-e2e-cpu.yaml` | Calls chapter 15's `train-and-register` `WorkflowTemplate` via Argo's `templateRef` (zero duplication of its training/registration logic), then adds the two steps no chapter owns: promoting the cpu-lab Ollama Deployment and a smoke test through it |
-
-### 11.4 Cleanup
-
-```bash
-argo delete -n ch15-pipelines --all
-kubectl delete -k 16-capstone-ai-platform/cpu-lab
-kubectl delete -k 09-llm-inference-with-vllm/cpu-lab
-./15-mlops-gitops-and-pipelines/cpu-lab/cleanup.sh
-kubectl delete -k 06-batch-jobs-and-kueue/cpu-lab
-helm uninstall kueue -n kueue-system
-```
-
-## 12. Checkpoint questions
+## 11. Checkpoint questions
 
 <details>
 <summary>1. The capstone TrainJob sits <code>Pending</code> immediately after you submit it, with no pods created. What are the first two things you check, in order, and why that order?</summary>
@@ -828,17 +746,7 @@ request outage the PDB exists to prevent).
 </details>
 
 <details>
-<summary>6. In the CPU lab, why does <code>platform-e2e-cpu</code> call chapter 15's <code>train-and-register</code> via <code>templateRef</code> instead of just copying its steps into a new template?</summary>
-
-Two reasons: it avoids duplicating logic that already exists and is already maintained by chapter
-15 (if that chapter's stand-in training step changes, this pipeline picks it up automatically), and
-it demonstrates a real Argo Workflows composition pattern — building bigger workflows out of smaller
-`WorkflowTemplate`s rather than one monolithic file, which is how you'd actually structure a
-growing pipeline library in production.
-</details>
-
-<details>
-<summary>7. Chapter 06's <code>team-a-cq</code>/<code>team-b-cq</code> ClusterQueues both exist before this chapter runs. Why not just add <code>nvidia.com/gpu</code> to one of them instead of creating a new <code>team-research</code> ClusterQueue?</summary>
+<summary>6. Chapter 06's <code>team-a-cq</code>/<code>team-b-cq</code> ClusterQueues both exist before this chapter runs. Why not just add <code>nvidia.com/gpu</code> to one of them instead of creating a new <code>team-research</code> ClusterQueue?</summary>
 
 Chapter 06 is scoped CPU-only by design (its README teaches Kueue fundamentals without a GPU
 dependency) — editing its files would be out of this chapter's ownership (see the repo's per-chapter
@@ -849,7 +757,7 @@ cohort's CPU quota.
 </details>
 
 <details>
-<summary>8. Your §4 "Validate everything at once" run shows the Kueue and GPU sections healthy, but the GitOps section (<code>ch15-pipelines</code>) is empty. Is the platform broken?</summary>
+<summary>7. Your §4 "Validate everything at once" run shows the Kueue and GPU sections healthy, but the GitOps section (<code>ch15-pipelines</code>) is empty. Is the platform broken?</summary>
 
 Depends where you are in the build order — check section 4's Phase 6 was actually run. The script
 is read-only and intentionally silent (`\|\| true`) for anything not yet deployed, so an empty
@@ -857,7 +765,7 @@ section usually just means you haven't reached that phase, not that something fa
 against the phase's acceptance criteria before treating it as a bug.
 </details>
 
-## 13. Further reading and versions tested
+## 12. Further reading and versions tested
 
 - [Kueue documentation](https://kueue.sigs.k8s.io/docs/) — ClusterQueue/Cohort/preemption semantics used by the bridge
 - [Argo Workflows: WorkflowTemplates](https://argo-workflows.readthedocs.io/en/latest/workflow-templates/) — `templateRef`, `resource` template action used in `eks/workflowtemplate-platform-e2e.yaml`

@@ -19,7 +19,7 @@ spec:
       targetRevision: "0.19.4"   # KUEUE_VERSION from versions.env — Argo CD sources can't ${env}-expand, keep in sync by hand
       helm:
         valueFiles:
-          - $values/06-batch-jobs-and-kueue/common/values-kueue.yaml
+          - $values/06-batch-jobs-and-kueue/eks/values-kueue.yaml
     - repoURL: "https://github.com/YOUR_ORG/kubernetes-ai-infrastructure.git"   # VERIFY: your fork's clone URL
       targetRevision: main
       ref: values

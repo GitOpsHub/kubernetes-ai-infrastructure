@@ -13,7 +13,7 @@ controller:
     - ch08-ray
     - ch14-team-a
     - ch14-team-b
-    - ch15-pipelines   # this chapter's train pipeline (common/workflows/workflowtemplate-train-pipeline.yaml)
+    - ch15-pipelines   # this chapter's train pipeline (eks/pipelines/workflowtemplate-train-pipeline.yaml)
     - ch19-pipelines   # chapter 19's HF fine-tune + LangChain batch pipelines (19-llm-pipelines-huggingface-langchain)
   # Argo Workflows' own Workflow/WorkflowTemplate CRDs are queued through Kueue too when a step
   # pod carries `kueue.x-k8s.io/queue-name` — same admission model as chapter 06/07/08.

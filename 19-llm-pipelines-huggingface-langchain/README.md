@@ -621,7 +621,7 @@ if [[ "${FORCE_HELM:-false}" != "true" ]] && \
   cat <<MSG
 Argo Workflows is managed by Argo CD (Application argocd/ch15-argo-workflows) -- not touching it.
 GitOps path: make sure controller.workflowNamespaces in
-  15-mlops-gitops-and-pipelines/common/workflows/values-argo-workflows.yaml
+  15-mlops-gitops-and-pipelines/eks/values-argo-workflows.yaml
 lists "- ${WF_NS}" (it does in this repo), commit + push to the repo Argo CD tracks, then:
   argocd app sync ch15-argo-workflows   (or wait for auto-sync)
 Re-run with FORCE_HELM=true to helm-upgrade anyway (Argo CD will then show the app OutOfSync).

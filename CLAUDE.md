@@ -19,8 +19,8 @@ is the only chapter that carries Python sources: `eks/src/` holds the trainer co
 and PEP 723 `uv run` scripts (mounted into pods via a plain `ConfigMap` manifest, not kustomize's
 `configMapGenerator`). Read [README.md](README.md) for the course map and
 [CONVENTIONS.md](CONVENTIONS.md) for the full chapter layout contract before adding or editing a
-chapter — CONVENTIONS.md also tracks which chapters are still on the legacy kustomize+`cpu-lab/` layout
-pending migration (only `00-prerequisites-and-cluster-setup` is converted so far).
+chapter. Every chapter has been converted off the old kustomize+`cpu-lab/` layout to plain YAML; chapter
+18 is the sole intentional exception (a Terraform module instead of Kubernetes manifests).
 
 The repo also publishes a Docusaurus docs site from `website/` (see "Docs website" below) and a
 research/notes file, [AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md](AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md),
@@ -42,15 +42,11 @@ together — don't let them drift.
 
 ```bash
 # Repo-wide check — same thing CI runs on every PR touching yaml/yml/sh
-# (kustomize build for legacy chapters, kubeconform on core resources — both rendered and plain
-# YAML —, shellcheck/bash -n, terraform fmt+validate for ch18)
+# (kubeconform on every chapter's plain-YAML manifests, shellcheck/bash -n, terraform fmt+validate for ch18)
 ./scripts/validate-all.sh
 
-# Validate a single plain-YAML chapter's manifest (e.g. chapter 00)
+# Validate a single chapter's manifests
 kubeconform -summary -ignore-missing-schemas <chapter>/eks/*.yaml
-
-# Validate a single not-yet-migrated chapter's overlay renders without error
-kubectl kustomize <chapter>/<cloud>       # cloud = common | eks | cpu-lab
 
 # Validate a Helm values file against the real chart (don't hand-verify field names from memory)
 helm show values <chart>@<pinned-version>
@@ -63,9 +59,9 @@ intentionally skips CRD schema validation (Kueue's `TrainJob`, `RayCluster`, `In
 kubeconform has no schema for them, so cross-check those by hand against the pinned version's CRD
 source instead of trusting a clean run. A separate workflow, [.github/workflows/deploy-docs.yml](.github/workflows/deploy-docs.yml),
 builds and publishes the `website/` docs site to GitHub Pages on every push to `main` that touches
-any `**.md` or `website/**` — it is unrelated to the kustomize/Terraform validation above.
+any `**.md` or `website/**` — it is unrelated to the manifest/Terraform validation above.
 
-**No commands here touch a live cluster or cloud account** — `kubectl kustomize`, `helm template`, and
+**No commands here touch a live cluster or cloud account** — `kubeconform`, `helm template`, and
 `scripts/validate-all.sh` are all local/dry-run (it runs `terraform init -backend=false`, no real
 backend/credentials). Never run `kubectl apply`, `helm install`, or `aws`/`eksctl` mutating commands
 against a real cluster/account without the user's explicit go-ahead — GPU node groups and spot capacity
@@ -75,25 +71,18 @@ cost real money the moment they're created.
 
 - **Every hands-on resource targets EKS**: plain, self-contained Kubernetes YAML under each chapter's
   `eks/` folder (node selectors, tolerations, storage classes written directly into the manifest, no
-  overlay/patch layer). There is no `cpu-lab/` fallback variant — this course targets real GPU hardware
-  throughout. **Migration in progress**: only `00-prerequisites-and-cluster-setup` is converted so far;
-  chapters not yet migrated still use the legacy `common/` kustomize base + `eks/` overlay + `cpu-lab/`
-  layout described below until they're converted — check CONVENTIONS.md for current status before
-  assuming either layout for a given chapter.
+  overlay/patch layer). There is no `cpu-lab/` fallback variant anywhere in the repo — this course
+  targets real GPU hardware throughout. Chapter 18 is the sole exception (a Terraform module instead of
+  Kubernetes manifests, since it provisions the cluster itself — see its README).
 - **Spot capacity is the default**, on-demand is the documented fallback. EKS does not auto-taint spot
   node groups — add the taint yourself if you want workloads to require an explicit toleration. Get this
   wrong and pods silently stay Pending, or land on spot nodes unintentionally.
-- **Chapter layout (target convention) is fixed**: `README.md`, `eks/` only. The README's Lab section
-  inlines every command (no separate `install.sh`/`create-*.sh` files) and applies manifests directly
-  with `kubectl apply -f`. New chapters must follow this shape — see CONVENTIONS.md's directory tree and
-  the required README sections (Why it matters, objectives + time plan, concepts with a diagram, lab
-  steps, spot considerations, troubleshooting, cleanup/cost notes, checkpoint questions, further reading
-  + versions tested).
-- **Legacy chapters** (not yet migrated) keep `README.md`, `common/` (kustomize base), `eks/` (kustomize
-  overlay), optional `cpu-lab/`. Kustomize file references there must stay inside the kustomization
-  root — `configMapGenerator`/`secretGenerator` `files:` cannot point outside the directory containing
-  `kustomization.yaml` (kustomize's security policy rejects it) — copy the file in rather than reaching
-  up with `../../`. Don't add new kustomize usage to a chapter already converted to plain YAML.
+- **Chapter layout is fixed**: `README.md`, `eks/` only. The README's Lab section inlines every command
+  (no separate `install.sh`/`create-*.sh` files) and applies manifests directly with `kubectl apply -f`.
+  New chapters must follow this shape — see CONVENTIONS.md's directory tree and the required README
+  sections (Why it matters, objectives + time plan, concepts with a diagram, lab steps, spot
+  considerations, troubleshooting, cleanup/cost notes, checkpoint questions, further reading + versions
+  tested). Don't reintroduce kustomize, a `common/` base, or a `cpu-lab/` variant into any chapter.
 - **Accuracy over recall for API versions/flags.** Several pinned components are on APIs newer or more
   volatile than typical training data (Kueue `kueue.x-k8s.io/v1beta2`, Kubeflow Trainer v2 `TrainJob`/
   `ClusterTrainingRuntime`, KServe's alpha `LLMInferenceService`, Gateway API Inference Extension

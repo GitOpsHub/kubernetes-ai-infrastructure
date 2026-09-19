@@ -40,10 +40,11 @@ them on macOS and Linux:
 | `shellcheck` | Lints shell scripts in CI | Optional (CI uses it) |
 | `terraform` | Required only for chapter 18 (Infrastructure as Code) | Ch18 only |
 
-> **Migration note:** this repo is moving from kustomize base+overlay manifests to plain,
-> self-contained Kubernetes YAML (see below) -- chapter 00 is fully converted and is the reference
-> implementation. Chapters not yet converted still use `kustomize` (`kubectl apply -k`) and a
-> `cpu-lab/` variant; treat kustomize as legacy tooling being phased out, not the current convention.
+> **Migration complete:** every chapter (00–17, 19) has been converted from kustomize base+overlay
+> manifests to plain, self-contained Kubernetes YAML applied with `kubectl apply -f`, with no
+> `cpu-lab/` fallback variant anywhere in the repo. Chapter 18 is the sole intentional exception: its
+> `eks/` folder is a Terraform module, not Kubernetes manifests, for reasons explained in its own
+> README. `kustomize` is no longer a required tool for this course.
 
 ---
 
@@ -72,8 +73,6 @@ NN-chapter-slug/
   ahead of time (`kubectl create configmap ... --from-file --dry-run=client -o yaml`) rather than
   kustomize's `configMapGenerator`. Python there is run with [uv](https://docs.astral.sh/uv/)
   (`uv run` / `uv pip`), never pip, with every dependency pinned.
-- Legacy (not-yet-migrated) chapters keep their old `common/` (kustomize base) + `eks/` (kustomize
-  overlay) + `cpu-lab/` (no-GPU variant) layout until converted.
 
 ---
 
@@ -123,10 +122,9 @@ README for the full list of values to substitute.
 
 ## Validation
 
-Every manifest (plain YAML or, for not-yet-migrated chapters, kustomize overlay) and every shell
-script in the repo is checked by [`scripts/validate-all.sh`](scripts/validate-all.sh) -- the same
-script CI runs on every PR ([`.github/workflows/validate.yml`](.github/workflows/validate.yml)). Run
-it before you push:
+Every manifest and every shell script in the repo is checked by
+[`scripts/validate-all.sh`](scripts/validate-all.sh) -- the same script CI runs on every PR
+([`.github/workflows/validate.yml`](.github/workflows/validate.yml)). Run it before you push:
 
 ```bash
 ./scripts/validate-all.sh
@@ -134,13 +132,11 @@ it before you push:
 
 The script runs four checks:
 
-1. **kustomize build** -- every remaining overlay renders without error (`kubectl kustomize`); plain
-   YAML chapters have no `kustomization.yaml` and are skipped in this step (they're covered in step 2
-   instead)
-2. **kubeconform** -- schema-validates core Kubernetes resources, both from rendered overlay output
-   and directly from plain-YAML manifest files; CRDs are intentionally skipped (see script header for
-   why). Install: `brew install kubeconform` or https://github.com/yannh/kubeconform (optional but
-   recommended).
+1. **kustomize build** -- a no-op today (no chapter has a `kustomization.yaml` left); kept so the
+   script still catches it immediately if kustomize is ever reintroduced somewhere
+2. **kubeconform** -- schema-validates core Kubernetes resources directly from each chapter's
+   plain-YAML manifest files; CRDs are intentionally skipped (see script header for why). Install:
+   `brew install kubeconform` or https://github.com/yannh/kubeconform (optional but recommended).
 3. **Shell scripts** -- `bash -n` syntax check + `shellcheck` lint (shellcheck optional:
    `brew install shellcheck`). Every `.sh` file tracked by git must also be executable (`chmod +x`).
 4. **Terraform** -- `terraform fmt -check` and `terraform validate` for chapter 18's module

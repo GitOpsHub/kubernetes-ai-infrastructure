@@ -19,7 +19,7 @@ create node pools or GPU capacity of its own. Specifically:
   chapter 04 itself calls out).
 - [`06-batch-jobs-and-kueue`](../06-batch-jobs-and-kueue) — the Kueue quota-exhaustion runbook reads
   its ClusterQueues/Cohort/Workloads.
-- [`09-llm-inference-with-vllm`](../09-llm-inference-with-vllm) — its `common/pdb.yaml` is the PDB
+- [`09-llm-inference-with-vllm`](../09-llm-inference-with-vllm) — its `eks/pdb.yaml` is the PDB
   the drain lab's "real GPU workload" step drains around, and the vLLM OOMKilled runbook diagnoses
   its Deployment.
 - Optional but referenced: [`11-kserve`](../11-kserve) (this chapter ships the PDB its README says
@@ -351,7 +351,9 @@ drain the node hosting some of its pods, and watch the PDB keep the workload ava
 then do the same thing against chapter 09's *real* vLLM PDB if it's still deployed.
 
 ```bash
-kubectl apply -k 17-platform-day2-operations/common
+kubectl apply -f 17-platform-day2-operations/eks/namespace.yaml
+kubectl apply -f 17-platform-day2-operations/eks/drain-demo-deployment.yaml \
+  -f 17-platform-day2-operations/eks/drain-demo-pdb.yaml
 kubectl -n ch17-day2ops get pods -o wide -w   # Ctrl-C once all 3 are Running and spread across nodes
 ```
 Expected: 3 `drain-demo` pods, ideally on different nodes (best-effort pod anti-affinity — on a
@@ -369,8 +371,8 @@ node with real GPU workloads on it.
 
 ```bash
 NODE=$(kubectl -n ch17-day2ops get pods -o jsonpath='{.items[0].spec.nodeName}')
-./17-platform-day2-operations/common/scripts/drain-node.sh "${NODE}" --dry-run
-./17-platform-day2-operations/common/scripts/drain-node.sh "${NODE}"
+./17-platform-day2-operations/eks/scripts/drain-node.sh "${NODE}" --dry-run
+./17-platform-day2-operations/eks/scripts/drain-node.sh "${NODE}"
 ```
 Expected: the pod(s) on `${NODE}` get evicted and rescheduled elsewhere; `kubectl -n ch17-day2ops
 get pdb drain-demo` never shows fewer than 2 `ALLOWED DISRUPTIONS` violated. How to tell this
@@ -385,7 +387,7 @@ kubectl uncordon "${NODE}"
 ```bash
 VLLM_NODE=$(kubectl -n ch09-vllm get pod -l app.kubernetes.io/name=vllm -o jsonpath='{.items[0].spec.nodeName}')
 kubectl -n ch09-vllm get pdb vllm   # confirm it exists: minAvailable 1
-./17-platform-day2-operations/common/scripts/drain-node.sh "${VLLM_NODE}"
+./17-platform-day2-operations/eks/scripts/drain-node.sh "${VLLM_NODE}"
 ```
 Expected: with `replicas: 1` (chapter 09's default) and `minAvailable: 1`, this **blocks** — there is
 no second replica to satisfy the PDB while evicting the only one. How to tell this worked: the drain
@@ -397,7 +399,7 @@ replicas first if you want to see a real GPU workload actually drain successfull
 **Fill chapter 11's PDB gap.** `11-kserve/README.md` (section 5) notes RawDeployment mode has no
 built-in PDB and points at chapter 09's as "the pattern." This chapter ships that PDB:
 ```bash
-kubectl apply -k 17-platform-day2-operations/common/kserve-pdb
+kubectl apply -f 17-platform-day2-operations/eks/kserve-pdb.yaml
 kubectl -n ch11-kserve get pdb
 ```
 Expected: `qwen3-0-6b-predictor` PDB, `minAvailable: 1`. `# VERIFY` (flagged in the manifest itself):
@@ -419,7 +421,7 @@ changed default driver/toolkit image tag before it ever reaches a real node — 
 thing to check before a GPU Operator upgrade, per chapter 02's own checkpoint question 8.
 
 ```bash
-./17-platform-day2-operations/common/scripts/gpu-operator-upgrade-dry-run.sh v26.8.0   # v26.8.0 is illustrative -- use the real next release
+./17-platform-day2-operations/eks/scripts/gpu-operator-upgrade-dry-run.sh v26.8.0   # v26.8.0 is illustrative -- use the real next release
 ```
 Expected output (trimmed):
 ```
@@ -475,9 +477,9 @@ What each script is actually checking, and why:
   generic Kubernetes troubleshooting guide wouldn't think to check.
 
 ```bash
-./17-platform-day2-operations/common/scripts/spot-storm-report.sh
-./17-platform-day2-operations/common/scripts/kueue-quota-report.sh
-./17-platform-day2-operations/common/scripts/diagnose-notready-node.sh <any-node-name>
+./17-platform-day2-operations/eks/scripts/spot-storm-report.sh
+./17-platform-day2-operations/eks/scripts/kueue-quota-report.sh
+./17-platform-day2-operations/eks/scripts/diagnose-notready-node.sh <any-node-name>
 ```
 Expected: all three run read-only and exit 0 on a healthy cluster — `spot-storm-report.sh` shows no
 `Pending` pods and no recent `NodeNotReady`/`Preempted` events; `kueue-quota-report.sh` shows every
@@ -501,7 +503,7 @@ kubectl -n ch09-vllm logs deploy/vllm --previous | grep -i "cuda out of memory" 
 Expected/how to tell which failure you have: `reason` = `OOMKilled` with **no** "CUDA out of memory"
 in the previous container's logs means the *container* (host RAM: request buffers, tokenizer,
 Python overhead) exceeded `resources.limits.memory` — raise the memory limit in
-`09-llm-inference-with-vllm/common/vllm-deployment.yaml`. "CUDA out of memory" in the logs (with or
+`09-llm-inference-with-vllm/eks/vllm-deployment.yaml`. "CUDA out of memory" in the logs (with or
 without a kubelet OOMKilled) means GPU VRAM, not host RAM — the fix is chapter 09's own
 troubleshooting table (lower `--gpu-memory-utilization` or `--max-model-len`), not a Kubernetes
 resource limit change at all.
@@ -655,7 +657,7 @@ helm upgrade --install velero vmware-tanzu/velero \
   --set-string "serviceAccount.server.name=velero" \
   --wait --timeout 10m
 
-kubectl apply -k 17-platform-day2-operations/common/velero
+kubectl apply -f 17-platform-day2-operations/eks/velero-schedule-platform-backup.yaml
 ```
 Expected: `kubectl -n velero get backupstoragelocation default -o jsonpath='{.status.phase}'`
 prints `Available` within ~1 minute (Pod Identity association propagation can take ~1-2 min the
@@ -679,20 +681,13 @@ YAML
 kubectl -n velero wait --for=jsonpath='{.status.phase}'=Completed backup/manual-test-backup --timeout=120s
 kubectl -n velero get backup manual-test-backup -o jsonpath='{.status.phase}'; echo
 ```
-Expected: `Completed`. To see a restore work: `kubectl delete -k 17-platform-day2-operations/common`,
+Expected: `Completed`. To see a restore work:
+```bash
+kubectl delete -f 17-platform-day2-operations/eks/drain-demo-deployment.yaml \
+  -f 17-platform-day2-operations/eks/drain-demo-pdb.yaml --ignore-not-found
+```
 then `velero restore create --from-backup manual-test-backup` (needs the [Velero CLI](https://velero.io/docs/main/basic-install/#install-the-cli)),
 and confirm `kubectl -n ch17-day2ops get deploy drain-demo` comes back.
-
-**cpu-lab (any cluster, no cloud IAM):**
-```bash
-./17-platform-day2-operations/cpu-lab/install-velero-minio.sh   # Velero + AWS plugin against in-cluster MinIO
-kubectl apply -k 17-platform-day2-operations/common/velero
-```
-**What doesn't carry over**: MinIO's `emptyDir` means backups vanish if the MinIO pod restarts —
-this validates the Backup/Schedule/restore *mechanics* (the same Velero CRDs, the same
-`velero restore create` flow), not real off-cluster durability. There's also no cloud CSI driver to
-snapshot volumes from, so `defaultVolumesToFsBackup` stays `false` and PVC data isn't actually
-captured here — only real clouds exercise that part.
 
 ### Step 5: OpenCost — per-team, per-GPU-hour chargeback
 
@@ -721,17 +716,13 @@ helm upgrade --install opencost opencost/opencost \
   -f 17-platform-day2-operations/eks/values-opencost-eks.yaml \
   --wait --timeout 10m
 
-kubectl apply -k 17-platform-day2-operations/common/opencost
+kubectl apply -f 17-platform-day2-operations/eks/opencost-servicemonitor.yaml \
+  -f 17-platform-day2-operations/eks/opencost-prometheusrule.yaml
 kubectl -n opencost port-forward svc/opencost 9090:9090 &
 ```
 Expected: `kubectl -n opencost get pods` shows the `opencost` Deployment `Running`; opening
 `http://localhost:9090` shows the OpenCost UI with a per-namespace cost breakdown (numbers reflect
 whatever's actually running — small on a lab cluster).
-
-**cpu-lab (no real cloud billing, any cluster):** `./17-platform-day2-operations/cpu-lab/install-opencost.sh`
-points OpenCost at chapter 04's cpu-lab kube-prometheus-stack instead — useful for learning the
-query shapes below, not for a real chargeback number (no cloud list pricing behind fake/synthetic
-GPU utilization).
 
 **Per-team GPU-hour report** (the allocation API, aggregated by namespace as this course's proxy for
 "team" — every namespace here maps 1:1 to a chapter/team by convention):
@@ -749,7 +740,8 @@ dashboard's utilization panel for the same window — a namespace with high `gpu
 `DCGM_FI_DEV_GPU_UTIL` is exactly what `ChargebackIdleGPUAllocation` (installed below) pages on.
 
 ```bash
-kubectl apply -k 17-platform-day2-operations/common/opencost
+kubectl apply -f 17-platform-day2-operations/eks/opencost-servicemonitor.yaml \
+  -f 17-platform-day2-operations/eks/opencost-prometheusrule.yaml
 kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9091 &
 # http://localhost:9091 -> Status -> Rules -> confirm ch17-chargeback group loaded
 ```
@@ -844,10 +836,13 @@ exactly as configured — it just may be configured more conservatively than the
 ## 7. Cleanup and cost notes
 
 ```bash
-kubectl delete -k 17-platform-day2-operations/common/opencost --ignore-not-found
-kubectl delete -k 17-platform-day2-operations/common/velero --ignore-not-found
-kubectl delete -k 17-platform-day2-operations/common/kserve-pdb --ignore-not-found
-kubectl delete -k 17-platform-day2-operations/common --ignore-not-found
+kubectl delete -f 17-platform-day2-operations/eks/opencost-servicemonitor.yaml \
+  -f 17-platform-day2-operations/eks/opencost-prometheusrule.yaml --ignore-not-found
+kubectl delete -f 17-platform-day2-operations/eks/velero-schedule-platform-backup.yaml --ignore-not-found
+kubectl delete -f 17-platform-day2-operations/eks/kserve-pdb.yaml --ignore-not-found
+kubectl delete -f 17-platform-day2-operations/eks/drain-demo-deployment.yaml \
+  -f 17-platform-day2-operations/eks/drain-demo-pdb.yaml --ignore-not-found
+kubectl delete -f 17-platform-day2-operations/eks/namespace.yaml --ignore-not-found
 
 helm uninstall opencost -n opencost 2>/dev/null || true
 kubectl delete namespace opencost --ignore-not-found
@@ -858,11 +853,6 @@ kubectl delete namespace velero --ignore-not-found
 This deliberately does not delete the S3 bucket or its backup contents — backups should outlive the
 cluster that made them. Delete it explicitly once you no longer need any of these backups (same
 `BUCKET` value used in step 4): `aws s3 rb s3://${BUCKET} --force`.
-
-cpu-lab teardown (also removes the lab-only MinIO Deployment/Service/Secret):
-```bash
-./17-platform-day2-operations/cpu-lab/cleanup.sh
-```
 
 - `drain-demo` (step 1) is three tiny `pause` containers — negligible cost, safe to leave running,
   but it's pointless to keep once you've done the lab.
@@ -977,20 +967,17 @@ chapter 04's own `GPULowUtilizationOnDemandNode` alert which is about capacity p
 chapter's EKS lab (step 4/5 above) sources them from there like any other chapter.
 
 **`# VERIFY` items to re-check before relying on this chapter**:
-- `common/opencost/servicemonitor.yaml`: the exact Service port name (`http`) OpenCost's chart
+- `eks/opencost-servicemonitor.yaml`: the exact Service port name (`http`) OpenCost's chart
   exposes its `/metrics` endpoint on — confirm with `kubectl get svc -n opencost -l
   app.kubernetes.io/name=opencost -o yaml` after install; chart internals move between releases.
-- `common/opencost/prometheusrule.yaml`'s `ChargebackNamespaceBudgetExceeded`: the exact
+- `eks/opencost-prometheusrule.yaml`'s `ChargebackNamespaceBudgetExceeded`: the exact
   `opencost_pod_gpu_allocation_cost_hourly_dollars` metric name against your installed OpenCost
   version's actual `/metrics` output — OpenCost's cost-model metric names have changed across major
   versions; the `ChargebackIdleGPUAllocation` rule's cross-metric join (DCGM `Hostname` label vs.
   kube-state-metrics `node` label) is similarly fragile, same class of caveat chapter 04's own
   `GPULowUtilizationOnDemandNode` alert already carries.
-- `common/kserve-pdb/pdb.yaml`: the exact pod label KServe 0.20.0's alpha `LLMInferenceService` CRD
+- `eks/kserve-pdb.yaml`: the exact pod label KServe 0.20.0's alpha `LLMInferenceService` CRD
   sets for its predictor pod — same alpha-API caveat chapter 11's README already flags throughout.
-- `cpu-lab/install-velero-minio.sh`: `minio/minio:latest` and `minio/mc:latest` are intentionally
-  unpinned (MinIO here is a disposable test double, not a component this course tracks in
-  `versions.env`) — pin an explicit `RELEASE.*` tag if you keep this cpu-lab setup running.
 
 ---
 

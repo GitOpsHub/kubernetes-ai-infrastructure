@@ -361,8 +361,7 @@ Layout:
 ```
 
 Every file under `eks/` is a complete, standalone Kubernetes manifest (or a Helm values file
-referenced by one) — apply any of them directly with `kubectl apply -f`, no kustomize build step
-involved.
+referenced by one) — apply any of them directly with `kubectl apply -f`, no build step involved.
 
 ```bash
 cp env.sh.example env.sh   # repo root, if not already done
@@ -486,22 +485,21 @@ What you're about to do: extend the app-of-apps with a component this chapter di
 prove the "commit a file, Argo CD creates the Application" mechanic from §3.1 yourself.
 
 ```bash
-cp 15-mlops-gitops-and-pipelines/common/argocd-apps/apps-eks/app-vllm.yaml \
-   15-mlops-gitops-and-pipelines/common/argocd-apps/apps-eks/app-kserve-demo.yaml
+cp 15-mlops-gitops-and-pipelines/eks/apps/app-vllm.yaml \
+   15-mlops-gitops-and-pipelines/eks/apps/app-kserve-demo.yaml
 # edit app-kserve-demo.yaml: change metadata.name and spec.source.path to point at 11-kserve/eks
-# add it to apps-eks/kustomization.yaml's resources list
 git add -A && git commit -m "ch15: add kserve demo Application" && git push
 argocd app sync ch15-app-of-apps
 argocd app list -l app.kubernetes.io/part-of=ai-platform   # now 9
 ```
 
-Copying `app-vllm.yaml` (a plain kustomize-path `Application`, §3.4) as the template is
-deliberate — chapter `11-kserve`'s `eks/` directory is a kustomize overlay just like `09`'s, so the
-same shape of `Application` (`source.path` pointing at that overlay, no multi-source needed) works
-unmodified aside from the name/path edit. Committing and pushing is the step that actually matters
-here, not the local file copy — nothing changes on the cluster until the root Application's next
-sync sees that new file in git, which is why `argocd app sync ch15-app-of-apps` comes after the
-`git push`, not before it.
+Copying `app-vllm.yaml` (a plain directory-path `Application`, §3.4) as the template is
+deliberate — chapter `11-kserve`'s `eks/` directory is a flat directory of standalone Kubernetes
+YAML just like `09`'s, so the same shape of `Application` (`source.path` pointing at that
+directory, no multi-source needed) works unmodified aside from the name/path edit. Committing and
+pushing is the step that actually matters here, not the local file copy — nothing changes on the
+cluster until the root Application's next sync sees that new file in git, which is why
+`argocd app sync ch15-app-of-apps` comes after the `git push`, not before it.
 
 **Expected output**: after the push and root-app sync, a ninth Application (whatever you named
 it) appears in `argocd app list`, `OutOfSync` (manual sync, same as the others).
@@ -540,7 +538,7 @@ exactly the controller-vs-step-pod split the first two bullets describe.
 | `ch15-kueue-queues` syncs before `ch15-kueue` is healthy, fails on missing CRD | Sync-wave annotation missing or edited | Confirm `argocd.argoproj.io/sync-wave: "0"` on `app-kueue.yaml`, `"1"` on `app-kueue-queues.yaml` |
 | `mlflow.exceptions.MlflowException: API request ... Connection refused` in the register step | `MLFLOW_TRACKING_URI` wrong, or MLflow Service not yet `Ready` | `kubectl -n mlflow get pods,svc`; the WorkflowTemplate assumes Service name `mlflow` in namespace `mlflow` |
 | Workflow step stuck `Pending` | `ch15-pipelines` PVC (`ReadWriteOnce`) already mounted by a pod on a different node | Reduce parallelism, or move `pipeline-artifacts` to a `ReadWriteMany` class (Filestore/EFS/Azure Files — chapter `05`) |
-| `argo submit` says `WorkflowTemplate not found` | Applied `cpu-lab/kustomization.yaml` to the wrong namespace, or Argo Workflows `controller.workflowNamespaces` doesn't include `ch15-pipelines` | `kubectl get workflowtemplate -n ch15-pipelines`; check `values-argo-workflows.yaml`'s `controller.workflowNamespaces` |
+| `argo submit` says `WorkflowTemplate not found` | Applied `eks/pipelines/workflowtemplate-train-pipeline.yaml` to the wrong namespace, or Argo Workflows `controller.workflowNamespaces` doesn't include `ch15-pipelines` | `kubectl get workflowtemplate -n ch15-pipelines`; check `values-argo-workflows.yaml`'s `controller.workflowNamespaces` |
 | Everything in `apps-eks/*.yaml` shows `OutOfSync` and never changes | Expected — manual sync by default (§3.2). `argocd app sync <name>` each one you've reviewed | n/a |
 | `helm.valueFiles: $values/...` path not found | Multi-source `ref: values` source's `targetRevision`/repo doesn't actually contain that path (e.g. you pushed to a branch other than `main`) | Match `targetRevision` in the Application to the branch you actually pushed |
 
@@ -569,31 +567,38 @@ Why these happen, in more depth:
   step's Pod onto a different node than the one already holding the mount, it blocks rather than
   failing outright — waiting in case the other Pod finishes and releases it.
 - **`WorkflowTemplate not found`** is a namespace-scoping problem on two independent axes: the
-  `WorkflowTemplate` object itself lives in whatever namespace you applied `cpu-lab/kustomization.yaml`
-  (or the GitOps `common/workflows/` in Lab B) to, *and* the cluster-wide Argo Workflows controller
-  only watches namespaces listed in its own `controller.workflowNamespaces` Helm value — get either
-  one wrong and `argo submit -n ch15-pipelines` can't find it even though the YAML was applied
-  successfully.
+  `WorkflowTemplate` object itself lives in whatever namespace you applied
+  `eks/pipelines/workflowtemplate-train-pipeline.yaml` to (or wherever the GitOps `app-pipelines.yaml`
+  child Application synced it), *and* the cluster-wide Argo Workflows controller only watches
+  namespaces listed in its own `controller.workflowNamespaces` Helm value — get either one wrong
+  and `argo submit -n ch15-pipelines` can't find it even though the YAML was applied successfully.
 
 ## 7. Cleanup & cost notes
 
 ```bash
-./15-mlops-gitops-and-pipelines/cpu-lab/cleanup.sh
+kubectl delete -f 15-mlops-gitops-and-pipelines/eks/pipelines/workflowtemplate-train-pipeline.yaml --ignore-not-found
+kubectl delete -f 15-mlops-gitops-and-pipelines/eks/pipelines/pvc-pipeline-artifacts.yaml --ignore-not-found
+kubectl delete -f 15-mlops-gitops-and-pipelines/eks/pipelines/serviceaccount-pipelines-runner.yaml --ignore-not-found
+kubectl delete -f 15-mlops-gitops-and-pipelines/eks/pipelines/namespace.yaml --ignore-not-found
+helm uninstall mlflow -n mlflow --ignore-not-found
+helm uninstall argo-workflows -n argo --ignore-not-found
+kubectl delete namespace argo mlflow --ignore-not-found
 ```
 
-This script (`cpu-lab/cleanup.sh`) tears down exactly what Lab A created, in reverse: it
-`kubectl delete -k`s this chapter's own kustomization (the `WorkflowTemplate`, PVC, RBAC, and
-`ch15-pipelines` namespace), `helm uninstall`s the `mlflow` and `argo-workflows` releases, and
-deletes the `argo`/`mlflow` namespaces those releases created — safe to run repeatedly, since every
-step is `--ignore-not-found`/tolerant of things already being gone.
+This tears down exactly what Lab A created, in reverse: `kubectl delete -f`s each of this
+chapter's standalone `eks/pipelines/*.yaml` files (the `WorkflowTemplate`, PVC, RBAC, and
+`ch15-pipelines` namespace, namespace last so its finalizer cleans up anything still in it),
+`helm uninstall`s the `mlflow` and `argo-workflows` releases, and deletes the `argo`/`mlflow`
+namespaces those releases created — safe to run repeatedly, since every step is
+`--ignore-not-found`/tolerant of things already being gone.
 
-Or, if you applied the app-of-apps against your own Argo CD, review then run (this prints rather
-than runs the delete, consistent with this course's rule that a chapter never mutates your live
-Argo CD's own install — only the `Application`/`AppProject` objects it created; Argo CD's cascade
-finalizer removes everything a synced child manages too):
+Or, if you applied the app-of-apps against your own Argo CD, review then run (consistent with
+this course's rule that a chapter never mutates your live Argo CD's own install — only the
+`Application`/`AppProject` objects it created; Argo CD's cascade finalizer removes everything a
+synced child manages too):
 ```bash
 kubectl delete -f 15-mlops-gitops-and-pipelines/eks/root-app.yaml
-kubectl delete -f 15-mlops-gitops-and-pipelines/common/argocd-apps/project.yaml
+kubectl delete -f 15-mlops-gitops-and-pipelines/eks/project.yaml
 ```
 (check `kubectl get application -n argocd -l app.kubernetes.io/part-of=ai-platform` first if you
 want to delete children individually instead of cascading.)

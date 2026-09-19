@@ -59,7 +59,7 @@ spec:
     # ValidatingAdmissionPolicy/Kyverno ClusterPolicy objects from ever syncing.
     #
     # Deliberately does NOT include ClusterRoleBinding: chapter 14's RBAC
-    # (14-multi-tenancy-and-security/common/rbac) only ever creates a cluster-scoped ClusterRole
+    # (14-multi-tenancy-and-security/eks/clusterrole-platform-admin.yaml) only ever creates a cluster-scoped ClusterRole
     # (`ch14-platform-admin`) and namespaced Role/RoleBinding objects — no ClusterRoleBinding
     # exists anywhere in this course's manifests. Whitelisting ClusterRoleBinding here would be
     # the exact hole checkpoint question 4 below describes; leaving it off is what makes that

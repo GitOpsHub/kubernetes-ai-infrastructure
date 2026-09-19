@@ -1,5 +1,5 @@
 # Bridges a naming gap this capstone found between chapters 06 and 07 while assembling the
-# platform end to end: 07-distributed-training-kubeflow-trainer/common/kueue/localqueue.yaml
+# platform end to end: 07-distributed-training-kubeflow-trainer/eks/localqueue.yaml
 # (`ch07-queue`) points spec.clusterQueue at "team-research" — a ClusterQueue that
 # 06-batch-jobs-and-kueue never defines (it ships `team-a-cq`/`team-b-cq` instead), and neither
 # of those two cover `nvidia.com/gpu` in `coveredResources` (chapter 06 is CPU-only batch by
@@ -16,7 +16,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: ch16-capstone
 spec:
-  cohortName: ch06-cohort   # joins 06-batch-jobs-and-kueue/common/queues/cohort.yaml's cohort
+  cohortName: ch06-cohort   # joins 06-batch-jobs-and-kueue/eks/cohort.yaml's cohort
   namespaceSelector: {}
   queueingStrategy: BestEffortFIFO
   resourceGroups:

@@ -11,19 +11,19 @@ echo "== Reverse Phase 7-6: capstone + pipelines =="
 # kubectl delete -f 16-capstone-ai-platform/eks/workflowtemplate-platform-e2e.yaml --ignore-not-found
 # kubectl delete -f 16-capstone-ai-platform/eks/namespace-rbac.yaml --ignore-not-found
 # kubectl delete -f 16-capstone-ai-platform/eks/clusterqueue-team-research.yaml --ignore-not-found
-# ./15-mlops-gitops-and-pipelines/cpu-lab/cleanup.sh
+# See 15-mlops-gitops-and-pipelines/README.md §7 (helm uninstall argo-workflows/mlflow, or Argo CD)
 
 echo "== Reverse Phase 5: security (14-multi-tenancy-and-security/README.md §7) =="
 
 echo "== Reverse Phase 4: gateway/autoscaling/node-autoscaling =="
-# kubectl delete -k 12-inference-gateway-and-multinode-serving/eks --ignore-not-found
+# kubectl delete -f 12-inference-gateway-and-multinode-serving/eks/ --ignore-not-found
 # See 12-inference-gateway-and-multinode-serving/README.md §7
-# kubectl delete -k 10-autoscaling-inference/eks --ignore-not-found
+# kubectl delete -f 10-autoscaling-inference/eks/ --ignore-not-found
 # See 13-node-autoscaling-and-cost/README.md §7
 
 echo "== Reverse Phase 3: serving/training frameworks =="
 # See 11-kserve/README.md §7
-# kubectl delete -k 09-llm-inference-with-vllm/eks --ignore-not-found
+# kubectl delete -f 09-llm-inference-with-vllm/eks/ --ignore-not-found
 # See 09-llm-inference-with-vllm/README.md §7, 07-distributed-training-kubeflow-trainer/README.md §7
 
 echo "== Reverse Phase 2: Kueue (06-batch-jobs-and-kueue/README.md §7) =="

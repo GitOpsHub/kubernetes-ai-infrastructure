@@ -74,8 +74,8 @@ source env.sh && source versions.env
 4. **Apply manifests directly**: `kubectl apply -f NN-chapter/eks/some-manifest.yaml` -- every
    manifest under a chapter's `eks/` folder is plain, self-contained Kubernetes YAML (node selectors,
    tolerations, and storage classes are written directly into the file); no templating or overlay
-   tool needed. (A handful of chapters haven't been converted from the old kustomize layout yet --
-   CONVENTIONS.md tracks migration status.)
+   tool needed anywhere in this course (chapter 18 is the one exception -- its `eks/` is a Terraform
+   module, not Kubernetes manifests, see its README for why).
 5. **Clean up after every session.** Each chapter ends with a Cleanup section. Run it. Forgotten
    spot GPU nodes cost real money.
 
