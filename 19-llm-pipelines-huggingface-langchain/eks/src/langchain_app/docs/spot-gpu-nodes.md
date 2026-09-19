@@ -25,8 +25,8 @@ stays `Pending` without any obvious error.
 ## Keeping cost at zero when idle
 
 GPU node pools are created with **min nodes = 0**. They only cost money while a GPU pod is
-pending or running. On EKS the `spot-gpu` node group uses `g6.xlarge` / `g4dn.xlarge`
-instances. Listing several instance types matters: spot capacity is tracked per instance type
+pending or running. On EKS the `spot-gpu` node group uses `g4dn.xlarge` instances.
+The default lab keeps it to a single cheap GPU class so idle cost stays low and the node group stays easy to reason about.
 per availability zone, so more eligible shapes means fewer stockouts.
 
 ## Surviving a reclaim

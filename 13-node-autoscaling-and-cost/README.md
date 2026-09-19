@@ -38,7 +38,7 @@ This chapter assumes:
 
 Every previous chapter assumed a node pool already existed (you ran the `eksctl create nodegroup`
 command once in chapter 01 and reused it). A "node group" in that model is a fixed shelf of
-machines: you told `eksctl` "give me 1 to 4 `g6.xlarge` spot instances," and AWS keeps that many
+machines: you told `eksctl` "give me 1 to 4 `g4dn.xlarge` spot instances," and AWS keeps that many
 EC2 instances running (via an Auto Scaling Group) regardless of whether anything is actually
 scheduled on them. If you need 5 GPUs and the group tops out at 4, you're stuck `Pending` until you
 manually run `eksctl scale nodegroup` again. If you only ever use 1 GPU, you're still paying for
@@ -210,7 +210,7 @@ side by side with this table — every field either object sets and why it's the
 |---|---|---|
 | `nodepool.yaml` | `nodeClassRef` | Which `EC2NodeClass` supplies the AMI/IAM/networking for nodes from this pool — both pools here point at the same `gpu` class |
 | `nodepool.yaml` | `requirements[karpenter.sh/capacity-type]` | Restricts this pool to `spot` (in `gpu-spot`) or `on-demand` (in `gpu-ondemand`) — this is what makes "spot-first" a ranked choice between two pools rather than a single flag |
-| `nodepool.yaml` | `requirements[node.kubernetes.io/instance-type]` | The allowed instance shapes — `gpu-spot` lists two (`g6.xlarge`, `g4dn.xlarge`) for diversification; `gpu-ondemand` lists one, since it's a guaranteed fallback, not trying to be cheap |
+| `nodepool.yaml` | `requirements[node.kubernetes.io/instance-type]` | The allowed instance shapes — both pools use the cheapest single-GPU option, `g4dn.xlarge`, to keep the lab affordable while still covering a real GPU-backed node |
 | `nodepool.yaml` | `taints` | Every node this pool launches carries `nvidia.com/gpu=present:NoSchedule` so only Pods with the matching toleration (chapter 01's pattern) land on an expensive GPU node — `eks/scale-demo.yaml`'s Pod spec has this toleration already |
 | `nodepool.yaml` | `disruption.consolidationPolicy` / `consolidateAfter` | Controls the "Consolidate" arrow in the diagram above — `WhenEmptyOrUnderutilized` + `5m` means Karpenter looks for bin-packing opportunities, not just fully-idle nodes, and waits 5 minutes of idleness before acting |
 | `nodepool.yaml` | `limits` | A **hard cap** (CPU and GPU count) on how much this pool can ever provision at once — section 6 explains why this is the cheapest insurance policy in the whole chapter |
@@ -229,15 +229,10 @@ recalibrate: here it's *two entire `NodePool` objects*, and Karpenter's own logi
 write — decides which one actually gets used for any given Pending Pod, based purely on which one
 can currently be satisfied.
 
-**Spot diversification**: listing several instance types (`g6.xlarge` AND `g4dn.xlarge`; or
-several GPU families) in one spot-seeking pool matters because spot capacity pools are
-per-instance-type-per-AZ. If you only ever ask for `g6.xlarge` spot and that specific pool is
-tight, you get nothing even if `g4dn.xlarge` spot is wide open next door. More eligible shapes =
-lower chance of a stockout forcing an expensive fallback (or a `Pending` Pod). Concretely: AWS
-tracks spot capacity separately for every (instance type, availability zone) pair — `g6.xlarge` in
-`us-east-1a` can be completely out of spot capacity while `g6.xlarge` in `us-east-1b` or
-`g4dn.xlarge` in either zone is fine. A `NodePool` that only allows one instance type is betting
-everything on one of those narrow pools; a `NodePool` that allows several similar ones is spreading
+**Spot diversification**: when you want the cheapest viable GPU, a single `g4dn.xlarge` pool is often the
+lowest-cost option while still being predictable and simple for labs. A more complex multi-shape pool
+can help when one specific GPU family is scarce, but the default cost-sensitive setup here intentionally
+keeps the pool to the cheapest single-GPU path: `g4dn.xlarge`.
 that bet.
 
 ### 3.3 Image streaming and preloading
@@ -465,7 +460,7 @@ date; kubectl scale -n ch13-autoscale deploy/scale-demo --replicas=4
 kubectl get nodeclaims --watch   # Ctrl-C once you see 2 NodeClaims reach Initialized
 ```
 
-Each `scale-demo` Pod requests exactly 1 GPU, and `g6.xlarge`/`g4dn.xlarge` each expose exactly 1
+Each `scale-demo` Pod requests exactly 1 GPU, and `g4dn.xlarge` exposes exactly 1
 GPU, so 4 replicas cannot fit on one node — Karpenter has to launch a second GPU `NodeClaim` to
 schedule the overflow Pods, the same event-driven loop from section 3.1's diagram, triggered twice
 in a row.
@@ -506,7 +501,7 @@ for the workloads running on top of it:
    aggressively you can rely on scale-from-zero for latency-sensitive inference. Chapter 10's
    `10-autoscaling-inference` pre-scaling/cold-start math assumes THIS chapter's node provisioning
    time as an input — if you skipped timing Step 2, that's the number to go back and capture.
-3. **Diversify within a class, not across it**: `g6.xlarge` and `g4dn.xlarge` are both single-GPU,
+3. **Diversify within a class, not across it**: `g4dn.xlarge` is the default single-GPU lab shape,
    similar price/perf, safe to treat as interchangeable spot fallbacks. Don't diversify into a
    completely different GPU class (e.g., falling back from L4 to A100) without your workload
    actually being portable across that memory/compute jump — chapter 09's `--gpu-memory-utilization`
@@ -561,7 +556,7 @@ EC2 console.
 **GPU nodes from an autoscaler disappear on their own** once `scale-demo` is scaled to 0 and
 `consolidateAfter` elapses — but always run `kubectl get nodes` a few minutes after cleanup and
 check the EC2 console if you're stepping away; a stuck PDB or a leftover DaemonSet Pod can pin a
-node indefinitely and you'll pay for it overnight. GPU instances (even spot `g6.xlarge`/`g4dn.xlarge`)
+node indefinitely and you'll pay for it overnight. GPU instances (even spot `g4dn.xlarge`)
 are the most expensive line item in this entire course per hour — treat "did the nodes actually
 disappear" as a mandatory last step, not an optional one, every single time you finish a session in
 this chapter.

@@ -16,7 +16,7 @@ This chapter reuses earlier chapters instead of rebuilding them:
   `env.sh` filled in (`AWS_REGION`, `EKS_CLUSTER`, `AWS_ACCOUNT_ID` for EKS).
 - **A spot GPU node pool plus a device plugin** from
   [01-gpu-nodes-and-scheduling](../01-gpu-nodes-and-scheduling) §4, which gives you the `spot-gpu`
-  managed node group (`g6.xlarge`/`g4dn.xlarge`, taint `nvidia.com/gpu=present:NoSchedule`, nodes
+  managed node group (`g4dn.xlarge`, taint `nvidia.com/gpu=present:NoSchedule`, nodes
   labelled `nvidia.com/gpu.present=true` by the AL2023 NVIDIA AMI). **That group has `maxSize: 1` and
   no cluster autoscaler**, which matters in this chapter (see the GPU budget note in §3.8).
 - **The concepts from [05-model-storage-and-data](../05-model-storage-and-data)**: bucket CSI mounts,
@@ -164,7 +164,7 @@ matrices are trained. In this chapter's run, that's about **10.1M trainable para
 total** — under 2%. Three consequences that matter for this lab:
 
 - **It fits in far less GPU memory**, because the optimizer only needs state for the small adapter, not
-  the full model — this is what makes fine-tuning fit on a single `g6.xlarge`/`g4dn.xlarge` spot GPU.
+  the full model — this is what makes fine-tuning fit on a single `g4dn.xlarge` spot GPU.
 - **The saved checkpoint is tiny** (an adapter, tens of MB) compared to the full model (~1.4 GB of
   `safetensors`). That's why `finetune.py` uploads adapter checkpoints during training and only produces
   a full-size model once, at the end, by **merging** the adapter's numbers back into a copy of the base
@@ -365,7 +365,7 @@ layout:
 `target_modules="all-linear"`) on `TRAIN_SAMPLES` conversations. The subset uses a fixed seed, so
 every retry sees the same samples in the same order. With the defaults (200 steps × 4 per device × 4
 accumulation = 3,200 sequences over 2,000 samples), that's about 1.6 epochs. Precision is picked at
-runtime: bf16 on Ampere and newer (L4 on `g6.xlarge`), fp16 AMP with fp32 master weights on a T4
+runtime: bf16 on Ampere and newer (faster GPU families), fp16 AMP with fp32 master weights on a T4
 (`g4dn.xlarge` has no bf16), and fp32 on CPU.
 
 The spot design has five parts. Each has a line of code you can point to:
@@ -982,7 +982,7 @@ STEP                           TEMPLATE   PODNAME                               
 
 **How to tell this worked**: `Status: Succeeded`, `publish` is skipped (`○`) because `hf-push-repo`
 is empty, and `Outputs` shows `model-path: /mnt/store/runs/qwen3-sft-001/model`. The training step
-typically takes 15–30 min on an L4 (`g6.xlarge`) and longer on a T4 (`g4dn.xlarge`), plus a few
+typically takes 15–30 min on a T4 (`g4dn.xlarge`) and longer on higher-end GPUs, plus a few
 minutes the first time a GPU node pulls the large trainer image.
 
 #### Step 8: Watch the steps (and run the spot drill)
@@ -1516,9 +1516,9 @@ exists they scale it back to 2 nodes (`CPU_NODES=1` for one) instead of creating
 
 Cost notes (EKS, us-east-1 ballpark; check current pricing):
 
-- **GPU is the only large cost.** A `g6.xlarge` (1× L4) is about $0.80/h on-demand, and spot is
-  usually well under half that. Check with `aws ec2 describe-spot-price-history --instance-types
-  g6.xlarge --product-descriptions Linux/UNIX --max-items 5`. The pipeline needs the GPU for training
+- **GPU is the only large cost.** A `g4dn.xlarge` (1× T4) is the cheapest single-GPU lab choice,
+  and spot is usually well under half that. Check with `aws ec2 describe-spot-price-history --instance-types
+  g4dn.xlarge --product-descriptions Linux/UNIX --max-items 5`. The pipeline needs the GPU for training
   and evaluation (tens of minutes). vLLM holds it for as long as it runs, because nothing here scales
   it to zero. Scale it to 0 or run chapter 01's cleanup when you stop.
 - **CPU nodes:** two spot `m7i.xlarge`-class nodes for as long as `ch19-cpu-spot` is at its

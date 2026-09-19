@@ -11,7 +11,7 @@ managedNodeGroups:
 # (driver, CUDA user-mode driver, nvidia-container-toolkit preinstalled; NO device plugin).
 - name: spot-gpu
   amiFamily: AmazonLinux2023
-  instanceTypes: ["g6.xlarge", "g4dn.xlarge"]
+  instanceTypes: ["g4dn.xlarge"]
   spot: true
   minSize: 0
   desiredCapacity: 0
@@ -28,7 +28,7 @@ managedNodeGroups:
 # On-demand fallback: same shape, created only with INCLUDE=ondemand-gpu.
 - name: ondemand-gpu
   amiFamily: AmazonLinux2023
-  instanceTypes: ["g6.xlarge"]
+  instanceTypes: ["g4dn.xlarge"]
   minSize: 0
   desiredCapacity: 0
   maxSize: 1

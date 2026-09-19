@@ -212,7 +212,7 @@ your default on-demand node pool from chapter `00`.
 
 | | EKS |
 |---|---|
-| GPU | 1x L4 (`g6.xlarge`) |
+| GPU | 1x T4 (`g4dn.xlarge`) |
 | Spot nodeSelector | `eks.amazonaws.com/capacityType: SPOT` |
 | GPU taint added by | the `eksctl create nodegroup` command in §4.2 |
 | Spot taint added by | nobody — opt-in, set explicitly in the nodegroup config |
@@ -287,7 +287,7 @@ and `kubectl get crd | grep ray.io` lists `rayclusters.ray.io`, `rayjobs.ray.io`
 ### 4.2 GPU node pool
 
 What you're about to do: create the dedicated spot GPU managed node group the `gpu-spot` worker
-group targets — L4 instances (`g6.xlarge`/`g6.2xlarge` for spot diversification), scaling from 0.
+group targets — the cheapest single-GPU option (`g4dn.xlarge`), scaling from 0.
 The RayCluster head, RayJob's ephemeral cluster and RayService all run on your existing on-demand
 default node group from chapter `00`. Requires "All G and VT Spot Instance Requests" (or On-Demand
 G and VT) vCPU quota >= 8 — this is an AWS service-quota limit, separate from your account's billing
@@ -298,7 +298,7 @@ nodegroup will sit unable to launch any instances. Set `CAPACITY=on-demand` inst
 
 ```bash
 CAPACITY="${CAPACITY:-spot}"
-if [[ "${CAPACITY}" == "spot" ]]; then NG=ch08-gpu-spot-l4; SPOT=true; else NG=ch08-gpu-ondemand-l4; SPOT=false; fi
+if [[ "${CAPACITY}" == "spot" ]]; then NG=ch08-gpu-spot-t4; SPOT=true; else NG=ch08-gpu-ondemand-t4; SPOT=false; fi
 
 cat <<YAML | eksctl create nodegroup -f -
 apiVersion: eksctl.io/v1alpha5
@@ -309,7 +309,7 @@ metadata:
 managedNodeGroups:
   - name: ${NG}
     amiFamily: AmazonLinux2023
-    instanceTypes: ["g6.xlarge", "g6.2xlarge"]
+    instanceTypes: ["g4dn.xlarge"]
     spot: ${SPOT}
     minSize: 0
     desiredCapacity: 0

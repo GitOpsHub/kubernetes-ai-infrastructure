@@ -224,7 +224,7 @@ applies to the runtime's JobSet template at admission time) with the spot/GPU `n
 
 | | EKS |
 |---|---|
-| GPU | 1x L4 (`g6.xlarge`) |
+| GPU | 1x T4 (`g4dn.xlarge`) |
 | Spot nodeSelector | `eks.amazonaws.com/capacityType: SPOT` |
 | GPU taint added by | this chapter's node-group create (§4.3), `nvidia.com/gpu` |
 | Spot taint added by | nobody (opt-in) |
@@ -390,7 +390,7 @@ should not yet exist (first run), or should already have Trainer installed — t
 --install` in 4.2 below is idempotent, so re-running it on a later pass is safe.
 
 > **GPU quota check first.** Unlike CPU node groups, AWS gates GPU instance families
-> (`g6.xlarge`/`g6.2xlarge` here) behind an EC2 service quota that defaults to 0 for new accounts.
+> (`g4dn.xlarge` here) behind an EC2 service quota that defaults to 0 for new accounts.
 > If you skip ahead to §4.3 without checking, `eksctl create nodegroup` will succeed but the
 > underlying Auto Scaling Group will silently fail to launch any instances — go to the EC2 console
 > → Service Quotas → "All G and VT Spot Instance Requests" (or the on-demand equivalent) and
@@ -448,7 +448,7 @@ driver.
 > when you're done for the day.
 
 Why a dedicated node group instead of reusing `01-gpu-nodes-and-scheduling`'s: this chapter pins a
-specific instance type (`g6.xlarge`/`g6.2xlarge`, single-GPU L4 shapes) and its own taint key/label
+specific instance type (`g4dn.xlarge`, the cheapest single-GPU lab shape) and its own taint key/label
 so the lab's node selector in §3.3 has something predictable to target, independent of whatever GPU
 node pool an earlier chapter left behind. The **taint** (`nvidia.com/gpu=true:NoSchedule`) is what
 stops *non-GPU* pods from accidentally landing on your expensive GPU nodes — only pods that
@@ -471,7 +471,7 @@ metadata:
 managedNodeGroups:
   - name: ${NG}
     amiFamily: AmazonLinux2023          # eksctl picks the NVIDIA AL2023 AMI for GPU instance types
-    instanceTypes: ["g6.xlarge", "g6.2xlarge"]
+    instanceTypes: ["g4dn.xlarge"]
     spot: ${SPOT}
     minSize: 0
     desiredCapacity: 0

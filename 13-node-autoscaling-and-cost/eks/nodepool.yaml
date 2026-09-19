@@ -20,10 +20,8 @@ spec:
         values: ["spot"]
       - key: node.kubernetes.io/instance-type
         operator: In
-        # L4 first (chapter's default GPU), T4 fallback -- SPOT DIVERSIFICATION: listing several
-        # instance types/pools lets Karpenter fall back automatically if one is out of spot
-        # capacity, instead of the Pod staying Pending.
-        values: ["g6.xlarge", "g4dn.xlarge"]
+        # Cheapest single-GPU spot option for the lab. Keep it simple and low-cost.
+        values: ["g4dn.xlarge"]
       - key: kubernetes.io/arch
         operator: In
         values: ["amd64"]
@@ -58,7 +56,7 @@ spec:
         values: ["on-demand"]
       - key: node.kubernetes.io/instance-type
         operator: In
-        values: ["g6.xlarge"]
+        values: ["g4dn.xlarge"]
       taints:
       - key: nvidia.com/gpu
         value: "present"

@@ -47,7 +47,7 @@ surprise bill, or the spot pool can't get capacity. This chapter handles that up
   learning environment, but it means your GPU node pool must be designed to **scale to zero** (run no
   machines, and therefore cost nothing, when you're not actively using it) and to tolerate a node
   disappearing without warning.
-- **Budgets are your circuit breaker.** A single forgotten `g6.xlarge` GPU instance running on-demand
+- **Budgets are your circuit breaker.** A single forgotten `g4dn.xlarge` GPU instance running on-demand
   (i.e., at full, non-discounted price, left running by accident) costs roughly as much as a month of a
   small CPU cluster. AWS **does not stop spending on its own** — nothing in AWS automatically shuts
   things down for you. Budgets alert you by email; the cleanup commands in this chapter are what
@@ -141,8 +141,8 @@ Reading this diagram box by box, for anyone who hasn't seen one of these before:
   later chapters, and the "fake GPU" lab you'll run at the end of this chapter. It always has at least
   1 node running (it never scales to zero) because something has to be available to run the cluster's
   own housekeeping Pods.
-- **`GPU` — Spot GPU node group (min 0).** These would be actual GPU-equipped EC2 instances (an
-  `g6.xlarge` has an NVIDIA L4 GPU; a `g4dn.xlarge` has an NVIDIA T4). "min 0" means AWS is allowed to
+- **`GPU` — Spot GPU node group (min 0).** These would be actual GPU-equipped EC2 instances (a
+  `g4dn.xlarge` has an NVIDIA T4, the cheapest single-GPU spot option in this lab). "min 0" means AWS is allowed to
   run **zero** of these machines most of the time — you only pay for one when you explicitly scale the
   group up (or, starting in chapter 13, when an autoscaler does it for you because a Pod needs a GPU).
   It's tainted so nothing lands on it by accident.
@@ -158,7 +158,7 @@ Reading this diagram box by box, for anyone who hasn't seen one of these before:
 | | EKS (eksctl managed node groups) |
 |---|---|
 | CPU node group | `spot-cpu`, 6 instance types, `spot: true`, 1–4 |
-| GPU node group | `spot-gpu`, `g6.xlarge` / `g4dn.xlarge`, `spot: true`, **0–1** |
+| GPU node group | `spot-gpu`, `g4dn.xlarge`, `spot: true`, **0–1** |
 | Scale-from-zero | **No autoscaler by default**: scale manually or use Karpenter (`13-node-autoscaling-and-cost`) |
 | Spot taint added automatically | No (we add `nvidia.com/gpu` taint on the GPU group ourselves) |
 | GPU taint added automatically | No (set in `cluster.yaml`) |
@@ -176,7 +176,7 @@ it until the quota is raised.
 |---|---|---|
 | **All G and VT Spot Instance Requests** (`L-3819A6DF`) | vCPUs | `L-DB2E81BA` on-demand G/VT (fallback), `L-34B43A08` standard spot (CPU pool) |
 
-A `g6.xlarge`/`g4dn.xlarge` is **4 vCPUs**, so a spot vCPU quota of 4 gives you exactly one GPU node.
+A `g4dn.xlarge` is **4 vCPUs**, so a spot vCPU quota of 4 gives you exactly one GPU node.
 Ask for 8.
 
 ### 3.3 Spot in one paragraph
@@ -290,7 +290,7 @@ L-34B43A08  All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests  5.0
 ```
 How to tell this worked: `L-3819A6DF` (spot G/VT vCPUs) shows a nonzero limit before you try to
 create the GPU node group, otherwise cluster creation will succeed but the GPU group will never get
-capacity. Quotas are in vCPUs: one `g6.xlarge`/`g4dn.xlarge` = 4 vCPUs, so request at least 8 (giving
+capacity. Quotas are in vCPUs: one `g4dn.xlarge` = 4 vCPUs, so request at least 8 (giving
 yourself headroom for two nodes, or one node plus a bit of margin for AWS rounding/timing quirks):
 ```bash
 # Files an increase request; AWS reviews it asynchronously (often auto-approved for small increases,
@@ -459,7 +459,7 @@ two of the instance terminating.
 
 - **Capacity, not only price.** Spot GPU pools can sit at 0 because the region has no G/VT spot
   capacity — this is different from a quota problem (section 3.2): even with plenty of quota, AWS
-  simply may not have a spare `g6.xlarge`/`g4dn.xlarge` to spare in your region/AZ at that moment.
+  simply may not have a spare `g4dn.xlarge` to spare in your region/AZ at that moment.
   Mitigate with several instance types (already the case in `cluster.yaml`) or another
   region. Chapter 13 covers diversification further.
 - **Keep control-plane-like workloads off GPU spot nodes.** Operators and controllers belong on the CPU pool, both because GPU capacity is scarcer/pricier and because spot GPU nodes can vanish with 2 minutes' notice — you don't want cluster-critical components riding on that. The GPU taint enforces this.
@@ -501,7 +501,7 @@ Check for leftover EBS volumes / load balancers in `$AWS_REGION` after deleting 
 volume can outlive the cluster that created it) and will keep billing on their own until you remove
 them by hand in the AWS console or CLI.
 - Rough spot prices (vary by region and time; always check the [EC2 Spot pricing
-  page](https://aws.amazon.com/ec2/spot/pricing/) for current numbers): `g6.xlarge`/`g4dn.xlarge` spot
+  page](https://aws.amazon.com/ec2/spot/pricing/) for current numbers): `g4dn.xlarge` spot
   are usually **tens of cents per hour**. On-demand is 2–4× more.
 - Orphans that keep billing after cluster deletion: EBS volumes, load balancers.
 
@@ -517,7 +517,7 @@ them by hand in the AWS console or CLI.
 <summary>Answers</summary>
 
 1. Idle GPUs are the biggest cost. Min 0 means you pay nothing when idle. The cost is a cold start: node provisioning, driver load (baked into the AMI) and image pull, often 3–10 minutes.
-2. `L-3819A6DF` (All G and VT Spot Instance Requests), measured in vCPUs — one `g6.xlarge`/`g4dn.xlarge` is 4 vCPUs.
+2. `L-3819A6DF` (All G and VT Spot Instance Requests), measured in vCPUs — one `g4dn.xlarge` is 4 vCPUs.
 3. Nothing. EKS has no autoscaler by default. You scale the managed node group (`eksctl scale nodegroup`) or install Cluster Autoscaler/Karpenter (chapter 13).
 4. `nvidia.com/gpu=present:NoSchedule`. A DaemonSet (like the device plugin) can carry a matching toleration in its Pod spec so it still lands on every node regardless of taints — ordinary Deployments without that toleration are the ones kept off.
 5. It's still just an untainted-by-workload node group at this point — nothing in this chapter runs a GPU Pod, so leaving it at 1 would only accrue cost with no learning benefit. Chapter 01 scales it back up itself once it actually needs a GPU.

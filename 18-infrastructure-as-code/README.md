@@ -262,7 +262,7 @@ the lab below stops at `validate` (syntax-only, no account) rather than `plan` (
 | Resources used | `terraform-aws-modules/eks/aws` v21.x (module), `terraform-aws-modules/vpc/aws` v6.x |
 | Provider / floor | `hashicorp/aws` `>= 6.59` (module's own floor) |
 | CPU pool | `spot-cpu`, 6 diversified instance types, `capacity_type = "SPOT"`, 1–4 |
-| GPU pool | `spot-gpu`, g6.xlarge/g4dn.xlarge, `capacity_type = "SPOT"`, **0–1**, tainted |
+| GPU pool | `spot-gpu`, g4dn.xlarge, `capacity_type = "SPOT"`, **0–1**, tainted |
 | Why a module vs. raw resources | A bare `aws_eks_cluster` also needs you to hand-wire the OIDC provider, the `aws-auth`/access-entry dance, node IAM roles + policies, and security groups correctly — the module gets this right and keeps it current across EKS API changes. Raw `aws_eks_cluster` + `aws_eks_node_group` is documented as a "next step down" in `eks/main.tf`'s comments if you want to see it without the module. |
 
 ### 3.2 Why a module instead of raw resources

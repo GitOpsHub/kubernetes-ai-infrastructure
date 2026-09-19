@@ -236,7 +236,7 @@ spec:
       - {name: UV_CACHE_DIR, value: /scratch/uv-cache}
       - {name: HF_HUB_OFFLINE, value: "1"}   # everything is loaded from the bucket copies
       resources:
-        # Sized for a 4 vCPU / 16 GiB GPU node (g6.xlarge / g4dn.xlarge / Standard_NC4as_T4_v3 /
+        # Sized for a 4 vCPU / 16 GiB GPU node (g4dn.xlarge / Standard_NC4as_T4_v3 /
         # g2-standard-4, ~3.9 allocatable vCPU) with room left for DaemonSets, Argo's wait container
         # and, on GKE, the gcsfuse sidecar.
         requests: {cpu: "2", memory: 10Gi, ephemeral-storage: 20Gi, nvidia.com/gpu: "1"}

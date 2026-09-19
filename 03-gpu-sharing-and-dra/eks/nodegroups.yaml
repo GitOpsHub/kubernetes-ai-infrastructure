@@ -12,7 +12,7 @@ managedNodeGroups:
   #    with the nvidia.com/device-plugin.config label (keys from common/device-plugin-config).
   - name: gpu-share-spot
     amiFamily: AmazonLinux2023
-    instanceTypes: ["g6.xlarge", "g4dn.xlarge"]   # L4 or T4 - diversify Spot pools
+    instanceTypes: ["g4dn.xlarge"]   # cheapest single-GPU spot option (T4)
     spot: true
     minSize: 0
     desiredCapacity: 1
@@ -30,7 +30,7 @@ managedNodeGroups:
   #    driver hands out these GPUs instead.
   - name: gpu-dra-spot
     amiFamily: AmazonLinux2023
-    instanceTypes: ["g6.xlarge", "g4dn.xlarge"]
+    instanceTypes: ["g4dn.xlarge"]
     spot: true
     minSize: 0
     desiredCapacity: 0
