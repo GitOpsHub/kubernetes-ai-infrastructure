@@ -49,10 +49,13 @@ function prependFrontMatter(content, title, sidebarPos) {
 function rewriteLinks(content, currentFolder = null) {
   let res = content;
 
-  // Rewrite CONVENTIONS link
+  // Rewrite CONVENTIONS and README links
   res = res.replace(/\(CONVENTIONS\.md\)/g, '(/kubernetes-ai-infrastructure/conventions)');
   res = res.replace(/\(\.\.\/CONVENTIONS\.md\)/g, '(/kubernetes-ai-infrastructure/conventions)');
+  res = res.replace(/\(\.\.\/README\.md\)/g, '(/kubernetes-ai-infrastructure/)');
   res = res.replace(/\(\.\.\/CLAUDE\.md\)/g, `(${GITHUB_BLOB_BASE}/CLAUDE.md)`);
+  res = res.replace(/\((\.\.\/)?AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES\.md([^)]*)\)/g, `(${GITHUB_BLOB_BASE}/AI_INFRASTRUCTURE_RESEARCH_AND_ARTICLES.md$2)`);
+  res = res.replace(/\(env\.sh\.example\)/g, `(${GITHUB_BLOB_BASE}/env.sh.example)`);
 
   // Rewrite chapter references in markdown links
   for (const ch of CHAPTERS) {

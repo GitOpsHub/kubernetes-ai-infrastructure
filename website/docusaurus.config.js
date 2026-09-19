@@ -84,6 +84,10 @@ const config = {
             label: 'Course',
           },
           {
+            type: 'custom-learningProgress',
+            position: 'right',
+          },
+          {
             href: 'https://github.com/GitOpsHub/kubernetes-ai-infrastructure',
             label: 'GitHub',
             position: 'right',
