@@ -7,6 +7,7 @@ node_modules/
 
 # Generated docs (populated by scripts/sync-docs.sh at build time)
 docs/
+static/diagrams/
 
 # macOS
 .DS_Store

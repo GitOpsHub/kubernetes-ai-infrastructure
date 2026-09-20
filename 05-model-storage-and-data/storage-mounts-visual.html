@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EBS vs EFS vs S3 Mounts on EKS</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  :root{
+    --paper:#FAF9F5; --ink:#1B1A17; --sub:#5B5850;
+    --panel:#12161F; --panel-line:#2A3244;
+    --ebs:#4C8DFF; --efs:#B57EDC; --s3:#FF9900;
+    --good:#3FB27F; --bad:#E5533D;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);font-family:'IBM Plex Sans',sans-serif;color:var(--ink)}
+  h1,h2{font-family:'Source Serif 4',serif;margin:0;color:var(--ink)}
+  code,.mono{font-family:'IBM Plex Mono',monospace}
+  a{color:var(--ebs)} a:hover{color:#2F63C4}
+  .wrap{max-width:1100px;margin:0 auto;padding:56px 24px 100px;display:flex;flex-direction:column;gap:56px}
+  .kicker{font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--sub)}
+  .panel{background:var(--panel);border-radius:16px;padding:20px 8px;overflow-x:auto}
+  .panel svg{display:block;min-width:640px}
+  .panel text{fill:#EDEFF4}
+  .flow-dot{filter:drop-shadow(0 0 4px currentColor)}
+  @keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+  .pulse{animation:pulse 1.6s ease-in-out infinite}
+  @keyframes blink{0%,100%{opacity:0}45%{opacity:0}50%{opacity:1}95%{opacity:1}}
+  .blink{animation:blink 3s steps(1) infinite}
+  .card{border:1px solid #E4E1D6;border-radius:14px;padding:20px 24px;background:#fff}
+  .steps{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:14px}
+  .steps li{position:relative;padding-left:34px;font-size:15px;line-height:1.5}
+  .steps .n{position:absolute;left:0;top:1px;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#fff}
+  .chip{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:12px;padding:3px 10px;border-radius:999px;color:#fff}
+  .grid3{display:grid;grid-template-columns:repeat(3, minmax(0,1fr));gap:16px}
+  @media (max-width: 760px){ .grid3{grid-template-columns:1fr} }
+  footer{font-size:13px;color:var(--sub)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div style="display:flex; flex-direction:column; gap:10px;">
+    <span class="kicker">Chapter 05 &middot; Model Storage and Data</span>
+    <h1 style="font-size:38px;">EBS, EFS and S3 mounts on EKS &mdash; how each one actually works</h1>
+    <p style="font-size:17px;line-height:1.6;color:var(--sub);max-width:900px;margin:0;">
+      Three animated walkthroughs of the storage patterns in <span class="mono">05-model-storage-and-data</span>:
+      a zonal block volume that a spot reclaim can strand, a regional NFS filesystem every AZ can share,
+      and an object bucket mounted keylessly through EKS Pod Identity. Watch the moving dots &mdash; they
+      trace the same request path the <a href="README.md">chapter README</a> walks through in prose.
+    </p>
+  </div>
+
+  <!-- ================= EBS / PVC ================= -->
+  <div style="display:flex; flex-direction:column; gap:20px;">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="chip" style="background:var(--ebs);">Pattern (b)</span>
+      <h2 style="font-size:24px;">Amazon EBS &mdash; a zonal disk, one attachment at a time</h2>
+    </div>
+    <p style="font-size:15px;line-height:1.6;color:var(--sub);max-width:900px;margin:0;">
+      A PVC on the default StorageClass provisions a real EBS <span class="mono">gp3</span> volume. It lives in exactly
+      one Availability Zone and can be attached (ReadWriteOnce) to exactly one node's kernel at a time &mdash; great for
+      a single steady replica, a trap the moment spot reclaims the node it's plugged into.
+    </p>
+    <div class="panel">
+      <svg viewBox="0 0 1100 340" width="100%" height="340">
+        <line x1="540" y1="20" x2="540" y2="320" stroke="var(--panel-line)" stroke-width="2" stroke-dasharray="6 6"/>
+        <text x="470" y="14" font-size="12" text-anchor="middle" fill="var(--sub)">spot reclaim &#8594;</text>
+
+        <text x="30" y="34" font-size="13" fill="var(--sub)">Availability Zone A</text>
+        <rect x="20" y="44" width="220" height="250" rx="12" fill="none" stroke="var(--panel-line)" stroke-width="1.5" stroke-dasharray="4 5"/>
+        <rect x="45" y="70" width="170" height="90" rx="10" fill="none" stroke="#4A5570" stroke-width="1.5"/>
+        <text x="60" y="90" font-size="13" font-weight="600">Node (spot)</text>
+        <rect x="60" y="102" width="140" height="42" rx="8" fill="var(--ebs)" opacity="0.18" stroke="var(--ebs)" stroke-width="1.5"/>
+        <text x="130" y="128" font-size="12" text-anchor="middle">Pod qwen-from-pvc</text>
+
+        <rect x="65" y="220" width="130" height="52" rx="8" fill="none" stroke="var(--ebs)" stroke-width="2"/>
+        <text x="130" y="242" font-size="12" text-anchor="middle" font-weight="600">EBS gp3</text>
+        <text x="130" y="258" font-size="10" text-anchor="middle" fill="var(--sub)">10Gi &middot; zone-a</text>
+
+        <path id="attachPath" d="M130,144 L130,220" fill="none" stroke="var(--ebs)" stroke-width="2"/>
+        <circle r="4" fill="var(--ebs)" class="flow-dot">
+          <animateMotion dur="1.4s" repeatCount="indefinite" keyPoints="0;1;0" keyTimes="0;0.5;1" calcMode="linear">
+            <mpath href="#attachPath"/>
+          </animateMotion>
+        </circle>
+        <text x="130" y="196" font-size="10" text-anchor="middle" fill="var(--sub)">read/write, one node only</text>
+
+        <text x="580" y="34" font-size="13" fill="var(--sub)">Availability Zone B</text>
+        <rect x="570" y="44" width="220" height="250" rx="12" fill="none" stroke="var(--panel-line)" stroke-width="1.5" stroke-dasharray="4 5"/>
+        <rect x="595" y="70" width="170" height="90" rx="10" fill="none" stroke="#4A5570" stroke-width="1.5"/>
+        <text x="610" y="90" font-size="13" font-weight="600">Node (new spot)</text>
+        <rect x="610" y="102" width="140" height="42" rx="8" fill="var(--bad)" opacity="0.18" stroke="var(--bad)" stroke-width="1.5"/>
+        <text x="680" y="128" font-size="12" text-anchor="middle">Pod (replacement)</text>
+
+        <text x="680" y="200" font-size="11" text-anchor="middle" fill="var(--sub)">wants the same PVC&#8230;</text>
+        <path d="M680,144 C 680,180 300,190 250,240" fill="none" stroke="var(--bad)" stroke-width="2" stroke-dasharray="5 5"/>
+        <g class="blink">
+          <circle cx="250" cy="240" r="12" fill="none" stroke="var(--bad)" stroke-width="2.5"/>
+          <line x1="243" y1="233" x2="257" y2="247" stroke="var(--bad)" stroke-width="2.5"/>
+          <line x1="257" y1="233" x2="243" y2="247" stroke="var(--bad)" stroke-width="2.5"/>
+        </g>
+        <text x="250" y="290" font-size="10.5" text-anchor="middle" fill="var(--bad)">Multi-Attach error &mdash;</text>
+        <text x="250" y="304" font-size="10.5" text-anchor="middle" fill="var(--bad)">volume is zonal, can't cross AZs</text>
+      </svg>
+    </div>
+    <div class="card">
+      <ol class="steps">
+        <li><span class="n" style="background:var(--ebs);">1</span> A PVC on the default StorageClass gets a real, single-zone EBS <span class="mono">gp3</span> volume &mdash; provisioned once, in the same zone as whichever node first claims it.</li>
+        <li><span class="n" style="background:var(--ebs);">2</span> The volume attaches ReadWriteOnce: exactly one node's kernel can hold the attachment at any moment, which is fine for one steady replica.</li>
+        <li><span class="n" style="background:var(--ebs);">3</span> Spot reclaims the node. The Deployment reschedules the Pod &mdash; often onto a node in a <em>different</em> AZ, because the scheduler has no reason to prefer the old one.</li>
+        <li><span class="n" style="background:var(--bad);">4</span> The new node tries to attach the same volume and fails outright (<span class="mono">Multi-Attach error</span>) &mdash; an EBS volume simply cannot cross Availability Zones.</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ================= EFS ================= -->
+  <div style="display:flex; flex-direction:column; gap:20px;">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="chip" style="background:var(--efs);">Pattern (d)</span>
+      <h2 style="font-size:24px;">Amazon EFS &mdash; one regional filesystem, mounted from every AZ at once</h2>
+    </div>
+    <p style="font-size:15px;line-height:1.6;color:var(--sub);max-width:900px;margin:0;">
+      EFS is managed NFS: a mount target in every AZ your nodes might land in, all pointing at the same
+      file system. Any number of pods, in any zone, mount it ReadWriteMany with normal POSIX semantics &mdash;
+      in-place edits, renames, concurrent writers &mdash; the exact thing an EBS volume can't do.
+    </p>
+    <div class="panel">
+      <svg viewBox="0 0 1100 300" width="100%" height="300">
+        <ellipse cx="550" cy="150" rx="95" ry="46" fill="var(--efs)" opacity="0.18" stroke="var(--efs)" stroke-width="2"/>
+        <text x="550" y="145" font-size="13" text-anchor="middle" font-weight="600">Amazon EFS</text>
+        <text x="550" y="162" font-size="10.5" text-anchor="middle" fill="var(--sub)">efs-models &middot; regional</text>
+
+        <text x="60" y="34" font-size="12" fill="var(--sub)">AZ-a</text>
+        <rect x="20" y="44" width="180" height="70" rx="9" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="110" y="70" font-size="11.5" text-anchor="middle">Node &rarr; Pod (replica 1)</text>
+        <text x="110" y="88" font-size="9.5" text-anchor="middle" fill="var(--sub)">mount target: az-a</text>
+
+        <text x="60" y="146" font-size="12" fill="var(--sub)">AZ-b</text>
+        <rect x="20" y="156" width="180" height="70" rx="9" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="110" y="182" font-size="11.5" text-anchor="middle">Node &rarr; Pod (replica 2)</text>
+        <text x="110" y="200" font-size="9.5" text-anchor="middle" fill="var(--sub)">mount target: az-b</text>
+
+        <text x="920" y="90" font-size="12" fill="var(--sub)">AZ-c</text>
+        <rect x="900" y="100" width="180" height="70" rx="9" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="990" y="126" font-size="11.5" text-anchor="middle">Node &rarr; populate Job</text>
+        <text x="990" y="144" font-size="9.5" text-anchor="middle" fill="var(--sub)">mount target: az-c</text>
+
+        <path id="pathA" d="M200,80 C 340,80 400,110 462,138" fill="none" stroke="var(--efs)" stroke-width="1.6" opacity="0.7"/>
+        <path id="pathB" d="M200,190 C 340,190 400,165 462,158" fill="none" stroke="var(--efs)" stroke-width="1.6" opacity="0.7"/>
+        <path id="pathC" d="M900,135 C 760,135 700,140 645,145" fill="none" stroke="var(--efs)" stroke-width="1.6" opacity="0.7"/>
+
+        <circle r="4" fill="var(--good)" class="flow-dot"><animateMotion dur="2s" begin="0s" repeatCount="indefinite"><mpath href="#pathA"/></animateMotion></circle>
+        <circle r="4" fill="var(--ebs)" class="flow-dot"><animateMotion dur="2s" begin="0.6s" repeatCount="indefinite"><mpath href="#pathA"/></animateMotion></circle>
+        <circle r="4" fill="var(--good)" class="flow-dot"><animateMotion dur="2.2s" begin="0.3s" repeatCount="indefinite"><mpath href="#pathB"/></animateMotion></circle>
+        <circle r="4" fill="var(--s3)" class="flow-dot"><animateMotion dur="2.4s" begin="0s" repeatCount="indefinite"><mpath href="#pathC"/></animateMotion></circle>
+
+        <text x="550" y="255" font-size="10.5" text-anchor="middle" fill="var(--sub)">every replica reads and writes the same files, at the same time, from any zone</text>
+      </svg>
+    </div>
+    <div class="card">
+      <ol class="steps">
+        <li><span class="n" style="background:var(--efs);">1</span> The <span class="mono">efs-models</span> StorageClass makes the PVC <em>dynamically provisioned</em>: the EFS CSI driver's controller creates an access point per PVC automatically.</li>
+        <li><span class="n" style="background:var(--efs);">2</span> A mount target (an ENI on port 2049) sits in every AZ your subnets cover &mdash; that's what makes the file system reachable from wherever a node lands.</li>
+        <li><span class="n" style="background:var(--efs);">3</span> A populate Job writes once; two or more serving replicas mount the same PVC ReadWriteMany, concurrently, even across different nodes and zones.</li>
+        <li><span class="n" style="background:var(--efs);">4</span> A spot reclaim just moves a Pod to a new node in a new AZ &mdash; the mount target there already exists, so nothing breaks the way it did for EBS.</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ================= S3 Mountpoint ================= -->
+  <div style="display:flex; flex-direction:column; gap:20px;">
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="chip" style="background:var(--s3);">Pattern (c) &middot; default</span>
+      <h2 style="font-size:24px;">S3 via Mountpoint &mdash; a bucket, a FUSE process, and a credential nobody wrote down</h2>
+    </div>
+    <p style="font-size:15px;line-height:1.6;color:var(--sub);max-width:900px;margin:0;">
+      Mountpoint for S3 is a CSI driver plus a FUSE program that makes a bucket look like a read-only directory.
+      There's no static access key anywhere: EKS Pod Identity exchanges the Pod's own short-lived Kubernetes
+      token for a short-lived AWS credential, on every mount.
+    </p>
+    <div class="panel">
+      <svg viewBox="0 0 1100 360" width="100%" height="360">
+        <rect x="30" y="40" width="200" height="120" rx="10" fill="none" stroke="#4A5570" stroke-width="1.5"/>
+        <text x="130" y="62" font-size="12.5" text-anchor="middle" font-weight="600">Node</text>
+        <rect x="48" y="74" width="80" height="66" rx="8" fill="var(--s3)" opacity="0.16" stroke="var(--s3)" stroke-width="1.5"/>
+        <text x="88" y="96" font-size="10.5" text-anchor="middle">Pod</text>
+        <text x="88" y="110" font-size="9.5" text-anchor="middle" fill="var(--sub)">SA: model-reader</text>
+        <rect x="134" y="74" width="80" height="66" rx="8" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="174" y="96" font-size="10" text-anchor="middle">Mountpoint</text>
+        <text x="174" y="110" font-size="9" text-anchor="middle" fill="var(--sub)">FUSE, mount-s3 ns</text>
+
+        <rect x="290" y="30" width="160" height="46" rx="8" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="370" y="58" font-size="10.5" text-anchor="middle">K8s API</text>
+        <text x="370" y="20" font-size="10" text-anchor="middle" fill="var(--sub)">1&middot; TokenRequest</text>
+
+        <rect x="500" y="30" width="180" height="46" rx="8" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="590" y="52" font-size="10.5" text-anchor="middle">Pod Identity agent</text>
+        <text x="590" y="66" font-size="9" text-anchor="middle" fill="var(--sub)">DaemonSet, on-node</text>
+
+        <rect x="740" y="30" width="150" height="46" rx="8" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <text x="815" y="52" font-size="10.5" text-anchor="middle">AWS STS</text>
+        <text x="815" y="66" font-size="9" text-anchor="middle" fill="var(--sub)">AssumeRole</text>
+
+        <path id="authOut" d="M214,90 L370,53 L590,53 L815,53" fill="none" stroke="var(--s3)" stroke-width="1.6" stroke-dasharray="3 4" opacity="0.8"/>
+        <rect width="30" height="14" rx="3" fill="var(--s3)" class="flow-dot">
+          <animateMotion dur="2.6s" repeatCount="indefinite"><mpath href="#authOut"/></animateMotion>
+        </rect>
+        <text x="500" y="14" font-size="9.5" text-anchor="middle" fill="var(--sub)">short-lived JWT, audience=eks.amazonaws.com</text>
+
+        <path id="authBack" d="M815,76 L590,95 L370,95 L214,110" fill="none" stroke="var(--good)" stroke-width="1.6" stroke-dasharray="3 4" opacity="0.85"/>
+        <rect width="34" height="14" rx="3" fill="var(--good)" class="flow-dot">
+          <animateMotion dur="2.6s" begin="1.3s" repeatCount="indefinite"><mpath href="#authBack"/></animateMotion>
+        </rect>
+        <text x="500" y="118" font-size="9.5" text-anchor="middle" fill="var(--sub)">temp AWS credential (STS), expires in minutes</text>
+
+        <ellipse cx="960" cy="230" rx="90" ry="46" fill="var(--s3)" opacity="0.16" stroke="var(--s3)" stroke-width="2"/>
+        <text x="960" y="226" font-size="12.5" text-anchor="middle" font-weight="600">S3 bucket</text>
+        <text x="960" y="243" font-size="9.5" text-anchor="middle" fill="var(--sub)">models/qwen3-0.6b/&hellip;</text>
+
+        <path id="d1" d="M214,150 C 400,190 700,155 872,205" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <path id="d2" d="M214,158 C 400,215 700,205 872,228" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <path id="d3" d="M214,166 C 400,240 700,255 872,252" fill="none" stroke="#4A5570" stroke-width="1.4"/>
+        <circle r="4" fill="var(--ebs)" class="flow-dot"><animateMotion dur="1.5s" begin="0s"   repeatCount="indefinite"><mpath href="#d1"/></animateMotion></circle>
+        <circle r="4" fill="var(--ebs)" class="flow-dot"><animateMotion dur="1.5s" begin="0.5s" repeatCount="indefinite"><mpath href="#d2"/></animateMotion></circle>
+        <circle r="4" fill="var(--ebs)" class="flow-dot"><animateMotion dur="1.5s" begin="1.0s" repeatCount="indefinite"><mpath href="#d3"/></animateMotion></circle>
+        <text x="540" y="290" font-size="10.5" text-anchor="middle" fill="var(--sub)">parallel range GET requests &mdash; several threads reading different byte ranges of the same file at once</text>
+      </svg>
+    </div>
+    <div class="card">
+      <ol class="steps">
+        <li><span class="n" style="background:var(--s3);">1</span> Kubernetes mints a fresh, short-lived JWT for the Pod's ServiceAccount (<span class="mono">model-reader</span>), scoped to audience <span class="mono">eks.amazonaws.com</span> &mdash; it's never written to a Secret.</li>
+        <li><span class="n" style="background:var(--s3);">2</span> The on-node Pod Identity agent hands that JWT to AWS STS's <span class="mono">AssumeRole</span>, which checks it against the Pod Identity association you created for this namespace + ServiceAccount.</li>
+        <li><span class="n" style="background:var(--good);">3</span> STS returns a temporary AWS credential, valid for a limited window and refreshed automatically &mdash; the same <em>kind</em> of key a human's static key would be, minus the "valid forever" part.</li>
+        <li><span class="n" style="background:var(--s3);">4</span> Mountpoint uses that credential to open parallel range reads against the bucket &mdash; no in-place edits, no rename, no overwrite by default, which is exactly right for immutable model weights.</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ================= cheat sheet ================= -->
+  <div style="display:flex; flex-direction:column; gap:16px;">
+    <h2 style="font-size:20px;">Cheat sheet</h2>
+    <div class="grid3">
+      <div class="card" style="border-top:3px solid var(--ebs);">
+        <div style="font-weight:600;margin-bottom:8px;">EBS (RWO PVC)</div>
+        <div style="font-size:13.5px;color:var(--sub);line-height:1.7;">Zonal &middot; one node at a time<br/>Fast, cheap<br/>Breaks on cross-AZ spot moves<br/>Fits: single replica, single zone</div>
+      </div>
+      <div class="card" style="border-top:3px solid var(--efs);">
+        <div style="font-weight:600;margin-bottom:8px;">EFS (RWX)</div>
+        <div style="font-size:13.5px;color:var(--sub);line-height:1.7;">Regional &middot; every AZ<br/>Real POSIX semantics, concurrent writers<br/>Higher cost, mount-target setup<br/>Fits: shared datasets, checkpoints</div>
+      </div>
+      <div class="card" style="border-top:3px solid var(--s3);">
+        <div style="font-weight:600;margin-bottom:8px;">S3 + Mountpoint</div>
+        <div style="font-size:13.5px;color:var(--sub);line-height:1.7;">Regional &middot; any node, any zone<br/>Read-mostly, parallel, keyless auth<br/>No rename/overwrite by default<br/>Fits: production model serving (default)</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>Full write-up, manifests and lab steps: <a href="README.md">05-model-storage-and-data/README.md</a>. Open this file directly in a browser (double-click, or <span class="mono">open storage-mounts-visual.html</span>) &mdash; it's a plain static page, no build step.</footer>
+
+</div>
+</body>
+</html>

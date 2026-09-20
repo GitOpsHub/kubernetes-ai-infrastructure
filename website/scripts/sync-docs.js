@@ -3,6 +3,7 @@ const path = require('path');
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const DOCS_DIR = path.resolve(__dirname, '../docs');
+const STATIC_DIAGRAMS_DIR = path.resolve(__dirname, '../static/diagrams');
 const GITHUB_BLOB_BASE = 'https://github.com/GitOpsHub/kubernetes-ai-infrastructure/blob/main';
 
 console.log(`📚 Syncing docs from ${REPO_ROOT} → ${DOCS_DIR}`);
@@ -11,6 +12,11 @@ if (fs.existsSync(DOCS_DIR)) {
   fs.rmSync(DOCS_DIR, { recursive: true, force: true });
 }
 fs.mkdirSync(DOCS_DIR, { recursive: true });
+
+if (fs.existsSync(STATIC_DIAGRAMS_DIR)) {
+  fs.rmSync(STATIC_DIAGRAMS_DIR, { recursive: true, force: true });
+}
+fs.mkdirSync(STATIC_DIAGRAMS_DIR, { recursive: true });
 
 const CHAPTERS = [
   { folder: '00-prerequisites-and-cluster-setup', slug: '00-prerequisites', route: 'prerequisites', title: 'Prerequisites & Cluster Setup' },
@@ -83,6 +89,12 @@ function rewriteLinks(content, currentFolder = null) {
     res = res.replace(/\(((?:eks|cpu-lab|manifests|charts|src|tests|docker)\/[^)]+)\)/g, `(${GITHUB_BLOB_BASE}/${currentFolder}/$1)`);
     // Local standalone file links like (cluster.yaml)
     res = res.replace(/\(([a-zA-Z0-9_.-]+\.(?:yaml|yml|sh|py|tf|env|json))\)/g, `(${GITHUB_BLOB_BASE}/${currentFolder}/$1)`);
+    // Local standalone HTML assets (e.g. animated diagrams) get copied into static/diagrams/<route>/
+    // and served live by the site, instead of linking to raw GitHub source.
+    const ownerChapter = CHAPTERS.find((c) => c.folder === currentFolder);
+    if (ownerChapter) {
+      res = res.replace(/\(([a-zA-Z0-9_.-]+\.html)\)/g, `(/kubernetes-ai-infrastructure/diagrams/${ownerChapter.route}/$1)`);
+    }
   }
 
   return res;
@@ -114,6 +126,19 @@ for (const ch of CHAPTERS) {
   fs.writeFileSync(path.join(destDir, 'index.md'), prependFrontMatter(processed, ch.title, pos));
   console.log(`  ✅ ${ch.folder} → docs/${ch.slug}/index.md  (pos=${pos})`);
   pos++;
+
+  // Chapter-local standalone HTML assets (e.g. animated diagrams) get copied as-is so the
+  // site can serve them live at /diagrams/<route>/<filename>, matching the rewritten links above.
+  const chapterDir = path.join(REPO_ROOT, ch.folder);
+  const htmlAssets = fs.readdirSync(chapterDir).filter((f) => f.endsWith('.html'));
+  if (htmlAssets.length) {
+    const diagramsDestDir = path.join(STATIC_DIAGRAMS_DIR, ch.route);
+    fs.mkdirSync(diagramsDestDir, { recursive: true });
+    for (const f of htmlAssets) {
+      fs.copyFileSync(path.join(chapterDir, f), path.join(diagramsDestDir, f));
+      console.log(`  🖼️  ${ch.folder}/${f} → static/diagrams/${ch.route}/${f}`);
+    }
+  }
 }
 
 // 3. Chapter 19 extra LangChain docs

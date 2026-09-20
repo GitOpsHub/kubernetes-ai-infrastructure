@@ -292,7 +292,18 @@ keys ever exist**, only automatically-issued, automatically-expiring credentials
 Nothing long-lived is stored in the cluster. The IAM Pod Identity association names the **namespace and ServiceAccount**.
 That makes RBAC on who can create pods with `serviceAccountName: model-writer` a security boundary (chapter `14-multi-tenancy-and-security`).
 
-### 3.5 Production storage: Node-local NVMe RAID-0, zero-copy mmap, and distributed caching
+### 3.5 A visual walkthrough: EBS, EFS and S3 mounts side by side
+
+If you'd rather see the three delivery patterns move than read them in prose, this chapter carries a
+self-contained, animated HTML page (no build step, no external service) that visualizes §3.0/§3.3/
+§3.4: [storage-mounts-visual.html](storage-mounts-visual.html) — open it straight from a clone
+(double-click, or `open 05-model-storage-and-data/storage-mounts-visual.html`), or view it live on
+the [course docs site](https://gitopshub.github.io/kubernetes-ai-infrastructure/diagrams/model-storage/storage-mounts-visual.html).
+It traces the same three stories as the text — an EBS volume stranded by a cross-AZ spot reclaim,
+EFS mount targets serving every AZ at once, and the S3 Mountpoint + EKS Pod Identity token exchange
+from §3.4 — as three animated SVG diagrams with a one-line-per-step breakdown underneath each one.
+
+### 3.6 Production storage: Node-local NVMe RAID-0, zero-copy mmap, and distributed caching
 
 While S3 Mountpoint and EFS solve centralized artifact distribution, **tier-1 production inference clusters serving 70B+ models rely on node-local NVMe instance storage and zero-copy memory mapping** to achieve instant pod startups.
 
