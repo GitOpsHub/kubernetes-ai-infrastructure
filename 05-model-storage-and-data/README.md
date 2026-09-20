@@ -294,14 +294,19 @@ That makes RBAC on who can create pods with `serviceAccountName: model-writer` a
 
 ### 3.5 A visual walkthrough: EBS, EFS and S3 mounts side by side
 
-If you'd rather see the three delivery patterns move than read them in prose, this chapter carries a
-self-contained, animated HTML page (no build step, no external service) that visualizes §3.0/§3.3/
-§3.4: [storage-mounts-visual.html](storage-mounts-visual.html) — open it straight from a clone
-(double-click, or `open 05-model-storage-and-data/storage-mounts-visual.html`), or view it live on
-the [course docs site](https://gitopshub.github.io/kubernetes-ai-infrastructure/diagrams/model-storage/storage-mounts-visual.html).
-It traces the same three stories as the text — an EBS volume stranded by a cross-AZ spot reclaim,
-EFS mount targets serving every AZ at once, and the S3 Mountpoint + EKS Pod Identity token exchange
-from §3.4 — as three animated SVG diagrams with a one-line-per-step breakdown underneath each one.
+If you'd rather see the three delivery patterns move than read them in prose, here's an animated
+walkthrough of §3.0/§3.3/§3.4 — an EBS volume stranded by a cross-AZ spot reclaim, EFS mount targets
+serving every AZ at once, and the S3 Mountpoint + EKS Pod Identity token exchange from §3.4 — as
+three animated SVG diagrams with a one-line-per-step breakdown underneath each one. It's a plain,
+self-contained HTML page (no build step, no external service): [`storage-mounts-visual.html`](storage-mounts-visual.html).
+
+<!-- prettier-ignore -->
+<iframe src="storage-mounts-visual.html" title="EBS vs EFS vs S3 Mounts on EKS" loading="lazy" style="width:100%;height:2600px;max-width:1100px;border:1px solid #E4E1D6;border-radius:16px;display:block;margin:0 auto;"></iframe>
+
+*(GitHub's README viewer strips embedded frames for security — if you're reading this on
+github.com, open [`storage-mounts-visual.html`](storage-mounts-visual.html) directly, or view the
+[course docs site](https://gitopshub.github.io/kubernetes-ai-infrastructure/model-storage) where it
+renders inline.)*
 
 ### 3.6 Production storage: Node-local NVMe RAID-0, zero-copy mmap, and distributed caching
 

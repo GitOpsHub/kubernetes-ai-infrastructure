@@ -94,6 +94,8 @@ function rewriteLinks(content, currentFolder = null) {
     const ownerChapter = CHAPTERS.find((c) => c.folder === currentFolder);
     if (ownerChapter) {
       res = res.replace(/\(([a-zA-Z0-9_.-]+\.html)\)/g, `(/kubernetes-ai-infrastructure/diagrams/${ownerChapter.route}/$1)`);
+      // Same rewrite for an embedded <iframe src="file.html"> pointing at a chapter-local diagram.
+      res = res.replace(/(<iframe[^>]*\ssrc=")([a-zA-Z0-9_.-]+\.html)(")/g, `$1/kubernetes-ai-infrastructure/diagrams/${ownerChapter.route}/$2$3`);
     }
   }
 
