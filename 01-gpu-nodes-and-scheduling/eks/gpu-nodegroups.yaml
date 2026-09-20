@@ -9,6 +9,8 @@ metadata:
 managedNodeGroups:
 # Spot first. amiFamily AmazonLinux2023 + GPU instance types => EKS-optimized AL2023 *NVIDIA* AMI
 # (driver, CUDA user-mode driver, nvidia-container-toolkit preinstalled; NO device plugin).
+# nvidia.com/gpu.present must be set here explicitly: eksctl's `labels:` becomes the entire
+# kubelet --node-labels flag, which overrides the AMI's own automatic GPU-detection labeling.
 - name: spot-gpu
   amiFamily: AmazonLinux2023
   instanceTypes: ["g4dn.xlarge"]
@@ -19,6 +21,7 @@ managedNodeGroups:
   volumeSize: 100
   labels:
     workload: gpu
+    nvidia.com/gpu.present: "true"
   taints:
   - key: nvidia.com/gpu
     value: "present"
@@ -35,6 +38,7 @@ managedNodeGroups:
   volumeSize: 100
   labels:
     workload: gpu
+    nvidia.com/gpu.present: "true"
   taints:
   - key: nvidia.com/gpu
     value: "present"
