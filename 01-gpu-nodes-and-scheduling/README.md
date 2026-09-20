@@ -106,6 +106,71 @@ won't refuse to schedule over). This chapter uses the simple form: both `eks/nvi
 `eks/cuda-vectoradd-job.yaml` carry a plain `nodeSelector` and matching `tolerations` directly in the
 manifest, so they land only on real GPU nodes.
 
+**Animated walkthrough — four pods, one GPU node, two independent gates.** Taints/tolerations and
+nodeSelector/affinity are *two separate gates* a pod must pass, not one — this is the single most
+common source of confusion for newcomers, so watch all four combinations play out. (Animation plays on
+the [docs site](../website); GitHub strips `<style>` tags from rendered READMEs, so this section shows
+as a static snapshot there — read the outcome table below it either way.)
+
+<div align="center">
+
+<!-- prettier-ignore -->
+<style>
+.ch01-anim{--gpu:#76b900;--cpu:#4a90d9;--bad:#d64545;--good:#2e9e4d;font-family:inherit}
+.ch01-anim .row{display:flex;align-items:center;gap:18px;margin:14px 0;flex-wrap:wrap}
+.ch01-anim .node{border:2px solid #999;border-radius:10px;padding:10px 14px;min-width:150px;text-align:center;font-size:13px;position:relative}
+.ch01-anim .node.gpu{border-color:var(--gpu)}
+.ch01-anim .node .taint{position:absolute;top:-11px;right:-11px;background:#333;color:#fff;border-radius:50%;width:22px;height:22px;line-height:22px;font-size:12px}
+.ch01-anim .pod{border-radius:8px;padding:8px 12px;font-size:12px;min-width:170px;text-align:left;color:#fff;position:relative;animation:ch01-approach 2.6s ease-in-out infinite}
+.ch01-anim .pod.p1{background:var(--bad);animation-name:ch01-bounce}
+.ch01-anim .pod.p2{background:var(--bad);animation-name:ch01-drift}
+.ch01-anim .pod.p3{background:#b8860b;animation-name:ch01-approach}
+.ch01-anim .pod.p4{background:var(--good);animation-name:ch01-approach}
+.ch01-anim .verdict{margin-left:8px;font-weight:700;font-size:16px}
+@keyframes ch01-approach{0%,15%{transform:translateX(0)}45%,70%{transform:translateX(26px)}100%{transform:translateX(0)}}
+@keyframes ch01-bounce{0%,15%{transform:translateX(0)}40%{transform:translateX(20px)}55%{transform:translateX(4px)}70%{transform:translateX(20px)}85%,100%{transform:translateX(0)}}
+@keyframes ch01-drift{0%,15%{transform:translateX(0)}45%,100%{transform:translateX(26px)}}
+.ch01-anim .verdict.p1,.ch01-anim .verdict.p2{animation:ch01-flash 2.6s ease-in-out infinite}
+.ch01-anim .verdict.p3,.ch01-anim .verdict.p4{animation:ch01-flashgood 2.6s ease-in-out infinite}
+@keyframes ch01-flash{0%,40%{opacity:0}55%,100%{opacity:1}}
+@keyframes ch01-flashgood{0%,40%{opacity:0}45%,100%{opacity:1}}
+</style>
+
+<div class="ch01-anim">
+
+<div class="row"><div class="pod p1">Pod A<br/><i>no toleration, no selector</i></div>
+<span>→</span>
+<div class="node gpu">GPU node<span class="taint">🚫</span></div>
+<span class="verdict p1">❌ blocked by taint (Pending)</span></div>
+
+<div class="row"><div class="pod p2">Pod B<br/><i>toleration ✔, no selector</i></div>
+<span>→</span>
+<div class="node gpu">GPU node<span class="taint">🚫</span></div>
+<span class="verdict p2">⚠️ may land on ANY untainted node, GPU or not</span></div>
+
+<div class="row"><div class="pod p3">Pod C<br/><i>no toleration, selector matches GPU label</i></div>
+<span>→</span>
+<div class="node gpu">GPU node<span class="taint">🚫</span></div>
+<span class="verdict p3">❌ selector says "go here", taint says "not without a toleration" (Pending)</span></div>
+
+<div class="row"><div class="pod p4">Pod D<br/><i>toleration ✔ + selector matches</i></div>
+<span>→</span>
+<div class="node gpu">GPU node<span class="taint">🚫</span></div>
+<span class="verdict p4">✅ scheduled — this is what `nvidia-smi-pod.yaml` does</span></div>
+
+</div>
+</div>
+
+| Pod | Toleration for the GPU taint? | `nodeSelector` matches GPU label? | Result |
+|---|---|---|---|
+| A | No | No | **Pending forever** — the taint alone keeps it off the GPU node; it schedules on some *other* untainted node instead |
+| B | Yes | No | **Schedules somewhere** — tolerating the taint only removes the "keep out" sign, it doesn't pull the pod toward the GPU node. It can land on the GPU node (wasting the GPU on CPU-only work) or on any other untainted node; nothing here targets it |
+| C | No | Yes | **Pending forever** — the selector *wants* the GPU node, but the missing toleration means the taint still rejects it there; since it's a hard `nodeSelector`, it won't fall back to another node either |
+| D | Yes | Yes | **Scheduled on the GPU node, correctly** — toleration clears the taint, selector chooses the node. This is the only combination the manifests in `eks/` actually use |
+
+The failure you'll reproduce hands-on in Step 2 (`d-cpu-pod-on-gpu-node`) is row **B**: a toleration
+without a selector doesn't request the GPU node, it just stops being *refused* from it.
+
 **Managed node group — what "creating GPU nodes" actually means on EKS.** You never hand-provision an
 EC2 instance and join it to the cluster yourself in this course. An EKS **managed node group** is
 AWS's abstraction over an Auto Scaling Group of EC2 instances that are automatically bootstrapped,

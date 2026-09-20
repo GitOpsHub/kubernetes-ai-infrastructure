@@ -73,10 +73,10 @@ a workload is the actual skill this chapter teaches.
 
 ```mermaid
 flowchart TB
-  subgraph Device plugin model - chapters 01,02
-    EXT["extended resource:<br/>nvidia.com/gpu: N (integer)"] --> SCHED1[Scheduler:<br/>bin-packs by count]
+  subgraph Legacy["Device plugin model - chapters 01/02"]
+    EXT["extended resource:<br/>nvidia.com/gpu: N (integer)"] --> SCHED1["Scheduler:<br/>bin-packs by count"]
   end
-  subgraph This chapter
+  subgraph Chapter3["This chapter"]
     TS[Time-slicing] -->|device-plugin config| DP[NVIDIA device plugin]
     MPS[MPS] -->|device-plugin config| DP
     MIG[MIG] -->|hardware partition| DP
