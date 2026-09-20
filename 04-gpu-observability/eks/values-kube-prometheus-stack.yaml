@@ -15,7 +15,7 @@ prometheus:
     storageSpec:
       volumeClaimTemplate:
         spec:
-          storageClassName: gp3          # EBS CSI driver default SC name on most EKS clusters - VERIFY yours
+          storageClassName: gp3          # created by eks/storageclass-gp3.yaml, see README Step 1 prereq
           accessModes: ["ReadWriteOnce"]
           resources: { requests: { storage: 20Gi } }
     serviceMonitorSelectorNilUsesHelmValues: true
