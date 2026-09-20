@@ -581,14 +581,12 @@ actually spanning nodes and something's wrong with your node pool's scale-up.
   voluntary disruption; the EPP's health check will route around a preempted Pod within a few
   scrape intervals, but in-flight requests to it are lost. `--shutdown-timeout` gives it a
   chance to finish first if the preemption is graceful (rare on true spot reclaim).
-- **Multi-node `LeaderWorkerSet`**: this is the sharpest edge in the chapter. If the WORKER's
-  node is spot-reclaimed, `restartPolicy: RecreateGroupOnPodRestart` tears down and recreates the
-  **whole group**, including the leader — a single spot reclaim costs you the entire model
-  reload + Ray re-formation, not just one Pod. Two independent spot pools each have their own
-  reclaim probability; a 2-node group's *effective* reclaim rate is roughly double a single node's.
-  For anything latency-sensitive, put the LWS leader (and arguably both) on **on-demand** and
-  reserve spot for the stateless single-node `vllm-pool` tier instead; chapter 13 covers
-  spot-diversification strategies that reduce simultaneous reclaim risk if you do run LWS on spot.
+- **Multi-node `LeaderWorkerSet`**: this is the sharpest edge in the chapter. If either node is
+  spot-reclaimed, `restartPolicy: RecreateGroupOnPodRestart` tears down and recreates the **whole
+  group**, including the leader — one reclaim costs the entire model reload + Ray re-formation, not
+  just one Pod, and the effective reclaim rate is roughly double a single node's. For anything
+  latency-sensitive, put the LWS leader (and arguably both) on **on-demand** and reserve spot for
+  the stateless single-node `vllm-pool` tier; chapter 13 covers reducing simultaneous reclaim risk.
 
 ## 6. Gateway implementation notes
 

@@ -749,16 +749,12 @@ covered conceptually in chapter `13-node-autoscaling-and-cost`.
 
 ## 5. Spot considerations
 
-- **Reclaim = cold start.** Budget the pattern's cold start × expected reclaims/day. Pattern (a) turns every reclaim into an HF download.
-  That is slow, and the Hub may rate-limit a fleet of restarting pods.
-- **Loader Jobs must tolerate interruption.** They use `podFailurePolicy` with `DisruptionTarget → Ignore`, so reclaims don't use up
-  `backoffLimit` (chapter `06-batch-jobs-and-kueue` goes deep on this). Writes are idempotent (skip if `_COMPLETE`), and `hf download` resumes.
-- **Zonal disks vs regional capacity.** Spot capacity moves between zones. RWO PD/EBS/Managed Disk PVCs pin pods to one zone.
-  Buckets and regional file systems don't.
-- **Ephemeral storage.** emptyDir downloads and FUSE file caches land on the node boot disk. Spot node pools often use small disks,
-  so size them for model + cache + images, or the kubelet evicts pods for `ephemeral-storage`.
-- **Graceful shutdown.** Mountpoint runs as a separate pod, so it outlives your container during termination.
-  AWS's spot interruption notice window is 2 minutes, so don't rely on long `preStop` hooks.
+- **Reclaim = cold start.** Pattern (a) turns every reclaim into a fresh HF download; patterns (c)/(d) don't, which is why they're the
+  recommended default (§3.2).
+- **Loader Jobs tolerate interruption**: `podFailurePolicy` with `DisruptionTarget → Ignore` (chapter `06-batch-jobs-and-kueue`), idempotent
+  writes (skip if `_COMPLETE`), and `hf download` resumes.
+- **Zonal disks are the wrong fit.** RWO PD/EBS PVCs pin pods to one zone; buckets and regional file systems don't. Size ephemeral
+  storage for model + cache + images, since spot node disks are often small.
 
 ## 6. Troubleshooting
 

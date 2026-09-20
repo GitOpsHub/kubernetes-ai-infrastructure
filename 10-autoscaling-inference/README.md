@@ -490,18 +490,13 @@ uninstalling KEDA itself, not just at the end of this step.)
   to 4 replicas on a GPU node pool with `max-nodes` lower than 4 (or spot capacity unavailable in
   your zone) leaves pods `Pending` — the pod-level decision was correct, the cluster just doesn't
   have the node capacity yet. Chapter 13 covers tuning the node autoscaler to match.
-- **Scale-to-zero interacts badly with spot capacity churn.** If the node pool ALSO scales to 0 when
-  idle (chapter 01/09's pools do), a KEDA scale-from-zero pays node provisioning time on top of the
-  cold-start budget above — the two "zeros" stack.
-- **Conservative scale-down windows are a spot-safety measure here, not just a UX choice**: scaling a
-  GPU replica down right before a burst returns means immediately re-paying the cold start, which is
-  far more costly than briefly over-provisioning one idle GPU pod.
-- **GPU quota is a hard ceiling autoscaling can't see past.** `maxReplicas: 4` / `maxReplicaCount: 4`
-  in this chapter's manifests are safety caps you chose, but your AWS account's GPU instance quota
-  (or your spot nodegroup's `--nodes-max`) is a separate, harder ceiling — the HPA/KEDA will happily
-  keep asking for more replicas than either allows; the pods just stay `Pending` forever until you
-  raise one of those limits or the load subsides. Always know both numbers before running the load
-  generator against a shared/quota-constrained account.
+- **Scale-to-zero on a spot pool stacks two cold starts**, and conservative scale-down windows exist
+  to avoid re-paying that cost — scaling a replica down right before a burst returns is more
+  expensive than briefly over-provisioning one idle GPU pod.
+- **GPU quota is a hard ceiling autoscaling can't see past.** `maxReplicas`/`maxReplicaCount` in this
+  chapter's manifests are safety caps you chose, but your AWS GPU quota (or the spot nodegroup's
+  `--nodes-max`) is a separate, harder ceiling — the HPA/KEDA will keep asking for more replicas than
+  either allows and pods just stay `Pending`. Know both numbers before load-testing a shared account.
 
 ## 6. Troubleshooting
 

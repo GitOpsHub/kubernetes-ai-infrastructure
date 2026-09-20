@@ -402,7 +402,7 @@ what RawDeployment gives up in exchange for not depending on Knative.
 ## 5. Spot considerations
 
 - **The `LLMInferenceService` pod requests `nvidia.com/gpu: 1` like every other GPU workload in this
-  course** — same taint/toleration/spot-nodeSelector story as chapter 09, applied in
+  course** — same taint/toleration/nodeSelector story as chapter 09, applied in
   `eks/generative/patch-spot.yaml`.
 - **RawDeployment's plain Deployment has no built-in PDB.** Add one (see `09-llm-inference-with-vllm/eks/pdb.yaml`
   for the pattern) if you run more than one replica and want voluntary-disruption protection.

@@ -146,17 +146,17 @@ which is the shape almost all parallel ML batch work actually needs: shard `i` o
 partition `i` of a hyperparameter sweep, rank `i` of a (non-gang) distributed job. It's also the
 foundation JobSet and Kubeflow Trainer's PyTorch runtime build on for `torchrun --node-rank`.
 
-### 3.2 podFailurePolicy: telling spot reclaims apart from real bugs
+### 3.2 podFailurePolicy: disruption vs. real failures
 
 By default, every failed pod counts against a Job's `backoffLimit`, whether it failed because
-your code panicked or because the cloud reclaimed the spot instance it was running on. On a
-reclaim-heavy spot pool that means Jobs fail for reasons that have nothing to do with the code.
+your code panicked or because something external evicted it (a taint eviction, a node reclaim).
+`podFailurePolicy` lets a Job tell those apart.
 
 The diagram below reads left to right, following one pod's failure through the Job controller's
 decision: it always starts at "Pod fails," then branches on *why* the pod's container process
 exited — and that branch is the whole point of `podFailurePolicy`, because without it every one
-of these paths would just fall into "count against backoffLimit," including the spot-reclaim
-one you specifically don't want to count.
+of these paths would just fall into "count against backoffLimit," including the disruption one
+you specifically don't want to count.
 
 ```mermaid
 flowchart LR
@@ -273,13 +273,13 @@ see this Job's pods. Concretely: `kueue.x-k8s.io/queue-name` on a Job triggers K
 webhook to set `spec.suspend: true`; Kueue flips it back to `false` once the matching Workload is
 admitted.
 
-### 3.4 Spot-first flavor ordering and flavorFungibility
+### 3.4 Flavor ordering and flavorFungibility
 
 `resourceGroups[].flavors` is an **ordered** list. With the default `flavorFungibility`
 (`whenCanBorrow: Borrow`, `whenCanPreempt: TryNextFlavor`), Kueue tries the first flavor a
 Workload fits in — including quota it can *borrow* from the cohort — before trying the next one.
 Listing `spot` before `on-demand` in every ClusterQueue in this chapter is what makes "spot
-first, on-demand fallback" happen; you never set that on the Job itself.
+first, on-demand fallback" happen, entirely from ordering — you never set that on the Job itself.
 
 ### 3.5 Two ways to share a cohort: classical preemption vs Fair Sharing
 
@@ -431,21 +431,20 @@ team-a-low-a1b2c              team-a-queue   team-a-cq     True                 
 shows the pods landing specifically on the spot pool — you never wrote a `nodeSelector` on the Job;
 Kueue's admission webhook copied it in from the ResourceFlavor.
 
-### Step 4 · Pattern (b): Indexed Job with podFailurePolicy, then simulate a spot reclaim
+### Step 4 · Pattern (b): Indexed Job with podFailurePolicy
 
 What you're about to do: this Job has 4 pods, each with a stable index `0..3`
 (`completionMode: Indexed`, §3.1) and each writing a checkpoint file once its "work" finishes
-(§3.2). You'll delete one *running* pod yourself — standing in for the cloud reclaiming its spot
-instance mid-run — and confirm the Job doesn't treat that as a failure. `kubectl delete pod`
-(without `--grace-period=0 --force`) is a graceful/API-initiated deletion, which is what sets the
-`DisruptionTarget` pod condition your `podFailurePolicy` rule matches on — this is why the
-comparison at the end of this step (a forced `kill -9`) behaves differently: it never sets that
-condition, so it isn't ignored.
+(§3.2). You'll delete one *running* pod yourself — standing in for a spot reclaim mid-run — and
+confirm the Job doesn't treat that as a failure. `kubectl delete pod` (without `--grace-period=0
+--force`) is a graceful/API-initiated deletion, which is what sets the `DisruptionTarget` pod
+condition your `podFailurePolicy` rule matches on — this is why the comparison at the end of this
+step (a forced `kill -9`) behaves differently: it never sets that condition, so it isn't ignored.
 
 ```bash
 kubectl apply -f 06-batch-jobs-and-kueue/eks/job-indexed-spot.yaml
 kubectl get pods -n ch06-kueue -l app=team-a-indexed
-# Simulate the cloud reclaiming the node under one shard mid-run:
+# Simulate a spot reclaim of one shard mid-run:
 kubectl delete pod -n ch06-kueue -l app=team-a-indexed --field-selector=status.phase=Running --wait=false | head -1
 kubectl get job team-a-indexed -n ch06-kueue -o jsonpath='{.status.failed}'; echo   # stays empty/0
 kubectl -n ch06-kueue wait --for=condition=complete job/team-a-indexed --timeout=10m
@@ -516,23 +515,16 @@ whichever queue is consuming more than its fair split.
 
 ## 5. Spot considerations
 
-- **This whole chapter is the spot-interruption story for batch work.** `podFailurePolicy` +
-  Indexed Jobs (§3.2) is the pattern; everything else (checkpointing to object/shared storage
-  from chapter `05`) is what makes the re-run cheap instead of starting from zero.
-- **Pin the Kueue controller off spot.** It's a control-plane component for every team's queue;
-  Step 5's `helm install`/`helm upgrade` sets `controllerManager.nodeSelector` to the on-demand
-  nodegroup. If it runs on spot and gets reclaimed, admission for the whole cluster stalls until it
-  reschedules.
-- **`waitForPodsReady` avoids half-admitted gangs.** Enabled in `eks/values-kueue.yaml`. Without
-  it, a multi-pod Workload can have some pods scheduled and others stuck (e.g. spot momentarily
-  out of capacity in one AZ), burning quota on a Job that can't actually make progress.
-- **`borrowingLimit` caps the blast radius of borrowing.** Without one, a team that never uses
-  its own on-demand quota could grab the *entire* cohort's spot capacity during a burst, starving
-  everyone else the moment spot gets scarce.
-- **EKS doesn't taint spot nodes automatically**, so this chapter's `spot` ResourceFlavor only
-  needs `nodeLabels`, not `tolerations`. If you later diversify onto a cloud/setup that does taint
-  spot nodes, remember any Job not routed through a LocalQueue backed by a flavor with the matching
-  toleration will simply never schedule there.
+- **`podFailurePolicy` + Indexed Jobs (§3.2)** is what makes batch work survive a reclaim cheaply —
+  paired with checkpointing to object/shared storage from chapter `05` so a re-run doesn't start
+  from zero.
+- **Pin the Kueue controller off spot** (`controllerManager.nodeSelector` in Step 1's Helm install)
+  — it's a control-plane component for every team's queue, so its own reclaim would stall
+  admission cluster-wide.
+- **`waitForPodsReady`** (enabled in `eks/values-kueue.yaml`) stops a multi-pod Workload from
+  sitting half-admitted when spot capacity is only partially available.
+- **EKS doesn't taint spot nodes automatically**, so the `spot` ResourceFlavor here only needs
+  `nodeLabels`, not `tolerations` — a taint-based spot pool would need a matching toleration too.
 
 ## 6. Troubleshooting
 

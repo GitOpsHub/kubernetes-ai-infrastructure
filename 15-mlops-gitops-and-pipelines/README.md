@@ -510,24 +510,13 @@ purely because it was a file in the directory the root Application's `source.pat
 ## 5. Spot considerations
 
 - Pin the Argo Workflows controller and MLflow server off spot (`controller.nodeSelector` in
-  `values-argo-workflows.yaml`) — same reasoning as Kueue's controller (chapter `06`): these are
-  shared orchestration/registry components, not per-tenant compute.
-- Individual Workflow **step pods** are exactly the kind of bursty, restartable, checkpoint-
-  friendly work spot is made for — run them on spot node pools like any other batch Job, and
-  reuse chapter `06`'s `podFailurePolicy` pattern if a step wraps a `batch/v1` Job.
-- MLflow's SQLite-on-PVC backend store (this chapter's default) is a single file — a spot node
-  reclaim mid-write on ReadWriteOnce storage that can't follow the pod to a new node stalls the
-  server until it reschedules. Move to `backendStore.postgres` (a managed database) before
-  anything beyond the lab; it isn't a spot-specific problem so much as "don't run your registry's
-  database as a single SQLite file," but spot churn makes the failure mode show up sooner.
-
-If you're new to spot capacity: EC2 Spot instances are spare AWS capacity sold at a discount, that
-AWS can reclaim with only a two-minute warning whenever it needs the capacity back. That's a good
-trade for a Workflow step pod (it just gets rescheduled and re-runs, and this pipeline's steps are
-short and cheap to redo) and a bad trade for a stateful singleton like the Argo Workflows
-controller or MLflow's server (losing the one Pod that's also holding an in-progress SQLite write,
-mid-reclaim, is how you get a corrupted or wedged database rather than a quick retry) — which is
-exactly the controller-vs-step-pod split the first two bullets describe.
+  `values-argo-workflows.yaml`) — same reasoning as Kueue's controller (chapter `06`): shared
+  orchestration/registry components, not per-tenant compute.
+- Workflow **step pods** are short, restartable batch work — run them on spot like any other
+  Job (reuse chapter `06`'s `podFailurePolicy` pattern if a step wraps a `batch/v1` Job).
+- MLflow's SQLite-on-PVC backend store (this chapter's default) is a single file on
+  `ReadWriteOnce` storage; a reclaim mid-write stalls or corrupts it until the pod reschedules.
+  Move to `backendStore.postgres` before anything beyond the lab.
 
 ## 6. Troubleshooting
 

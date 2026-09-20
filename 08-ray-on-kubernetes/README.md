@@ -180,14 +180,9 @@ translating that one YAML object into the right number of real Pods for you.
 
 ### 3.2 Head on stable, workers on spot
 
-The head process holds cluster state (GCS), runs the dashboard and (with
-`enableInTreeAutoscaling: true`) the Ray autoscaler itself — losing it kills every actor's
-connection to the cluster, not just one task. `eks/raycluster-spot.yaml` therefore gives the
-head **no** `nodeSelector` at all (schedules onto whatever on-demand capacity your default node
-pool provides) and **no GPU**, while the `gpu-spot` worker group carries the spot + GPU
-`nodeSelector`/`tolerations` (§3.4) directly in its pod spec. `terminationGracePeriodSeconds: 25`
-on the worker gives Ray's own graceful drain (stop accepting new tasks, let running ones finish)
-a head start before a spot reclaim SIGKILLs the pod.
+The head holds cluster state (GCS) — losing it kills every actor's connection to the cluster, not
+just one task — so `eks/raycluster-spot.yaml` gives it no `nodeSelector`/GPU (on-demand default
+pool), while only the `gpu-spot` worker group carries spot + GPU placement (§3.4). See §5.
 
 ### 3.3 Two autoscalers, two triggers
 
@@ -442,20 +437,12 @@ cluster come up before the old one is torn down.
 
 ## 5. Spot considerations
 
-- **Never put the head on spot.** A reclaimed head loses GCS state for the whole cluster, not
-  just the work on that node — every worker, every in-flight actor, every Serve replica goes with
-  it. `eks/raycluster-spot.yaml` intentionally leaves the head's `nodeSelector` empty (on-demand
-  default pool) so it's never touched by the `gpu-spot` worker group's spot/GPU placement.
-- **`idleTimeoutSeconds`** on the Ray autoscaler and `minReplicas`/`maxReplicas` per worker group
-  are your spot cost dial: shorter idle timeout = faster scale-to-zero = cheaper but more cold
-  starts.
-- **RayJob's ephemeral worker group** in this lab (`eks/rayjob-batch.yaml`) is deliberately
-  CPU-only/on-demand-shaped — for a spot GPU batch job, add the same
-  `nodeSelector`/`tolerations` pattern from `raycluster-spot.yaml`'s worker group to its
-  `rayClusterSpec.workerGroupSpecs`.
-- **RayService availability** during a spot reclaim of a *worker* (not the head) degrades
-  gracefully — Serve routes around the lost replica and the Ray autoscaler/Kubernetes autoscaler
-  replace it; a reclaimed head, as above, does not degrade gracefully.
+- **Never put the head on spot** (§3.2) — a reclaim there takes down GCS state for the whole
+  cluster, not just one node's work.
+- **`idleTimeoutSeconds` + `minReplicas`/`maxReplicas`** per worker group are the cost dial:
+  shorter idle timeout = faster scale-to-zero = cheaper but more cold starts.
+- **A worker reclaim degrades gracefully**: Serve routes around the lost replica and the
+  autoscalers replace it — only a head reclaim doesn't.
 
 ## 6. Troubleshooting
 

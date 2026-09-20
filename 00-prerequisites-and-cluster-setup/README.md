@@ -99,8 +99,10 @@ vocabulary every later chapter assumes you already know.
 - **Label** — a free-form key/value tag you attach to a node or Pod (e.g. `workload: gpu`). Unlike a
   taint, a label doesn't block anything by itself — it's used for *selecting* things, e.g. "only run
   this Pod on nodes labeled `workload: gpu`."
-- **Spot instance** — see section 3.3 below; it gets its own section because getting this wrong is the
-  single most common way people either waste money or get confused why their Pods won't schedule.
+- **Spot instance** — AWS spare EC2 capacity sold at a steep discount, reclaimable with only ~2
+  minutes' notice. Every spot node in this course carries the label
+  `eks.amazonaws.com/capacityType=SPOT`. See section 1 for why this course defaults to it, and
+  section 5 for chapter-specific handling.
 - **IAM** ("Identity and Access Management") — AWS's system for who/what is allowed to do what. OIDC
   ("OpenID Connect") is a way for Kubernetes service accounts to get temporary AWS IAM credentials
   without you managing long-lived secret keys. You'll see `iam.withOIDC: true` in the cluster config —
@@ -162,37 +164,6 @@ Reading this diagram box by box, for anyone who hasn't seen one of these before:
 | Scale-from-zero                | **No autoscaler by default**: scale manually or use Karpenter (`13-node-autoscaling-and-cost`) |
 | Spot taint added automatically | No (we add `nvidia.com/gpu` taint on the GPU group ourselves)                                  |
 | GPU taint added automatically  | No (set in `cluster.yaml`)                                                                     |
-
-### 3.2 Quotas that block spot GPUs
-
-Every AWS account has service quotas — hard ceilings on how much of a given resource you're allowed
-to provision at once, measured per region. They exist so that, among other things, a compromised or
-buggy account can't accidentally (or maliciously) spin up unlimited expensive hardware. New accounts
-typically start with the **spot GPU quota at zero**, which means `eksctl create cluster` will happily
-create the *node group configuration*, but AWS will refuse to actually launch any GPU instances into
-it until the quota is raised.
-
-| Quota you need for **spot** GPUs                       | Unit  | Also check                                                                    |
-| ------------------------------------------------------ | ----- | ----------------------------------------------------------------------------- |
-| **All G and VT Spot Instance Requests** (`L-3819A6DF`) | vCPUs | `L-DB2E81BA` on-demand G/VT (fallback), `L-34B43A08` standard spot (CPU pool) |
-
-A `g4dn.xlarge` is **4 vCPUs**, so a spot vCPU quota of 4 gives you exactly one GPU node.
-Ask for 8.
-
-### 3.3 Spot in one paragraph
-
-**EC2 Spot (managed node groups)**: AWS sells unused EC2 capacity at a discount as "Spot Instances."
-The catch: if AWS needs that capacity back (for a customer paying on-demand price, or because the spot
-pool for that instance type/AZ dries up), your instance gets a **2-minute interruption notice** before
-it's reclaimed — there is no way to "keep" it past that. EKS managed node groups turn on **Capacity
-Rebalancing**, which watches for an early signal that a spot instance is at elevated risk of
-interruption and proactively starts draining/replacing it *before* the hard 2-minute notice, so your
-workloads get a bit more warning than the bare minimum. Every spot node in this course carries the
-label `eks.amazonaws.com/capacityType=SPOT`, which is how you (and Kubernetes tooling) can tell a spot
-node apart from an on-demand one at a glance with `kubectl get nodes -L eks.amazonaws.com/capacityType`.
-The practical upshot for anyone new to this: **never assume a spot node, or anything running only on
-it, will still exist a minute from now** — design/test workloads (and your expectations while running
-labs) accordingly.
 
 ## 4. Lab
 
@@ -458,10 +429,10 @@ two of the instance terminating.
 ## 5. Spot considerations for this chapter
 
 - **Capacity, not only price.** Spot GPU pools can sit at 0 because the region has no G/VT spot
-  capacity — this is different from a quota problem (section 3.2): even with plenty of quota, AWS
-  simply may not have a spare `g4dn.xlarge` to spare in your region/AZ at that moment.
-  Mitigate with several instance types (already the case in `cluster.yaml`) or another
-  region. Chapter 13 covers diversification further.
+  capacity — this is different from a quota problem (Step 2): even with plenty of quota, AWS
+  simply may not have a spare `g4dn.xlarge` in your region/AZ at that moment. Mitigate with several
+  instance types (already the case in `cluster.yaml`) or another region; chapter 13 covers
+  diversification further.
 - **Keep control-plane-like workloads off GPU spot nodes.** Operators and controllers belong on the CPU pool, both because GPU capacity is scarcer/pricier and because spot GPU nodes can vanish with 2 minutes' notice — you don't want cluster-critical components riding on that. The GPU taint enforces this.
 - **Scale-to-zero means cold starts.** First GPU pod: node boot + driver (already on the AL2023 NVIDIA AMI, so no separate driver-install step is needed) + image pull takes about 3–10 min. Budget for it in labs — if a GPU Pod looks stuck right after you scale the node group up, this is normal, not a bug.
 - **On-demand fallback**: remove `spot: true` (capacity type `ON_DEMAND`) in `cluster.yaml`. Chapter 01's commands take `ON_DEMAND=true`. Use this if spot capacity is unavailable and you need the lab to work *now* — just remember on-demand costs 2-4x more (section 7), so switch back to spot when you're done experimenting.
@@ -470,7 +441,7 @@ two of the instance terminating.
 
 | Symptom                                                                        | Cause                                                                                                                                                                                                              | Fix                                                                                                                                                                                      |
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Nodegroup `CREATE_FAILED` `MaxSpotInstanceCountExceeded` / `VcpuLimitExceeded` | Your account's `L-3819A6DF` spot G/VT vCPU quota (section 3.2) is lower than what the GPU node group is trying to launch — most commonly it's still the default `0`.                                               | Request an increase (Step 2); meanwhile keep GPU group at 0 so cluster creation itself still succeeds                                                                                    |
+| Nodegroup `CREATE_FAILED` `MaxSpotInstanceCountExceeded` / `VcpuLimitExceeded` | Your account's `L-3819A6DF` spot G/VT vCPU quota (Step 2) is lower than what the GPU node group is trying to launch — most commonly it's still the default `0`.                                               | Request an increase (Step 2); meanwhile keep GPU group at 0 so cluster creation itself still succeeds                                                                                    |
 | Spot group stuck `desired 1 / 0 running`, `InsufficientInstanceCapacity`       | Quota is fine, but AWS currently has no spare spot capacity for those instance types in your AZs — this is a supply problem, not a permissions problem, and can resolve itself minutes later or persist for hours. | Add more instance types (`g6.2xlarge`, `g5.xlarge`), try other AZs/regions, or fall back to on-demand (section 5)                                                                        |
 | `eksctl scale nodegroup` for `spot-gpu` succeeds but no node appears           | Quota or spot-capacity problem — see the troubleshooting rows above; a scale command can return immediately even though the underlying ASG can't actually launch an instance.                                      | `eksctl get nodegroup --cluster "$EKS_CLUSTER" --name spot-gpu` and check the ASG's activity history in the EC2 console for the real error                                               |
 | `eksctl create cluster` fails with an IAM/permissions error                    | The AWS identity you're using doesn't have enough IAM permission to create the VPC/IAM roles/EKS resources eksctl needs.                                                                                           | Use an admin/owner role, or ask whoever manages the account for the missing permissions; re-run once granted (eksctl is safe to re-run — it picks up where CloudFormation left off)      |

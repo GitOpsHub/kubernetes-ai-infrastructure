@@ -384,17 +384,13 @@ sequenceDiagram
   P->>P: trainer.train(resume_from_checkpoint=...)
 ```
 
-**Reading this diagram:** time flows top to bottom, and each arrow is one event. Read it as a story: the
-training pod (`P`) is periodically saving checkpoints to the bucket (`B`) *before* anything goes wrong.
-Then EC2's spot reclamation (`Spot`) notifies the kubelet (`K`), which forwards a SIGTERM to the running
-process (`P`) — this is the *only* moment the pod is asked nicely to stop; if it doesn't finish within
-its grace period, Kubernetes kills it outright. `P` uses that window to save one more checkpoint, then
-exits with a specific failure code. The Argo controller (`A`) is watching the exit code, decides "this
-looks like an interruption, not a bug," and schedules a fresh pod — which then rediscovers the last
-completed checkpoint in the bucket and picks up training where the dead pod left off. Nothing here is
-Kubernetes automatically "resuming" a process; every step of the resume is application code in
-`finetune.py` reading `_COMPLETE` markers, which is why §3.0.5's convention is what actually makes this
-diagram true.
+**Reading this diagram:** the training pod (`P`) periodically saves checkpoints to the bucket (`B`)
+before anything goes wrong. A spot reclaim sends SIGTERM via the kubelet — the only moment the pod
+is asked nicely to stop before Kubernetes kills it outright — `P` uses that window to save one more
+checkpoint and exits with a specific code. Argo (`A`) reads that exit code, decides it looks like an
+interruption rather than a bug, and schedules a fresh pod, which rediscovers the last completed
+checkpoint and resumes from there. None of this is Kubernetes automatically "resuming" a process —
+every step is application code in `finetune.py` reading `_COMPLETE` markers (§3.0.5).
 
 1. **Bucket checkpoints.** `Trainer` saves to `/scratch/trainer-output` every `SAVE_STEPS` (50). The
    `BucketCheckpointCallback.on_save` hook copies each `checkpoint-N` to
@@ -1055,11 +1051,9 @@ is empty, and `Outputs` shows `model-path: /mnt/store/runs/qwen3-sft-001/model`.
 typically takes 15–30 min on a T4 (`g4dn.xlarge`) and longer on higher-end GPUs, plus a few
 minutes the first time a GPU node pulls the large trainer image.
 
-#### Step 8: Watch the steps (and run the spot drill)
+#### Step 8: Watch the steps
 
-What you're about to do: read each step's logs while the workflow runs (use a second terminal), then
-simulate a spot interruption by deleting the finetune pod mid-training. Deleting the pod sends SIGTERM
-with the pod's 110 s grace period, the same path a spot drain takes.
+What you're about to do: read each step's logs while the workflow runs (use a second terminal).
 
 ```bash
 kubectl -n ch19-pipelines get pods -l workflows.argoproj.io/workflow -o wide
@@ -1079,51 +1073,12 @@ trainable params: ~10.1M || all params: ~606M || trainable%: ~1.67
 [finetune] checkpoint uploaded: /mnt/store/runs/qwen3-sft-001/checkpoints/checkpoint-50 (N files)
 ```
 
-Once at least one checkpoint has been uploaded, run the drill:
-
-```bash
-FT_POD=$(kubectl -n ch19-pipelines get pods --no-headers -o custom-columns=:metadata.name | grep -- -finetune- | tail -1)
-kubectl -n ch19-pipelines delete pod "$FT_POD" --wait=false
-kubectl -n ch19-pipelines logs -f "$FT_POD" -c main
-```
-
-Expected output (abridged, the step number is wherever you interrupted):
-
-```
-[finetune] SIGTERM received: will checkpoint at the end of the current step and exit
-[finetune] checkpoint uploaded: /mnt/store/runs/qwen3-sft-001/checkpoints/checkpoint-73 (N files)
-[finetune] stopped at step 73 after SIGTERM; exiting 143 so the step is retried
-```
-
-Then Argo waits out the backoff (30 s) and starts a new attempt. Follow it:
-
-```bash
-sleep 45
-FT_POD=$(kubectl -n ch19-pipelines get pods --no-headers -o custom-columns=:metadata.name | grep -- -finetune- | tail -1)
-kubectl -n ch19-pipelines logs -f "$FT_POD" -c main | grep -E "RESUMING|checkpoint uploaded|training complete|merged model"
-```
-
-Expected output (abridged):
-
-```
-[finetune] RESUMING from /mnt/store/runs/qwen3-sft-001/checkpoints/checkpoint-73
-[finetune] checkpoint uploaded: /mnt/store/runs/qwen3-sft-001/checkpoints/checkpoint-100 (N files)
-...
-[finetune] training complete: step=200 train_loss=...
-[finetune] merged model written to /mnt/store/runs/qwen3-sft-001/model (N files)
-```
-
-**How to tell this worked**: the second attempt logs `RESUMING from .../checkpoint-<the step you
-interrupted>`, not "starting from scratch". `argo get -n ch19-pipelines @latest` shows `finetune` with
-two attempts, the first failed with exit 143 and the second succeeded. The evaluate step then prints
-its metrics JSON and `[evaluate] gate passed: eval_loss ... <= MAX_EVAL_LOSS 2.5`.
-
-If a whole workflow fails, for example because it ran out of retries while spot capacity was dry, two
-recoveries resume the same checkpoints. `argo retry -n ch19-pipelines <wf>` re-runs the failed nodes of
-the **same** workflow, with the same parameters and so the same `run-id`. Submitting again with the same
-`-p run-id=qwen3-sft-001` works too. Avoid `argo resubmit` unless you also pass `-p run-id=...`: it
-creates a new workflow, and a `run-id` that came from the `{{workflow.name}}` default would change,
-which means starting from scratch.
+To manually resume a workflow that failed for any reason (e.g. it ran out of retries), `argo retry -n
+ch19-pipelines <wf>` re-runs the failed nodes of the **same** workflow, with the same parameters and
+so the same `run-id` — §3.4's resume logic picks up from the last completed checkpoint. Submitting
+again with the same `-p run-id=qwen3-sft-001` works too. Avoid `argo resubmit` unless you also pass
+`-p run-id=...`: it creates a new workflow, and a `run-id` that came from the `{{workflow.name}}`
+default would change, which means starting from scratch.
 
 #### Step 9: Inspect the bucket
 
@@ -1379,29 +1334,21 @@ huggingface.co contains `model.safetensors`, `config.json` and the tokenizer fil
 
 ## 5. Spot considerations
 
-- **Training is designed around losing the node.** Checkpoints go to the bucket every `SAVE_STEPS`
-  (50), which caps lost work at 50 steps. The SIGTERM path saves the current step when a
-  drain gives notice. The retry expression `lastRetry.exitCode != "1"` retries interruptions up to 10
-  times with 30 s → 10 min backoff, and never retries a Python exception. `activeDeadlineSeconds`
-  caps each attempt (4 h) and the whole workflow (6 h), so a pool with no spot capacity can't retry
-  forever.
-- **Grace periods match each cloud's notice.** The finetune pod gets 110 s: most of EC2's 2-minute
-  notice, enough to finish a step and upload an adapter checkpoint. The evaluate pod gets 30 s, since
-  it has nothing to save and a retry re-reads `metrics.json` or re-scores. vLLM keeps chapter 09's 25 s.
-- **Pull steps are cheap to retry** (`retryPolicy: Always`, limit 3). A half-copied revision has no
-  `_COMPLETE`, and the re-run skips files that are already there and identical.
-- **Serving from the bucket makes a reclaim cheaper.** On day 1 (`MODEL_PATH=Qwen/Qwen3-0.6B`), every
-  rescheduled vLLM pod downloads from the Hub again into an `emptyDir`. After Step 10, a replacement pod
-  reads same-region objects through Mountpoint instead. It's still a single-replica `Recreate`
-  Deployment, so a reclaim is still an outage until the new pod passes its startup probe (see chapter
-  10 for scaling it).
-- **The spot label matches GPU nodes too.** The workflow-level selector
-  `eks.amazonaws.com/capacityType: SPOT` also matches the GPU nodes. The `nvidia.com/gpu` taint keeps
-  the CPU steps off them. The GPU steps add `nvidia.com/gpu.present: "true"` at template level, which
-  *replaces* the workflow-level selector in Argo.
-- **On-demand fallback.** `INCLUDE=ch19-cpu-ondemand` in Step 1's node-group commands. The
-  manifests still select spot capacity (`eks.amazonaws.com/capacityType: SPOT`), so edit the
-  `nodeSelector` in the relevant `eks/*.yaml` file to actually use the fallback. For GPUs, use
+- Training's checkpoint/resume design (§3.4) is what makes this pipeline safe on spot;
+  `activeDeadlineSeconds` caps each attempt (4h) and the whole workflow (6h) so a pool with no
+  spot capacity can't retry forever.
+- Grace periods match each step's save cost: finetune gets 110s (most of EC2's 2-minute notice, to
+  finish a step and upload a checkpoint), evaluate gets 30s (nothing to save), vLLM keeps chapter
+  09's 25s. Pull steps just retry (`retryPolicy: Always`, limit 3) since a half-copied revision has
+  no `_COMPLETE`.
+- Serving from the bucket (after Step 10) makes a vLLM reclaim cheaper to recover from than
+  re-downloading from the Hub — still an outage until the replacement pod passes its startup probe
+  (single-replica `Recreate` Deployment; see chapter 10 for scaling it).
+- The workflow-level `eks.amazonaws.com/capacityType: SPOT` selector also matches GPU nodes; the
+  `nvidia.com/gpu` taint keeps CPU steps off them, and GPU steps override it with
+  `nvidia.com/gpu.present: "true"` at template level.
+- On-demand fallback: `INCLUDE=ch19-cpu-ondemand` in Step 1's node-group commands, plus editing the
+  `nodeSelector` in the relevant `eks/*.yaml` file (manifests still default to spot); for GPUs, use
   chapter 01's on-demand pool.
 
 ## 6. Troubleshooting

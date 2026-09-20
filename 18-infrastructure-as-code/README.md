@@ -298,10 +298,8 @@ access control, same as any other secret store.
 
 ### 3.4 What the module keeps from chapter 00's spot-first defaults
 
-- **The GPU pool always starts at `min = 0` / `desired = 0`.** Terraform won't change this default;
-  you'd have to explicitly raise it, same discipline as chapter 00's cost guardrails.
-- **The spot CPU pool has no auto-added taint.** EKS managed node groups don't taint spot capacity by
-  default, matching chapter 00's CLI-created node group — add one yourself if your workloads need it.
+The module inherits chapter 00's spot-first nodegroup defaults as-is — GPU pool `min`/`desired`
+of 0, no auto-added taint on the spot CPU pool — see chapter 00 §5 for the reasoning.
 
 ## 4. Lab
 
@@ -404,11 +402,9 @@ chapter's scope), uncomment the block, fill in the name, then run `terraform ini
 
 ## 5. Spot considerations for this chapter
 
-- Every spot field mirrors chapter 00 exactly: `capacity_type = "SPOT"` on both managed node groups.
-- The GPU pool's `min`/`desired` size is `0` — Terraform doesn't change the cold-start trade-off from
-  chapter 00 (§5 there): first GPU pod still means node boot + driver + image pull.
-- A `terraform apply` that scales the spot pool's `max` up doesn't guarantee capacity exists — same
-  spot capacity caveats as chapter 00 §6 apply regardless of how the pool was created.
+Every spot field (`capacity_type = "SPOT"`, GPU pool `min`/`desired = 0`) mirrors chapter 00 exactly
+— Terraform doesn't change the cold-start or capacity-availability trade-offs from chapter 00 §5–6,
+it just applies the same fields through a different tool.
 
 ## 6. Troubleshooting
 

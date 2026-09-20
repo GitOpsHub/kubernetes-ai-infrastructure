@@ -556,16 +556,9 @@ Review each section above for CrashLoopBackOff/Pending/0-ready before calling th
 
 ## 5. Spot considerations
 
-**If you take one warning from this whole chapter, take this one: GPU spot capacity is the most
-expensive thing this course touches, and this is the only chapter that keeps several GPU/autoscaling
-chapters' resources running simultaneously instead of one at a time.** A spot instance is spare AWS
-EC2 capacity sold at a discount (often 60–90% off on-demand) with one condition: AWS can reclaim it
-with only a couple minutes' notice when it needs that capacity back. That trade — cheap, but
-revocable — is why every chapter in this course defaults to it, and why "what happens when a node
-disappears mid-work" is a first-class design question, not an edge case, for everything you build
-here. This chapter changes nothing about that trade-off itself, but running every earlier chapter's
-spot-backed workload *together* surfaces interactions a single chapter's lab never demonstrates on
-its own:
+This is the only chapter that keeps several GPU/autoscaling chapters' spot-backed resources running
+simultaneously instead of one at a time, which surfaces interactions no single chapter's lab
+demonstrates on its own:
 
 - **A spot reclaim during phase 3's TrainJob** triggers chapter 07's `TrainingRuntime` restart
   policy (`maxRestarts: 10`, `restartStrategy: Recreate`) — the *whole* 2-node gang is recreated and

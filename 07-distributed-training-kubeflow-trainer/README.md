@@ -61,22 +61,18 @@ more sense once you know what problem it's solving.
   automatically, and — critically for this chapter — knows how to recreate *the whole group
   together* when one pod is lost, instead of leaving the survivors hung forever. §3.2 below covers
   exactly how.
-- **Why spot preemption is worse here than anywhere else in this course**: in earlier chapters, a
-  spot-reclaimed pod running a stateless inference server just gets rescheduled and traffic resumes
-  a few seconds later — no other pod cared that it briefly disappeared. In DDP, every rank is
-  waiting on every other rank at every synchronization point. If AWS reclaims the node under rank
-  1, rank 0 doesn't notice "one fewer worker" and carry on — it calls `all_reduce` and blocks
-  forever waiting for a peer that no longer exists, until a timeout eventually kills it too. One
-  preempted pod can silently stall (and, once NCCL's watchdog fires, crash) a job that was using
-  every other GPU in the group. That's the core operational problem this chapter's `failurePolicy`
-  and checkpointing solve.
-- **What checkpointing buys you**: since a preempted rank can force the *entire* gang to be
-  recreated (§3.2), you want the fresh set of pods to pick up from the last saved point in training
-  rather than starting the whole run over from step 0. A **checkpoint** is a snapshot of the
-  model's weights (and optimizer state) written to durable storage periodically during training.
-  Without one, a spot reclaim near the end of a long run throws away all of that run's progress —
-  §4.5 has you trigger exactly that scenario against the real S3-backed checkpoint volume this
-  chapter sets up in §4.3.
+- **Why losing one pod is worse here than anywhere else in this course**: in earlier chapters, a
+  reclaimed pod running a stateless inference server just gets rescheduled and traffic resumes a
+  few seconds later — no other pod cared that it briefly disappeared. In DDP, every rank is
+  waiting on every other rank at every synchronization point. Lose the node under rank 1, and rank
+  0 doesn't notice "one fewer worker" and carry on — it calls `all_reduce` and blocks forever
+  waiting for a peer that no longer exists, until a timeout eventually kills it too. That's the
+  core operational problem this chapter's `failurePolicy` and checkpointing solve.
+- **What checkpointing buys you**: since one lost rank can force the *entire* gang to be recreated
+  (§3.2), you want the fresh set of pods to pick up from the last saved point rather than starting
+  the whole run over from step 0. A **checkpoint** is a snapshot of the model's weights (and
+  optimizer state) written to durable storage periodically during training — §4.5 has you trigger
+  a simulated reclaim against the real S3-backed checkpoint volume this chapter sets up in §4.3.
 
 A distributed training run is not a bag of independent pods — it's a **gang**: `torchrun` needs
 every rank up and rendezvoused before any of them can make progress, and if one rank dies the
@@ -199,7 +195,7 @@ The Trainer **torch plugin** reads `numNodes`/`numProcPerNode` off the TrainJob 
 `PET_MASTER_PORT=29500` into every pod — `torchrun /workspace/scripts/train_ddp.py` needs no
 rendezvous flags at all (see `eks/trainjob-ddp-gpu.yaml`).
 
-### 3.2 Gang failure handling on spot
+### 3.2 Gang failure handling
 
 DDP's process group has a **fixed world size**. If rank 1's pod is evicted, rank 0 doesn't
 degrade to "1 worker" — it hangs on the next `all_reduce` until NCCL's watchdog times out. Two
@@ -601,18 +597,14 @@ Expected log lines (rank 0):
 How to tell this worked: `kubectl -n ch07-training get pods` shows 2 `Running` pods (one per
 rank) and neither log stream shows a NCCL timeout.
 
-### 4.5 Simulate a spot reclaim
+### 4.5 Simulate a reclaim
 
 What you're about to do: delete the rank-1 pod to simulate a spot reclaim mid-run, and watch the
-JobSet recreate the whole gang instead of just the one pod.
-
-Why deleting a pod is a faithful simulation of a real spot reclaim: from Kubernetes' point of
-view, AWS reclaiming a spot instance and you running `kubectl delete pod` look the same — in both
-cases, a pod that was `Running` abruptly disappears without a clean exit. This lets you rehearse
-the failure and recovery path (and time it) without needing to wait for an actual, unpredictable
-spot interruption or fake one at the EC2 level. This is the single most important exercise in the
-chapter — it's where §1.0's "one lost pod can kill the whole job" and §3.2's `Recreate` policy stop
-being theory and become something you watch happen.
+JobSet recreate the whole gang instead of just the one pod. From Kubernetes' point of view, a real
+spot reclaim and `kubectl delete pod` look the same — a `Running` pod abruptly disappears without
+a clean exit — so this rehearses the failure and recovery path without waiting for an actual,
+unpredictable interruption. This is the single most important exercise in the chapter: it's where
+§1.0's "one lost pod can kill the whole job" and §3.2's `Recreate` policy stop being theory.
 
 ```bash
 kubectl -n ch07-training delete pod \
@@ -647,17 +639,16 @@ they did on spot — just at 2-4x the hourly cost (§7), so switch back to spot 
 
 ## 5. Spot considerations
 
-- **Why gang-recreate, not per-pod restart**: a lone new rank 1 can't rejoin an already-formed
-  NCCL group at a different `MASTER_ADDR` epoch — recreating the JobSet's Jobs makes every rank
-  re-run the rendezvous handshake together.
-- **Grace period budget**: `terminationGracePeriodSeconds: 25` assumes checkpoint writes are fast
-  (small demo model). Size this to your real checkpoint's upload time to the bucket — EKS gives
-  ~2 minutes of spot notice, so you have room to grow this if a real checkpoint needs longer.
-- **`CHECKPOINT_EVERY`**: the more often you checkpoint, the less work a reclaim throws away, at
-  the cost of bucket PUT traffic — tune `eks/trainjob-ddp-gpu.yaml`'s env for your model size.
-- **On-demand fallback**: the plain `eks/trainjob-ddp-gpu.yaml` here doesn't run mixed
-  spot+on-demand — for that layer the Kueue admission steps in §3.4, which is what actually picks
-  the flavor at admission time. §4.6 covers the simpler manual on-demand fallback.
+- **Gang-recreate, not per-pod restart**: a lone new rank 1 can't rejoin an already-formed NCCL
+  group at a different `MASTER_ADDR` epoch — recreating the JobSet's Jobs makes every rank re-run
+  rendezvous together (§3.2).
+- **Grace period budget**: `terminationGracePeriodSeconds: 25` assumes fast checkpoint writes
+  (small demo model). Size this to your real checkpoint's upload time — EKS gives ~2 minutes of
+  spot notice, so there's room to grow it.
+- **`CHECKPOINT_EVERY`** trades reclaim cost against bucket PUT traffic — tune it for your model
+  size in `eks/trainjob-ddp-gpu.yaml`.
+- **On-demand fallback**: the plain `eks/trainjob-ddp-gpu.yaml` doesn't run mixed spot+on-demand —
+  layer Kueue admission (§3.4) for that, or use §4.6's manual fallback.
 
 ## 6. Troubleshooting
 

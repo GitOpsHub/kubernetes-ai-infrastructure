@@ -752,23 +752,15 @@ first, exactly as chapter 04's own troubleshooting table teaches.
 
 ## 5. Spot considerations
 
-- **Draining and spot reclaims are different events that look similar** — section 3.1 is the whole
-  point: PDBs protect you from the first, never from the second. Don't assume a PDB is a spot
-  survival strategy; checkpointing and `podFailurePolicy` (chapter 06) are.
-- **A spot reclaim storm can starve the drain lab of nodes to demonstrate on** — if your spot pool
-  is actively churning, `drain-node.sh` may cordon a node that gets reclaimed out from under you
-  mid-drain. That's not a bug in the script; it's the exact distinction section 3.1 draws.
-- **Run Velero's server and OpenCost on the CPU/on-demand pool, never GPU spot** — same reasoning as
-  chapter 04's monitoring stack: the moment a GPU node is reclaimed is exactly when you don't want
-  your backup controller or cost exporter to also disappear. Neither this chapter's Velero Helm
-  install nor its OpenCost Helm install pins a `nodeSelector` by default (chart defaults schedule
-  wherever fits) — if your cluster's default scheduling could land these on a GPU spot node, add one.
-- **CSI volume snapshots have their own spot interaction**: a snapshot request against a PVC whose
-  pod just got evicted by a spot reclaim can race the reclaim itself. Velero retries; if backups of
-  a specific PVC are flaky, check whether that PVC's pod churns heavily on spot first.
-- **The GPU Operator upgrade's brief per-node disruption (section 3.2) stacks with spot risk** — a
-  node mid-driver-restart that then gets reclaimed pays both costs. Doing upgrades one pool at a
-  time (never the whole fleet) limits the blast radius of that overlap.
+- Don't treat a PDB as a spot survival strategy — see §3.1 for why draining and spot reclaims are
+  different events. Checkpointing and `podFailurePolicy` (chapter 06) are the actual spot mitigation.
+- A spot reclaim storm can cordon-then-lose a node mid-drain in the Step 1 lab — not a script bug.
+- Run Velero's server and OpenCost on the CPU/on-demand pool, not GPU spot, so your backup
+  controller/cost exporter doesn't disappear along with a reclaimed GPU node; neither Helm install
+  pins a `nodeSelector` by default, so add one if your cluster's scheduling could land them on spot.
+- CSI volume snapshots can race a spot reclaim on the PVC's pod; Velero retries automatically.
+- A GPU Operator upgrade's per-node driver-restart disruption (§3.2) stacks with spot risk — roll
+  out one pool at a time to limit the overlap.
 
 ## 6. Troubleshooting
 

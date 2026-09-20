@@ -737,14 +737,12 @@ policies, Kyverno's webhook isn't actually being called — check `kubectl get v
 - Every control in this chapter is orthogonal to spot vs on-demand — RBAC/quota/NetworkPolicy/
   PSA/admission policies apply identically regardless of which ResourceFlavor (chapter `06`)
   admitted the pod.
-- One real interaction: a **preempted spot pod's replacement** goes through admission again —
-  make sure your ValidatingAdmissionPolicies and Kyverno rules are cheap (CEL) or your webhook
-  is fast (Kyverno `admissionController.replicas` ≥ 2 in production), or spot-churn amplifies
-  into API-server/webhook latency exactly when the cluster is already reshuffling pods.
-- Pin the Kyverno admission controller and ESO controller off spot for the same reason chapter
-  `06` pins the Kueue controller off spot: if the thing enforcing/supplying your security
-  policy is itself reclaimed, every new pod creation stalls or (with `failurePolicy: Fail`)
-  gets rejected cluster-wide until it reschedules.
+- One real interaction: a **preempted spot pod's replacement** goes through admission again, so
+  spot-churn amplifies into API-server/webhook latency if your Kyverno rules aren't cheap (CEL) or
+  the webhook isn't scaled (`admissionController.replicas` ≥ 2 in production).
+- Pin the Kyverno and ESO controllers off spot for the same reason chapter `06` pins the Kueue
+  controller off spot — if the thing enforcing your security policy is itself reclaimed, pod
+  creation stalls or (`failurePolicy: Fail`) gets rejected cluster-wide until it reschedules.
 
 ## 6. Troubleshooting
 

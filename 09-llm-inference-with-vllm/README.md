@@ -486,18 +486,12 @@ PV in place of `hf-cache`.
 
 ## 5. Spot considerations
 
-- **Cold start is the real cost, not preemption frequency.** A vLLM pod's `startupProbe` budget
-  (10 min) exists *because* weight download + CUDA graph capture takes minutes — a spot reclaim
-  mid-serving means the next pod pays that cost again unless the model cache PVC (or an image with
-  baked-in weights) survives the reclaim.
-- **`terminationGracePeriodSeconds: 25` is conservative relative to EC2's ~2 min spot notice
-  window.** You can raise it and `--shutdown-timeout` together for a cleaner drain if you want more
-  margin for in-flight requests to finish.
-- **`replicas: 1` + `strategy: Recreate` means a preemption is a real outage**, not a rolling
-  no-op — there's no second replica to absorb traffic. Chapter `10-autoscaling-inference` covers
-  scaling replicas with HPA/KEDA; until then, expect single-replica downtime during reclaims.
-- **PDB (`pdb.yaml`, `minAvailable: 1`) only blocks voluntary disruption** (node drain, cluster
-  upgrade) — it cannot stop a spot reclaim, which is involuntary.
+- **Cold start, not preemption frequency, is the real cost** — a reclaim mid-serving means the next
+  pod pays vLLM's multi-minute startup again unless the model cache PVC survives it.
+- **`replicas: 1` + `strategy: Recreate` means a reclaim is a real outage**, not a rolling no-op.
+  Chapter `10-autoscaling-inference` covers multi-replica HPA/KEDA scaling.
+- **The PDB (`pdb.yaml`) only blocks voluntary disruption** (node drain, cluster upgrade) — it
+  can't stop an involuntary spot reclaim.
 
 ## 6. Troubleshooting
 

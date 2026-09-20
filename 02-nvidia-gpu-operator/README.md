@@ -356,11 +356,6 @@ like chapter 01 — proving the Operator's driver/toolkit/plugin chain is a drop
 
 ## 5. Spot considerations
 
-> **Spot capacity is the default in this repo, and it costs real money the moment a GPU node group
-> scales above zero.** Everything below assumes you understand that a spot GPU instance can be
-> reclaimed by AWS at any time with a two-minute warning — read this section before you walk away
-> from a running lab.
-
 - **The device plugin, GFD, DCGM-exporter, and MIG-manager DaemonSets all need the spot taint
   toleration**, not just your workload — same lesson as chapter 01, now for every Operator-managed
   DaemonSet at once. `daemonsets.tolerations` in `values-eks.yaml` is the one place this is set

@@ -281,15 +281,10 @@ means: define the instance type(s), min/max/desired size, AMI family, taints and
 AWS manage the underlying Auto Scaling Group's lifecycle (including, per the `spot: true` field,
 sourcing that capacity from the EC2 Spot market).
 
-**Spot vs on-demand — what you're actually trading for the discount.** On-demand EC2 pricing is the
-"full price, guaranteed until you release it" model. **Spot** instances are spare EC2 capacity AWS
-sells at a steep discount (commonly 60–90% off on-demand for GPU instance types) with one condition:
-AWS can reclaim (terminate) the instance with as little as a two-minute warning whenever it needs that
-capacity back for on-demand customers. For a course budget, spot is the obvious default — but it means
-any workload here can be killed mid-run with almost no notice, which is why this chapter deliberately
-runs the CUDA workload as a **Job** (retries a killed run) rather than a bare Pod (just dies, no
-retry). Section 5 below covers this in detail; the short version is: expect interruptions, design for
-them, never assume a spot GPU node will still be there in an hour.
+**Spot vs on-demand** — see chapter 00 section 1 for the general tradeoff. Here it means the CUDA
+workload can be killed mid-run with almost no notice, which is why this chapter runs it as a **Job**
+(retries a killed run) rather than a bare Pod (just dies, no retry) — section 5 below covers the
+chapter-specific handling.
 
 **The NVIDIA device plugin — the thing that actually creates the `nvidia.com/gpu` resource.** A
 "device plugin" is Kubernetes' official extension point (a small gRPC server, run as a DaemonSet pod
@@ -620,18 +615,8 @@ combination of all three, not any one alone.
   `values-device-plugin.yaml`'s `tolerations` if the plugin DaemonSet never schedules onto the spot
   GPU pool (`nvidia.com/gpu` never shows up as allocatable at all).
 - **On-demand fallback**: `INCLUDE=ondemand-gpu` when creating the node group creates the second,
-  non-spot nodegroup defined in `gpu-nodegroups.yaml`.
-
-Why each of these matters in practice, if you've never run spot capacity before: the first bullet is
-about not wasting your own time — a beginner's instinct when a pod stays `Pending` for five minutes is
-to assume something is broken and start deleting/recreating things, when the real answer is often
-"wait, the instance is still booting." The second and third bullets are both instances of the same
-underlying idea from 3.0 — spot capacity can vanish at any moment, so anything you actually care about
-finishing needs a controller (`Job`, `Deployment`, etc.) that notices the pod died and reacts, and
-every component in the chain (not just your workload's pod, but the device plugin's own pod) needs to
-be able to reschedule itself onto whatever spot node shows up next. The fourth bullet is your escape
-hatch during grading/demos/anything time-sensitive: on-demand costs 2–4× more (section 7) but won't be
-reclaimed out from under you mid-demo.
+  non-spot nodegroup defined in `gpu-nodegroups.yaml`. Costs 2–4× more (section 7) but won't be
+  reclaimed mid-demo.
 
 ## 6. Troubleshooting
 

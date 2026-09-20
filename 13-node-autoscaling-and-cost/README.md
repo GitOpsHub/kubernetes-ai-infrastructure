@@ -479,33 +479,22 @@ kubectl -n ch13-autoscale scale deploy/scale-demo --replicas=0
 
 ## 5. Spot considerations
 
-This ENTIRE chapter is spot considerations — the autoscaler is the thing that makes spot
-practical at all (manually swapping between spot and on-demand node pools doesn't scale). Three
-points specific to the node-autoscaling layer itself, beyond what chapters 01/09/12 already cover
-for the workloads running on top of it:
+This chapter's node-autoscaling layer is what makes spot practical at scale (section 3.2/3.4 cover
+the mechanics). Three points specific to this layer, beyond what chapters 01/09/12 already cover for
+the workloads running on top of it:
 
-1. **Consolidation isn't free**: `consolidationPolicy: WhenEmptyOrUnderutilized` will move Pods
-   (by cordoning + draining) to bin-pack nodes tighter, which is itself a voluntary disruption —
-   respect PodDisruptionBudgets the same way chapter 09 does, or a stateful multi-node LWS group
-   (chapter 12) can get shuffled mid-run. Concretely: if a `LeaderWorkerSet` group's leader and
-   workers happen to land across two GPU nodes, and Karpenter later decides it can consolidate one
-   of those nodes into another, evicting even one worker Pod from that group can — depending on the
-   group's restart policy — restart the *entire* multi-node serving group, not just the one Pod.
-   That's a multi-minute reload for a production inference endpoint over what was, from the node
-   layer's point of view, a routine cost optimization. The concrete mitigations: a PodDisruptionBudget
-   tight enough to block the eviction, a separate `NodePool` for LWS nodes with disruption disabled or
-   a long `consolidateAfter`, or accepting the periodic reload as a known cost.
-2. **Provisioning a brand-new node with Karpenter is still not instant** — a fresh EC2 instance
-   takes on the order of a minute or two to launch, boot, and register, which is faster than
-   creating an entirely new managed node group but still real latency; factor that into how
-   aggressively you can rely on scale-from-zero for latency-sensitive inference. Chapter 10's
-   `10-autoscaling-inference` pre-scaling/cold-start math assumes THIS chapter's node provisioning
-   time as an input — if you skipped timing Step 2, that's the number to go back and capture.
-3. **Diversify within a class, not across it**: `g4dn.xlarge` is the default single-GPU lab shape,
-   similar price/perf, safe to treat as interchangeable spot fallbacks. Don't diversify into a
-   completely different GPU class (e.g., falling back from L4 to A100) without your workload
-   actually being portable across that memory/compute jump — chapter 09's `--gpu-memory-utilization`
-   and TP settings are tuned per-GPU-type.
+1. **Consolidation isn't free**: `consolidationPolicy: WhenEmptyOrUnderutilized` bin-packs by
+   cordoning + draining, which is itself a voluntary disruption — respect PodDisruptionBudgets the
+   same way chapter 09 does. A `LeaderWorkerSet` group (chapter 12) spanning two nodes is the sharp
+   edge: consolidating one node can evict a worker and, depending on restart policy, restart the
+   *entire* group. Mitigate with a tight PDB, a separate `NodePool` with disruption disabled/a long
+   `consolidateAfter` for LWS nodes, or accept the periodic reload.
+2. **Provisioning a brand-new node is still not instant** — a fresh EC2 instance takes roughly a
+   minute or two to launch, boot, and register. Chapter 10's cold-start math assumes this chapter's
+   node provisioning time as an input.
+3. **Diversify within a GPU class, not across it**: `g4dn.xlarge` fallbacks stay similar price/perf;
+   don't diversify into a different GPU class (e.g. L4 to A100) without your workload's memory/TP
+   settings actually being portable across that jump.
 
 ## 6. Cost visibility
 
