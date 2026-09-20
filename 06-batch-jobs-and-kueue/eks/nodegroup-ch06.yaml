@@ -6,6 +6,7 @@ kind: ClusterConfig
 metadata:
   name: eks-ai-lab   # must match ${EKS_CLUSTER}
   region: us-east-1   # must match ${AWS_REGION}
+  version: "1.36"
 
 managedNodeGroups:
   - name: ch06-cpu-spot

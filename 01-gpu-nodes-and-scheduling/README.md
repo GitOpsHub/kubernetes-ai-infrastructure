@@ -433,7 +433,9 @@ shell.
   from the host driver, injected by the container runtime/CDI.
 - `cuda-vectoradd-job.yaml` — a real CUDA kernel (vector add) as a `Job` (`backoffLimit: 3`), so a
   spot preemption mid-run gets retried automatically.
-- `gpu-nodegroups.yaml` — the `eksctl` `ClusterConfig` for the GPU node group(s).
+- `gpu-nodegroups.yaml` — the `eksctl` `ClusterConfig` for the GPU node group(s), plus a small
+  `ch01-cpu-spot` spot CPU group (not included by default — `INCLUDE=ch01-cpu-spot` to create it)
+  for non-GPU scaffolding if you'd rather not borrow capacity from ch00's cluster-wide `spot-cpu`.
 - `values-device-plugin.yaml` — Helm values for the pinned NVIDIA device plugin chart.
 
 Both workload manifests already carry the EKS-specific `nodeSelector`/`tolerations` inline (section
@@ -675,7 +677,7 @@ YAML.
 kubectl delete -f 01-gpu-nodes-and-scheduling/eks/cuda-vectoradd-job.yaml --ignore-not-found
 kubectl delete -f 01-gpu-nodes-and-scheduling/eks/nvidia-smi-pod.yaml --ignore-not-found
 kubectl delete -f 01-gpu-nodes-and-scheduling/eks/namespace.yaml --ignore-not-found
-for ng in spot-gpu ondemand-gpu; do
+for ng in spot-gpu ondemand-gpu ch01-cpu-spot; do
   eksctl scale nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name "$ng" --nodes 0 --nodes-min 0 2>/dev/null || true
 done
 helm -n nvidia-device-plugin uninstall nvdp   # if you'll let the GPU Operator (ch02) manage the same nodes
@@ -684,8 +686,9 @@ In order: the three `kubectl delete -f --ignore-not-found` calls remove the work
 namespace) created by the Lab's plain `kubectl apply -f` calls — `--ignore-not-found` means this is
 safe to run even if you already deleted them or never created them, so it's safe to run defensively.
 The `for ng in
-spot-gpu ondemand-gpu` loop scales **both** possible node groups back to 0 desired nodes regardless of
-which one(s) you actually created (`--include` earlier may have created only `spot-gpu`) — scaling to
+spot-gpu ondemand-gpu ch01-cpu-spot` loop scales **all** possible node groups back to 0 desired nodes
+regardless of which one(s) you actually created (`--include` earlier may have created only
+`spot-gpu`) — scaling to
 `--nodes 0` is what actually stops billing, since EKS does not automatically scale idle node groups
 down for you (there is no cluster autoscaler configured in this chapter); the `2>/dev/null || true`
 suppresses and ignores the error if a given node group was never created in the first place. The final

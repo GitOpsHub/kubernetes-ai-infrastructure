@@ -6,6 +6,7 @@ kind: ClusterConfig
 metadata:
   name: ${EKS_CLUSTER}
   region: ${AWS_REGION}
+  version: "1.36"
 managedNodeGroups:
   # Diversified instance types = more spot pools to draw from = fewer interruptions.
   - name: ch19-cpu-spot

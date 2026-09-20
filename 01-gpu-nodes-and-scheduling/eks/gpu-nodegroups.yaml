@@ -9,6 +9,21 @@ metadata:
 
 
 managedNodeGroups:
+# Small spot CPU pool for this chapter's non-GPU steps (namespace/job scaffolding, kubectl
+# exercises) so they don't need to borrow capacity from ch00's cluster-wide spot-cpu group.
+- name: ch01-cpu-spot
+  amiFamily: AmazonLinux2023
+  instanceTypes: ["t3.small", "t3a.small", "t3.medium"]
+  spot: true
+  minSize: 0
+  desiredCapacity: 0
+  maxSize: 2
+  volumeSize: 20
+  labels:
+    workload: general
+    ai-lab/chapter: "01"
+  propagateASGTags: true
+
 # Spot first. amiFamily AmazonLinux2023 + GPU instance types => EKS-optimized AL2023 *NVIDIA* AMI
 # (driver, CUDA user-mode driver, nvidia-container-toolkit preinstalled; NO device plugin).
 # nvidia.com/gpu.present must be set here explicitly: eksctl's `labels:` becomes the entire

@@ -6,6 +6,7 @@ kind: ClusterConfig
 metadata:
   name: eks-ai-lab
   region: us-east-1
+  version: "1.36"
 managedNodeGroups:
   - name: ch05-cpu-spot
     amiFamily: AmazonLinux2023

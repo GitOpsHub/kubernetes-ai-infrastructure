@@ -508,7 +508,7 @@ kubectl delete -f 03-gpu-sharing-and-dra/eks/device-plugin-config.yaml --ignore-
 #   helm upgrade gpu-operator nvidia/gpu-operator -n gpu-operator --reuse-values \
 #     --set devicePlugin.config.name="" --set devicePlugin.config.default=""
 
-for ng in gpu-share-spot gpu-dra-spot gpu-mig-spot; do
+for ng in gpu-share-spot gpu-dra-spot gpu-mig-spot ch03-cpu-spot; do
   eksctl delete nodegroup --cluster "$EKS_CLUSTER" --region "$AWS_REGION" --name "$ng" --wait=false 2>/dev/null || true
 done
 rm -f 03-gpu-sharing-and-dra/eks/.nodegroups.rendered.yaml
