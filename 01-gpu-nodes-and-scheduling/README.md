@@ -106,57 +106,158 @@ won't refuse to schedule over). This chapter uses the simple form: both `eks/nvi
 `eks/cuda-vectoradd-job.yaml` carry a plain `nodeSelector` and matching `tolerations` directly in the
 manifest, so they land only on real GPU nodes.
 
+**Animate the basics first — no GPUs yet, just the two mechanisms.** Before applying any of this to
+GPUs, watch each mechanism on its own with plain, generic nodes. This is the core mental model the
+GPU-specific walkthrough below builds on: **taints push pods away, tolerations don't pull them toward
+anything; nodeSelector/affinity is the only thing that actually pulls.** (Animation plays on the
+[docs site](../website); GitHub strips `<style>` tags, so this renders as a static snapshot there.)
+
+<div align="center">
+
+<!-- prettier-ignore -->
+<style>
+.ch01-basics{--ok:#2e9e4d;--bad:#d64545;--plain:#4a90d9;font-family:inherit}
+.ch01-basics .panel{border:1px solid #ddd;border-radius:12px;padding:14px 16px;margin:14px 0;text-align:left}
+.ch01-basics .panel h4{margin:0 0 10px 0;font-size:14px}
+.ch01-basics .lane{display:flex;align-items:center;gap:14px;margin:10px 0;flex-wrap:wrap}
+.ch01-basics .nodebox{border:2px dashed #999;border-radius:10px;padding:8px 12px;min-width:120px;text-align:center;font-size:12px;position:relative}
+.ch01-basics .nodebox.tainted{border-color:var(--bad);border-style:solid}
+.ch01-basics .nodebox.labeled{border-color:var(--plain);border-style:solid}
+.ch01-basics .nodebox .flag{position:absolute;top:-10px;right:-10px;font-size:14px}
+.ch01-basics .podchip{border-radius:16px;padding:5px 10px;font-size:11px;color:#fff;min-width:120px;text-align:center}
+.ch01-basics .podchip.notol{background:var(--bad)}
+.ch01-basics .podchip.tol{background:var(--ok)}
+.ch01-basics .podchip.nosel{background:#999}
+.ch01-basics .podchip.sel{background:var(--ok)}
+.ch01-basics .track{flex:1;min-width:160px;height:2px;background:#ccc;position:relative}
+.ch01-basics .mover{position:absolute;top:-9px;font-size:16px;animation:ch01b-move 3s ease-in-out infinite}
+.ch01-basics .mover.reject{animation-name:ch01b-reject}
+.ch01-basics .mover.accept{animation-name:ch01b-accept}
+.ch01-basics .mover.pick{animation-name:ch01b-pick}
+@keyframes ch01b-reject{0%,10%{left:0}45%{left:70%}60%{left:35%}90%,100%{left:0}}
+@keyframes ch01b-accept{0%,10%{left:0}55%,90%{left:88%}100%{left:88%;opacity:0}}
+@keyframes ch01b-move{0%,10%{left:0}55%,90%{left:88%}100%{left:0}}
+@keyframes ch01b-pick{0%,10%{left:0}55%,100%{left:88%}}
+.ch01-basics .result{font-size:12px;font-weight:600;margin-left:6px}
+</style>
+
+<div class="ch01-basics">
+
+<div class="panel">
+<h4>1. Taints &amp; tolerations — a taint only <u>repels</u>, it never attracts</h4>
+<div class="lane">
+<span class="podchip notol">Pod (no toleration)</span>
+<div class="track"><span class="mover reject">🚀</span></div>
+<div class="nodebox tainted">Node 1<span class="flag">🚫</span><br/><small>taint: dedicated=true:NoSchedule</small></div>
+<span class="result">❌ repelled → reroutes to any untainted node</span>
+</div>
+<div class="lane">
+<span class="podchip tol">Pod (has toleration)</span>
+<div class="track"><span class="mover pick">🚀</span></div>
+<div class="nodebox tainted">Node 1<span class="flag">🚫</span><br/><small>taint: dedicated=true:NoSchedule</small></div>
+<span class="result">✅ allowed here <i>and</i> everywhere else — toleration ≠ preference</span>
+</div>
+</div>
+
+<div class="panel">
+<h4>2. nodeSelector / affinity — the only mechanism that actually <u>chooses</u></h4>
+<div class="lane">
+<span class="podchip nosel">Pod (no selector)</span>
+<div class="track"><span class="mover move">🚀</span></div>
+<div class="nodebox labeled">Node 1<span class="flag">🏷️</span><br/><small>label: disktype=ssd</small></div>
+<span class="result">➖ indifferent — could land on this node or any other</span>
+</div>
+<div class="lane">
+<span class="podchip sel">Pod (nodeSelector: disktype=ssd)</span>
+<div class="track"><span class="mover accept">🚀</span></div>
+<div class="nodebox labeled">Node 1<span class="flag">🏷️</span><br/><small>label: disktype=ssd</small></div>
+<span class="result">✅ pulled straight here — no match anywhere else = Pending</span>
+</div>
+</div>
+
+</div>
+</div>
+
+Put the two together and you get the GPU case below: the taint is what keeps *random* pods off the
+GPU node, and the label + `nodeSelector` pair is what makes a *GPU* pod actually land there instead of
+just being allowed to.
+
 **Animated walkthrough — four pods, one GPU node, two independent gates.** Taints/tolerations and
 nodeSelector/affinity are *two separate gates* a pod must pass, not one — this is the single most
-common source of confusion for newcomers, so watch all four combinations play out. (Animation plays on
-the [docs site](../website); GitHub strips `<style>` tags from rendered READMEs, so this section shows
-as a static snapshot there — read the outcome table below it either way.)
+common source of confusion for newcomers, so watch all four combinations play out. Every pod and node
+card below shows the **actual key/value** involved (the real taint and label from `gpu-nodegroups.yaml`,
+Step 1's `nodeadm` boot config), not just a generic "yes/no" — a green chip is what's required and
+present, a red chip is what's required and missing. (Animation plays on the [docs site](../website);
+GitHub strips `<style>` tags from rendered READMEs, so this section shows as a static snapshot there —
+read the outcome table below it either way.)
 
 <div align="center">
 
 <!-- prettier-ignore -->
 <style>
 .ch01-anim{--gpu:#76b900;--cpu:#4a90d9;--bad:#d64545;--good:#2e9e4d;font-family:inherit}
-.ch01-anim .row{display:flex;align-items:center;gap:18px;margin:14px 0;flex-wrap:wrap}
-.ch01-anim .node{border:2px solid #999;border-radius:10px;padding:10px 14px;min-width:150px;text-align:center;font-size:13px;position:relative}
-.ch01-anim .node.gpu{border-color:var(--gpu)}
-.ch01-anim .node .taint{position:absolute;top:-11px;right:-11px;background:#333;color:#fff;border-radius:50%;width:22px;height:22px;line-height:22px;font-size:12px}
-.ch01-anim .pod{border-radius:8px;padding:8px 12px;font-size:12px;min-width:170px;text-align:left;color:#fff;position:relative;animation:ch01-approach 2.6s ease-in-out infinite}
-.ch01-anim .pod.p1{background:var(--bad);animation-name:ch01-bounce}
-.ch01-anim .pod.p2{background:var(--bad);animation-name:ch01-drift}
-.ch01-anim .pod.p3{background:#b8860b;animation-name:ch01-approach}
-.ch01-anim .pod.p4{background:var(--good);animation-name:ch01-approach}
-.ch01-anim .verdict{margin-left:8px;font-weight:700;font-size:16px}
-@keyframes ch01-approach{0%,15%{transform:translateX(0)}45%,70%{transform:translateX(26px)}100%{transform:translateX(0)}}
-@keyframes ch01-bounce{0%,15%{transform:translateX(0)}40%{transform:translateX(20px)}55%{transform:translateX(4px)}70%{transform:translateX(20px)}85%,100%{transform:translateX(0)}}
-@keyframes ch01-drift{0%,15%{transform:translateX(0)}45%,100%{transform:translateX(26px)}}
-.ch01-anim .verdict.p1,.ch01-anim .verdict.p2{animation:ch01-flash 2.6s ease-in-out infinite}
-.ch01-anim .verdict.p3,.ch01-anim .verdict.p4{animation:ch01-flashgood 2.6s ease-in-out infinite}
+.ch01-anim .row{display:flex;align-items:center;gap:16px;margin:16px 0;flex-wrap:wrap}
+.ch01-anim .card{border:2px solid #999;border-radius:10px;padding:8px 12px;min-width:230px;text-align:left;font-size:12px;position:relative;background:#fff;color:#222}
+.ch01-anim .card.node{border-color:var(--gpu)}
+.ch01-anim .card .title{font-weight:700;font-size:13px;margin-bottom:4px}
+.ch01-anim .chip{display:inline-block;border-radius:5px;padding:2px 6px;margin:2px 3px 0 0;font-size:11px;font-family:monospace;color:#fff}
+.ch01-anim .chip.ok{background:var(--good)}
+.ch01-anim .chip.no{background:var(--bad);text-decoration:line-through}
+.ch01-anim .chip.fixed{background:#555}
+.ch01-anim .pod{animation:ch01-approach 2.6s ease-in-out infinite}
+.ch01-anim .row.p1 .pod{animation-name:ch01-bounce}
+.ch01-anim .row.p2 .pod{animation-name:ch01-drift}
+.ch01-anim .verdict{font-weight:700;font-size:14px;min-width:150px}
+@keyframes ch01-approach{0%,15%{transform:translateX(0)}45%,70%{transform:translateX(22px)}100%{transform:translateX(0)}}
+@keyframes ch01-bounce{0%,15%{transform:translateX(0)}40%{transform:translateX(16px)}55%{transform:translateX(2px)}70%{transform:translateX(16px)}85%,100%{transform:translateX(0)}}
+@keyframes ch01-drift{0%,15%{transform:translateX(0)}45%,100%{transform:translateX(22px)}}
+.ch01-anim .row.p1 .verdict,.ch01-anim .row.p2 .verdict{animation:ch01-flash 2.6s ease-in-out infinite}
+.ch01-anim .row.p3 .verdict,.ch01-anim .row.p4 .verdict{animation:ch01-flashgood 2.6s ease-in-out infinite}
 @keyframes ch01-flash{0%,40%{opacity:0}55%,100%{opacity:1}}
 @keyframes ch01-flashgood{0%,40%{opacity:0}45%,100%{opacity:1}}
 </style>
 
 <div class="ch01-anim">
 
-<div class="row"><div class="pod p1">Pod A<br/><i>no toleration, no selector</i></div>
+<div class="row p1">
+<div class="card pod"><div class="title">Pod A</div>
+<span class="chip no">toleration: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip no">nodeSelector: nvidia.com/gpu.present=true</span></div>
 <span>→</span>
-<div class="node gpu">GPU node<span class="taint">🚫</span></div>
-<span class="verdict p1">❌ blocked by taint (Pending)</span></div>
+<div class="card node"><div class="title">GPU node</div>
+<span class="chip fixed">taint: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip fixed">label: nvidia.com/gpu.present=true</span></div>
+<span class="verdict">❌ Pending — taint blocks it, nothing pulls it here either</span></div>
 
-<div class="row"><div class="pod p2">Pod B<br/><i>toleration ✔, no selector</i></div>
+<div class="row p2">
+<div class="card pod"><div class="title">Pod B</div>
+<span class="chip ok">toleration: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip no">nodeSelector: nvidia.com/gpu.present=true</span></div>
 <span>→</span>
-<div class="node gpu">GPU node<span class="taint">🚫</span></div>
-<span class="verdict p2">⚠️ may land on ANY untainted node, GPU or not</span></div>
+<div class="card node"><div class="title">GPU node</div>
+<span class="chip fixed">taint: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip fixed">label: nvidia.com/gpu.present=true</span></div>
+<span class="verdict">⚠️ Scheduled — but anywhere untainted, GPU node included by luck, GPU wasted</span></div>
 
-<div class="row"><div class="pod p3">Pod C<br/><i>no toleration, selector matches GPU label</i></div>
+<div class="row p3">
+<div class="card pod"><div class="title">Pod C</div>
+<span class="chip no">toleration: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip ok">nodeSelector: nvidia.com/gpu.present=true</span></div>
 <span>→</span>
-<div class="node gpu">GPU node<span class="taint">🚫</span></div>
-<span class="verdict p3">❌ selector says "go here", taint says "not without a toleration" (Pending)</span></div>
+<div class="card node"><div class="title">GPU node</div>
+<span class="chip fixed">taint: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip fixed">label: nvidia.com/gpu.present=true</span></div>
+<span class="verdict">❌ Pending — selector *demands* this node, taint still refuses it, no fallback</span></div>
 
-<div class="row"><div class="pod p4">Pod D<br/><i>toleration ✔ + selector matches</i></div>
+<div class="row p4">
+<div class="card pod"><div class="title">Pod D (= <code>nvidia-smi-pod.yaml</code>)</div>
+<span class="chip ok">toleration: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip ok">nodeSelector: nvidia.com/gpu.present=true</span></div>
 <span>→</span>
-<div class="node gpu">GPU node<span class="taint">🚫</span></div>
-<span class="verdict p4">✅ scheduled — this is what `nvidia-smi-pod.yaml` does</span></div>
+<div class="card node"><div class="title">GPU node</div>
+<span class="chip fixed">taint: nvidia.com/gpu=present:NoSchedule</span><br/>
+<span class="chip fixed">label: nvidia.com/gpu.present=true</span></div>
+<span class="verdict">✅ Scheduled on the GPU node, exactly as intended</span></div>
 
 </div>
 </div>
