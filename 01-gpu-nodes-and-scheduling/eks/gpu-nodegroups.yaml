@@ -5,6 +5,8 @@ kind: ClusterConfig
 metadata:
   name: ${EKS_CLUSTER}
   region: ${AWS_REGION}
+  version: "1.36"
+
 
 managedNodeGroups:
 # Spot first. amiFamily AmazonLinux2023 + GPU instance types => EKS-optimized AL2023 *NVIDIA* AMI
