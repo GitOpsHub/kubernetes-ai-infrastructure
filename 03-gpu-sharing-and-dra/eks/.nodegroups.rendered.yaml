@@ -1,0 +1,68 @@
+# eksctl nodegroups for chapter 03. EKS_CLUSTER / AWS_REGION placeholders are substituted by
+# the README's Lab section (sed + eksctl create nodegroup -f). All groups are Spot (managed node groups label them
+# eks.amazonaws.com/capacityType=SPOT). EKS-optimized AL2023 NVIDIA AMIs ship the driver and
+# container toolkit and label nodes nvidia.com/gpu.present=true.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: eks-ai-lab
+  region: us-east-1
+  version: "1.36"
+managedNodeGroups:
+  # 1) Time-slicing / MPS via the GPU Operator's device plugin. The per-node profile is chosen
+  #    with the nvidia.com/device-plugin.config label (keys from eks/device-plugin-config.yaml).
+  - name: gpu-share-spot
+    amiFamily: AmazonLinux2023
+    instanceTypes: ["g4dn.xlarge"]   # cheapest single-GPU spot option (T4)
+    spot: true
+    minSize: 0
+    desiredCapacity: 1
+    maxSize: 1
+    volumeSize: 100
+    labels:
+      course-chapter: "03"
+      nvidia.com/device-plugin.config: time-sliced-4   # switch to mps-4 later with kubectl label
+    taints:
+      - key: nvidia.com/gpu
+        value: "present"
+        effect: NoSchedule
+
+  # 2) DRA: the GPU Operator must NOT run its device plugin here (label below), the NVIDIA DRA
+  #    driver hands out these GPUs instead.
+  - name: gpu-dra-spot
+    amiFamily: AmazonLinux2023
+    instanceTypes: ["g4dn.xlarge"]
+    spot: true
+    minSize: 0
+    desiredCapacity: 0
+    maxSize: 1
+    volumeSize: 100
+    labels:
+      course-chapter: "03"
+      gpu-mode: dra
+      nvidia.com/gpu.deploy.device-plugin: "false"
+    taints:
+      - key: nvidia.com/gpu
+        value: "present"
+        effect: NoSchedule
+
+  # 3) ADVANCED / EXPENSIVE - MIG needs A100/H100-class GPUs (P4d/P5/P6, or Blackwell g7/g7e).
+  #    g6 (L4) and g4dn (T4) cannot do MIG. p4d.24xlarge = 8x A100 40GB. Spot capacity for P
+  #    instances is scarce; keep desiredCapacity 0 unless you really want to pay for it.
+  - name: gpu-mig-spot
+    amiFamily: AmazonLinux2023
+    instanceTypes: ["p4d.24xlarge"]
+    spot: true
+    minSize: 0
+    desiredCapacity: 0
+    maxSize: 1
+    volumeSize: 200
+    labels:
+      course-chapter: "03"
+      nvidia.com/mig.config: all-1g.5gb           # MIG Manager partitions every GPU into 7x 1g.5gb
+      nvidia.com/device-plugin.config: mig-single
+    taints:
+      - key: nvidia.com/gpu
+        value: "present"
+        effect: NoSchedule
+# ON-DEMAND FALLBACK: set spot: false (or remove it) on a copy of the group with a different name.
