@@ -42,7 +42,7 @@ spec:
                 echo "model already present at ${DEST}"; exit 0
               fi
               echo "downloading ${MODEL_ID}@${MODEL_REVISION}"
-              time uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
+              uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
                 --revision "${MODEL_REVISION}" \
                 --local-dir /scratch/model \
                 --exclude "*.md" --exclude ".gitattributes"
@@ -50,7 +50,7 @@ spec:
               echo "copying to ${DEST}"
               # skip hf's local metadata dir (.cache); copy regular files only
               for f in /scratch/model/*; do
-                time cp "$f" "${DEST}/"
+                cp "$f" "${DEST}/"
               done
               date -u +%Y-%m-%dT%H:%M:%SZ > "${DEST}/_COMPLETE"
               ls -la "${DEST}"

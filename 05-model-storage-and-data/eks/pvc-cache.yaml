@@ -46,7 +46,7 @@ spec:
               DEST="/cache/${MODEL_SUBDIR}"
               [ -f "${DEST}/_COMPLETE" ] && { echo "already cached"; exit 0; }
               # hf download is resumable: a retried pod after a spot reclaim continues where it stopped
-              time uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
+              uvx --from huggingface_hub==1.31.0 hf download "${MODEL_ID}" \
                 --revision "${MODEL_REVISION}" --local-dir "${DEST}" \
                 --exclude "*.md" --exclude ".gitattributes"
               date -u +%Y-%m-%dT%H:%M:%SZ > "${DEST}/_COMPLETE"
