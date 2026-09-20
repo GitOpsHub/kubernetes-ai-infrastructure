@@ -180,6 +180,7 @@ table thead tr {
   align-items: center;
   position: relative;
   margin: 0 0.5rem;
+  flex-shrink: 0;
 }
 
 .learning-navbar-badge-btn {
@@ -195,6 +196,8 @@ table thead tr {
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
@@ -891,6 +894,20 @@ table thead tr {
 
 .learning-modal-done-btn:hover {
   background: #4f52e8;
+}
+
+/* Reclaim horizontal space in the navbar before the right-side items (progress badge,
+   GitHub link, theme toggle, search) get tight enough to crowd or visually overlap. */
+@media (max-width: 1300px) {
+  .navbar__items--right {
+    gap: 0.25rem;
+  }
+  .learning-navbar-item-wrapper {
+    margin: 0 0.25rem;
+  }
+  .learning-navbar-mini-track {
+    display: none;
+  }
 }
 
 /* Mobile Responsiveness */

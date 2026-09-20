@@ -301,7 +301,7 @@ three animated SVG diagrams with a one-line-per-step breakdown underneath each o
 self-contained HTML page (no build step, no external service): [`storage-mounts-visual.html`](storage-mounts-visual.html).
 
 <!-- prettier-ignore -->
-<iframe src="storage-mounts-visual.html" title="EBS vs EFS vs S3 Mounts on EKS" loading="lazy" style="width:100%;height:2600px;max-width:1100px;border:1px solid #E4E1D6;border-radius:16px;display:block;margin:0 auto;"></iframe>
+<iframe src="storage-mounts-visual.html" title="EBS vs EFS vs S3 Mounts on EKS" loading="lazy" style="width:100%;height:min(80vh,900px);max-width:1100px;border:1px solid #E4E1D6;border-radius:16px;display:block;margin:0 auto;"></iframe>
 
 *(GitHub's README viewer strips embedded frames for security — if you're reading this on
 github.com, open [`storage-mounts-visual.html`](storage-mounts-visual.html) directly, or view the
